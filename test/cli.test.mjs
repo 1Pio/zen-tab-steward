@@ -54,12 +54,56 @@ test("CLI smokes cover help, version, status, workspaces, backup, and sort refus
   assert.equal(sortJson.ok, false);
   assert.match(sortJson.blockers.join("\n"), /Sort apply is not implemented/);
 
-  const missingSort = spawnSync("node", ["dist/cli.js", "sort", "Missing Workspace", "--json"], {
+  const sortWithKnownFlags = spawnSync(
+    "node",
+    [
+      "dist/cli.js",
+      "sort",
+      "Space",
+      "--preview",
+      "--min-confidence",
+      "0.85",
+      "--include-pinned",
+      "--to",
+      "Portfolio,Tool Development",
+      "--not-to",
+      "Stash",
+      "--only",
+      "github.com,*.framer.com",
+      "--except",
+      "youtube.com",
+      "--backend",
+      "session",
+      "--json"
+    ],
+    { env, encoding: "utf8" }
+  );
+  assert.equal(sortWithKnownFlags.status, 2);
+  const sortWithKnownFlagsJson = JSON.parse(sortWithKnownFlags.stdout);
+  assert.deepEqual(sortWithKnownFlagsJson.data.inputs.to, ["Portfolio", "Tool Development"]);
+  assert.deepEqual(sortWithKnownFlagsJson.data.inputs.notTo, ["Stash"]);
+  assert.equal(sortWithKnownFlagsJson.data.inputs.backend, "session");
+
+  const sortWithUnknownFlag = spawnSync("node", ["dist/cli.js", "sort", "Space", "--typo"], {
     env,
     encoding: "utf8"
   });
+  assert.equal(sortWithUnknownFlag.status, 1);
+  assert.match(sortWithUnknownFlag.stderr, /unknown option '--typo'/);
+
+  const missingSort = spawnSync(
+    "node",
+    ["dist/cli.js", "sort", "Missing Workspace", "--preview", "--to", "Portfolio", "--json"],
+    {
+      env,
+      encoding: "utf8"
+    }
+  );
   assert.equal(missingSort.status, 1);
-  assert.match(JSON.parse(missingSort.stdout).blockers.join("\n"), /Source workspace not found/);
+  const missingSortJson = JSON.parse(missingSort.stdout);
+  assert.match(missingSortJson.blockers.join("\n"), /Source workspace not found/);
+  assert.deepEqual(missingSortJson.data.inputs.to, ["Portfolio"]);
+  assert.equal(missingSortJson.data.inputs.preview, true);
 
   const restore = spawnSync("node", ["dist/cli.js", "backup", "restore", "missing", "--json"], {
     env,

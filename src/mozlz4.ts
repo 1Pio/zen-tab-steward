@@ -4,6 +4,7 @@ import { decompressBlock } from "lz4js";
 
 const MAGIC = Buffer.from([0x6d, 0x6f, 0x7a, 0x4c, 0x7a, 0x34, 0x30, 0x00]);
 const HEADER_LENGTH = 12;
+export const DEFAULT_MAX_DECOMPRESSED_BYTES = 256 * 1024 * 1024;
 
 export function decodeJsonLz4Buffer(buffer: Buffer): unknown {
   if (buffer.length < HEADER_LENGTH) {
@@ -15,6 +16,13 @@ export function decodeJsonLz4Buffer(buffer: Buffer): unknown {
   }
 
   const expectedLength = buffer.readUInt32LE(8);
+  const maxLength = maxDecompressedBytes();
+  if (expectedLength > maxLength) {
+    throw new Error(
+      `JSONLZ4 decompressed length ${expectedLength} exceeds safety cap ${maxLength}`
+    );
+  }
+
   const destination = new Uint8Array(expectedLength);
   const compressed = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
   const written = decompressBlock(
@@ -33,6 +41,14 @@ export function decodeJsonLz4Buffer(buffer: Buffer): unknown {
 
   const json = Buffer.from(destination).toString("utf8");
   return JSON.parse(json);
+}
+
+function maxDecompressedBytes(): number {
+  const configured = process.env.ZTS_MAX_JSONLZ4_DECOMPRESSED_BYTES;
+  if (!configured) return DEFAULT_MAX_DECOMPRESSED_BYTES;
+  const parsed = Number(configured);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_MAX_DECOMPRESSED_BYTES;
+  return Math.floor(parsed);
 }
 
 export async function readJsonLz4(path: string): Promise<unknown> {

@@ -118,20 +118,27 @@ program
   .argument("[source-workspace]", "source workspace name or id")
   .option("--preview", "show a glanceable preview without writing")
   .option("--dry-run", "show an operational dry run without writing")
+  .option("--min-confidence <number>", "minimum confidence required for future apply")
+  .option("--include-pinned", "include pinned tabs in future sort planning")
+  .option("--to <workspaces>", "comma-separated destination workspace allowlist")
+  .option("--not-to <workspaces>", "comma-separated destination workspace denylist")
+  .option("--only <patterns>", "comma-separated source URL/domain patterns")
+  .option("--except <patterns>", "comma-separated exclusion URL/domain patterns")
+  .option("--backend <backend>", "backend preference: auto, live, or session", "auto")
   .option("--json", "print stable JSON output")
-  .allowUnknownOption(true)
-  .action(async (sourceWorkspace: string | undefined, options: JsonOption & { preview?: boolean; dryRun?: boolean }) => {
+  .action(async (sourceWorkspace: string | undefined, options: JsonOption & SortOptions) => {
     await runCommand("sort", options, async () => {
       const context = await discoverProfileContext();
       const summary = await loadSessionSummary(context.sessionFile);
       const source = resolveSourceWorkspace(summary, sourceWorkspace);
+      const inputs = sortInputs(options);
       if (!source) {
         const message = sourceWorkspace
           ? `Source workspace not found: ${sourceWorkspace}`
           : "No source workspace could be resolved";
         const suggestedNextCommands = ["zts workspaces", "zts sort --preview"];
         if (options.json) {
-          printJson(envelope("sort", { sourceWorkspace: sourceWorkspace ?? null }, { ok: false, blockers: [message], suggestedNextCommands }));
+          printJson(envelope("sort", { sourceWorkspace: sourceWorkspace ?? null, inputs }, { ok: false, blockers: [message], suggestedNextCommands }));
         } else {
           process.stderr.write(`zts: ${message}\n`);
         }
@@ -146,6 +153,7 @@ program
         profile: context.profile,
         zenRunning: context.running,
         sourceWorkspace: source,
+        inputs,
         previewOnly: true,
         plannedActions: [],
         skippedActions: [],
@@ -181,6 +189,18 @@ program
     });
   });
 
+interface SortOptions {
+  preview?: boolean;
+  dryRun?: boolean;
+  minConfidence?: string;
+  includePinned?: boolean;
+  to?: string;
+  notTo?: string;
+  only?: string;
+  except?: string;
+  backend?: string;
+}
+
 program.parseAsync(process.argv);
 
 async function runCommand(command: string, options: JsonOption, action: () => Promise<void>): Promise<void> {
@@ -214,4 +234,26 @@ function resolveSourceWorkspace(summary: Awaited<ReturnType<typeof loadSessionSu
   }
   const normalized = input.toLowerCase();
   return summary.workspaces.find((workspace) => workspace.id === input || workspace.name.toLowerCase() === normalized) ?? null;
+}
+
+function splitCsv(value?: string): string[] {
+  if (!value) return [];
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function sortInputs(options: SortOptions) {
+  return {
+    preview: Boolean(options.preview),
+    dryRun: Boolean(options.dryRun),
+    minConfidence: options.minConfidence ?? null,
+    includePinned: Boolean(options.includePinned),
+    to: splitCsv(options.to),
+    notTo: splitCsv(options.notTo),
+    only: splitCsv(options.only),
+    except: splitCsv(options.except),
+    backend: options.backend ?? "auto"
+  };
 }

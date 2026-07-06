@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Buffer } from "node:buffer";
-import { decodeJsonLz4Buffer, encodeLiteralJsonLz4ForFixture } from "../dist/mozlz4.js";
+import {
+  DEFAULT_MAX_DECOMPRESSED_BYTES,
+  decodeJsonLz4Buffer,
+  encodeLiteralJsonLz4ForFixture
+} from "../dist/mozlz4.js";
 
 test("decodes synthetic Mozilla JSONLZ4 buffers", () => {
   const value = { spaces: [{ uuid: "w1", name: "Inbox" }], tabs: [] };
@@ -23,4 +27,11 @@ test("rejects decompressed length mismatches", () => {
   encoded.writeUInt32LE(999, 8);
 
   assert.throws(() => decodeJsonLz4Buffer(encoded), /decompressed length mismatch/);
+});
+
+test("rejects advertised decompressed sizes above the safety cap before allocation", () => {
+  const encoded = encodeLiteralJsonLz4ForFixture({ ok: true });
+  encoded.writeUInt32LE(DEFAULT_MAX_DECOMPRESSED_BYTES + 1, 8);
+
+  assert.throws(() => decodeJsonLz4Buffer(encoded), /exceeds safety cap/);
 });
