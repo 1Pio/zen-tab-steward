@@ -49,10 +49,12 @@ test("CLI smokes cover help, version, status, workspaces, backup, and sort refus
     env,
     encoding: "utf8"
   });
-  assert.equal(sort.status, 2);
+  assert.equal(sort.status, 0);
   const sortJson = JSON.parse(sort.stdout);
-  assert.equal(sortJson.ok, false);
+  assert.equal(sortJson.ok, true);
   assert.match(sortJson.blockers.join("\n"), /Sort apply is not implemented/);
+  assert.equal(sortJson.data.plan.moveCount, 0);
+  assert.equal(sortJson.data.plan.skipCount, 2);
 
   const sortWithKnownFlags = spawnSync(
     "node",
@@ -78,11 +80,33 @@ test("CLI smokes cover help, version, status, workspaces, backup, and sort refus
     ],
     { env, encoding: "utf8" }
   );
-  assert.equal(sortWithKnownFlags.status, 2);
+  assert.equal(sortWithKnownFlags.status, 0);
   const sortWithKnownFlagsJson = JSON.parse(sortWithKnownFlags.stdout);
   assert.deepEqual(sortWithKnownFlagsJson.data.inputs.to, ["Portfolio", "Tool Development"]);
   assert.deepEqual(sortWithKnownFlagsJson.data.inputs.notTo, ["Stash"]);
+  assert.equal(sortWithKnownFlagsJson.data.inputs.minConfidence, 0.85);
   assert.equal(sortWithKnownFlagsJson.data.inputs.backend, "session");
+
+  const invalidConfidence = spawnSync("node", ["dist/cli.js", "sort", "Space", "--min-confidence", "nope", "--json"], {
+    env,
+    encoding: "utf8"
+  });
+  assert.equal(invalidConfidence.status, 1);
+  assert.match(JSON.parse(invalidConfidence.stdout).blockers.join("\n"), /min-confidence/);
+
+  const invalidBackend = spawnSync("node", ["dist/cli.js", "sort", "Space", "--backend", "bogus", "--json"], {
+    env,
+    encoding: "utf8"
+  });
+  assert.equal(invalidBackend.status, 1);
+  assert.match(JSON.parse(invalidBackend.stdout).blockers.join("\n"), /backend/);
+
+  const plainSort = spawnSync("node", ["dist/cli.js", "sort", "Space", "--json"], {
+    env,
+    encoding: "utf8"
+  });
+  assert.equal(plainSort.status, 2);
+  assert.equal(JSON.parse(plainSort.stdout).ok, false);
 
   const sortWithUnknownFlag = spawnSync("node", ["dist/cli.js", "sort", "Space", "--typo"], {
     env,

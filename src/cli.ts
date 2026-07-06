@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import { createBackup, listBackups } from "./backup.js";
-import { envelope, formatBackup, formatBackupList, formatStatus, formatWorkspaces, printJson } from "./output.js";
+import { envelope, formatBackup, formatBackupList, formatSortPreview, formatStatus, formatWorkspaces, printJson } from "./output.js";
 import { discoverProfileContext } from "./profile.js";
-import { loadSessionSummary } from "./session.js";
+import { loadSession, loadSessionSummary, summarizeSession } from "./session.js";
+import { planSortPreview, SortInputs } from "./sort.js";
 import { VERSION } from "./version.js";
 
 interface JsonOption {
@@ -129,9 +130,20 @@ program
   .action(async (sourceWorkspace: string | undefined, options: JsonOption & SortOptions) => {
     await runCommand("sort", options, async () => {
       const context = await discoverProfileContext();
-      const summary = await loadSessionSummary(context.sessionFile);
+      const session = await loadSession(context.sessionFile);
+      const summary = summarizeSession(session, context.sessionFile);
       const source = resolveSourceWorkspace(summary, sourceWorkspace);
       const inputs = sortInputs(options);
+      const inputError = validateSortInputs(inputs);
+      if (inputError) {
+        if (options.json) {
+          printJson(envelope("sort", { sourceWorkspace: sourceWorkspace ?? null, inputs }, { ok: false, blockers: [inputError], suggestedNextCommands: ["zts sort --help"] }));
+        } else {
+          process.stderr.write(`zts: ${inputError}\n`);
+        }
+        process.exitCode = 1;
+        return;
+      }
       if (!source) {
         const message = sourceWorkspace
           ? `Source workspace not found: ${sourceWorkspace}`
@@ -148,15 +160,20 @@ program
       const blockers = ["Sort apply is not implemented in this tranche"];
       if (context.running) blockers.unshift("Zen is running and no live backend is available");
       const suggestedNextCommands = ["zts sort --preview", "zts status", "zts backup"];
+      const plan = planSortPreview(session, summary, source, inputs);
+      const previewRequested = Boolean(options.preview || options.dryRun);
+      const ok = previewRequested;
 
       const data = {
         profile: context.profile,
         zenRunning: context.running,
         sourceWorkspace: source,
         inputs,
+        plan,
         previewOnly: true,
-        plannedActions: [],
-        skippedActions: [],
+        plannedActions: plan.plannedActions,
+        skippedActions: plan.skippedActions,
+        reviewActions: plan.reviewActions,
         session: {
           workspaceCount: summary.workspaceCount,
           tabCount: summary.tabCount,
@@ -167,24 +184,11 @@ program
       };
 
       if (options.json) {
-        printJson(envelope("sort", data, { ok: false, blockers, suggestedNextCommands }));
-        process.exitCode = 2;
+        printJson(envelope("sort", data, { ok, blockers, suggestedNextCommands }));
+        process.exitCode = ok ? 0 : 2;
       } else {
-        process.stdout.write(
-          [
-            `Sort preview: ${source.name}`,
-            "",
-            "Move 0 entities",
-            `Skip ${summary.pinnedCount + summary.essentialCount + summary.folderGroupCount} protected or structured items before classification`,
-            "",
-            "Apply refused:",
-            ...blockers.map((blocker) => `  - ${blocker}`),
-            "",
-            "Next:",
-            ...suggestedNextCommands.map((command) => `  ${command}`)
-          ].join("\n") + "\n"
-        );
-        process.exitCode = 2;
+        process.stdout.write(`${formatSortPreview(plan, blockers, suggestedNextCommands)}\n`);
+        process.exitCode = ok ? 0 : 2;
       }
     });
   });
@@ -244,16 +248,33 @@ function splitCsv(value?: string): string[] {
     .filter(Boolean);
 }
 
-function sortInputs(options: SortOptions) {
+function sortInputs(options: SortOptions): SortInputs {
   return {
     preview: Boolean(options.preview),
     dryRun: Boolean(options.dryRun),
-    minConfidence: options.minConfidence ?? null,
+    minConfidence: options.minConfidence === undefined ? 0.8 : Number(options.minConfidence),
     includePinned: Boolean(options.includePinned),
     to: splitCsv(options.to),
     notTo: splitCsv(options.notTo),
     only: splitCsv(options.only),
     except: splitCsv(options.except),
-    backend: options.backend ?? "auto"
+    backend: normalizeBackend(options.backend)
   };
+}
+
+function validateSortInputs(inputs: SortInputs): string | null {
+  if (!Number.isFinite(inputs.minConfidence) || inputs.minConfidence < 0 || inputs.minConfidence > 1) {
+    return "--min-confidence must be a number between 0 and 1";
+  }
+  if (inputs.backend !== "auto" && inputs.backend !== "live" && inputs.backend !== "session") {
+    return "--backend must be one of: auto, live, session";
+  }
+  return null;
+}
+
+function normalizeBackend(backend?: string): SortInputs["backend"] {
+  if (backend === undefined || backend === "auto" || backend === "live" || backend === "session") {
+    return backend ?? "auto";
+  }
+  return backend as SortInputs["backend"];
 }

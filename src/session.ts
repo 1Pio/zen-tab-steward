@@ -75,8 +75,12 @@ export interface SessionSummary {
 }
 
 export async function loadSessionSummary(source: SessionFileSource): Promise<SessionSummary> {
+  return summarizeSession(await loadSession(source), source);
+}
+
+export async function loadSession(source: SessionFileSource): Promise<RawZenSession> {
   const decoded = await readJsonLz4(source.path);
-  return summarizeSession(assertRawSession(decoded), source);
+  return assertRawSession(decoded);
 }
 
 export function summarizeSession(session: RawZenSession, source: SessionFileSource): SessionSummary {

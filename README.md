@@ -2,7 +2,7 @@
 
 Zen Tab Steward is a user-owned CLI for inspecting and backing up Zen Browser tab and workspace state. The command is `zts`.
 
-This first tranche is deliberately conservative. It can discover the local Zen profile, parse `zen-sessions.jsonlz4`, report workspace/tab protection counts, create backups, and show a sort preview/refusal scaffold. It does not write active Zen session files, move tabs, install a service, start a daemon, create a browser extension, or set up autostart.
+This first tranche is deliberately conservative. It can discover the local Zen profile, parse `zen-sessions.jsonlz4`, report workspace/tab protection counts, create backups, and show a deterministic read-only sort preview. It does not write active Zen session files, move tabs, install a service, start a daemon, create a browser extension, or set up autostart.
 
 ## Install
 
@@ -49,7 +49,9 @@ node dist/cli.js status
 
 Each backup includes timestamped `.bak` files and a timestamped `manifest.json` with file sizes, SHA-256 hashes, profile path, Zen running state, command, and `zts` version.
 
-`zts sort [workspace] --preview` currently produces a safe preview scaffold and refuses apply. Sorting apply is intentionally blocked until a safe live or offline backend is proven.
+`zts sort [workspace] --preview` produces a safe read-only preview. It uses deterministic domain rules where a matching destination workspace exists, skips pinned tabs and essentials by default, and treats grouped/foldered tabs as protected so they are not split.
+
+Preview and dry-run commands exit successfully because they do not write. Plain `zts sort [workspace]` still refuses apply with a nonzero exit until a safe live or offline backend is proven.
 
 ## JSON Output
 
@@ -61,6 +63,7 @@ zts workspaces --json
 zts backup --json
 zts backup list --json
 zts sort Space --preview --json
+zts sort Space --dry-run --json
 ```
 
 JSON output is structured for future Raycast and agent use. It includes version, command, success state, warnings, blockers, suggested next commands, and command-specific data.

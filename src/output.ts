@@ -4,6 +4,7 @@ import { SessionSummary } from "./session.js";
 import { VERSION } from "./version.js";
 import { configPath } from "./paths.js";
 import { backupRootForProfile } from "./backup.js";
+import { SortPlan } from "./sort.js";
 
 export interface CommandEnvelope<T> {
   version: string;
@@ -99,4 +100,34 @@ export function formatBackup(manifest: BackupManifest): string {
 export function formatBackupList(manifests: BackupManifest[]): string {
   if (manifests.length === 0) return "No backups found";
   return ["Backups", ...manifests.map((manifest) => `${manifest.id}  ${manifest.files.length} files  ${manifest.profileId}`)].join("\n");
+}
+
+export function formatSortPreview(plan: SortPlan, applyBlockers: string[], suggestedNextCommands: string[]): string {
+  const lines = [
+    `Sort preview: ${plan.sourceWorkspace.name}`,
+    "",
+    `Move ${plan.moveCount} entities`,
+    `Skip ${plan.skipCount} protected or filtered`,
+    `Review ${plan.reviewCount} low-confidence`,
+    ""
+  ];
+
+  for (const destination of plan.destinationSummaries) {
+    lines.push(
+      destination.workspaceName,
+      `  ${destination.tabCount} tabs`,
+      `  ${destination.domains.slice(0, 8).join(", ") || "no domains"}`,
+      ""
+    );
+  }
+
+  lines.push(
+    "Apply refused:",
+    ...applyBlockers.map((blocker) => `  - ${blocker}`),
+    "",
+    "Next:",
+    ...suggestedNextCommands.map((command) => `  ${command}`)
+  );
+
+  return lines.join("\n");
 }
