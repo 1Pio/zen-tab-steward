@@ -10,6 +10,7 @@ export interface SortInputs {
   only: string[];
   except: string[];
   backend: "auto" | "live" | "session";
+  domainRules: Record<string, string>;
 }
 
 export type PlanAction = "move" | "skip" | "review";
@@ -65,6 +66,7 @@ export function planSortPreview(
 ): SortPlan {
   const destinationWorkspaces = candidateDestinations(summary.workspaces, sourceWorkspace, inputs);
   const destinationByName = new Map(destinationWorkspaces.map((workspace) => [workspace.name, workspace]));
+  const domainRules = effectiveDomainRules(inputs.domainRules);
   const tabs = Array.isArray(session.tabs) ? session.tabs : [];
   const sourceTabs = tabs.filter((tab) => tab.zenWorkspace === sourceWorkspace.id);
   const plannedActions: EntityPlan[] = [];
@@ -85,7 +87,7 @@ export function planSortPreview(
       return;
     }
 
-    const classification = classifyByDomain(entity.domain, destinationByName);
+    const classification = classifyByDomain(entity.domain, destinationByName, domainRules);
     if (!classification) {
       reviewActions.push({
         ...entity,
@@ -182,14 +184,30 @@ function protectionSkipReason(tab: RawTab, entity: { domain: string; url: string
   return null;
 }
 
-function classifyByDomain(domain: string, destinationByName: Map<string, WorkspaceSummary>) {
-  for (const [workspaceName, patterns] of Object.entries(DOMAIN_RULES)) {
+export function classifyDomainForWorkspace(domain: string, domainRules: Record<string, string>): { workspaceName: string; matchedPattern: string } | null {
+  for (const [workspaceName, patterns] of Object.entries(effectiveDomainRules(domainRules))) {
+    const matchedPattern = patterns.find((pattern) => matchesPattern(pattern, domain, `https://${domain}/`));
+    if (matchedPattern) return { workspaceName, matchedPattern };
+  }
+  return null;
+}
+
+function classifyByDomain(domain: string, destinationByName: Map<string, WorkspaceSummary>, domainRules: Record<string, string[]>) {
+  for (const [workspaceName, patterns] of Object.entries(domainRules)) {
     const workspace = destinationByName.get(workspaceName);
     if (!workspace) continue;
     const matchedPattern = patterns.find((pattern) => matchesPattern(pattern, domain, `https://${domain}/`));
     if (matchedPattern) return { workspace, matchedPattern, confidence: 0.9 };
   }
   return null;
+}
+
+function effectiveDomainRules(configRules: Record<string, string>): Record<string, string[]> {
+  const rules: Record<string, string[]> = structuredClone(DOMAIN_RULES);
+  for (const [pattern, workspaceName] of Object.entries(configRules)) {
+    rules[workspaceName] = [...(rules[workspaceName] ?? []), pattern];
+  }
+  return rules;
 }
 
 function summarizeDestinations(actions: EntityPlan[]): DestinationSummary[] {

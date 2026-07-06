@@ -20,6 +20,8 @@ zts --version
 zts status
 zts workspaces
 zts backup
+zts config path
+zts rules
 ```
 
 You can also run without linking:
@@ -53,6 +55,24 @@ Each backup includes timestamped `.bak` files and a timestamped `manifest.json` 
 
 Preview and dry-run commands exit successfully because they do not write. Plain `zts sort [workspace]` still refuses apply with a nonzero exit until a safe live or offline backend is proven.
 
+`zts config` inspects and updates the user config at:
+
+```text
+~/.config/zen-tab-steward/config.toml
+```
+
+Supported starter keys are `defaults.inbox`, `defaults.min_confidence`, `defaults.include_pinned`, and `defaults.apply_backend`.
+
+`zts rules` manages deterministic domain routing rules:
+
+```bash
+zts rules
+zts rules add domain docs.example.com Research
+zts rules test https://docs.example.com/page
+```
+
+Rules are stored in the config file and are used by `zts sort --preview`.
+
 ## JSON Output
 
 Machine-readable output is available where useful:
@@ -64,6 +84,8 @@ zts backup --json
 zts backup list --json
 zts sort Space --preview --json
 zts sort Space --dry-run --json
+zts config show --json
+zts rules test https://github.com/1Pio/zen-tab-steward --json
 ```
 
 JSON output is structured for future Raycast and agent use. It includes version, command, success state, warnings, blockers, suggested next commands, and command-specific data.

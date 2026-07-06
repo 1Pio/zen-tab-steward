@@ -20,7 +20,8 @@ const inputs = {
   notTo: [],
   only: [],
   except: [],
-  backend: "auto"
+  backend: "auto",
+  domainRules: {}
 };
 
 test("plans deterministic domain-rule moves and protection skips without applying", () => {
@@ -109,4 +110,27 @@ test("routes deterministic matches below min confidence to review", () => {
   assert.equal(plan.reviewCount, 1);
   assert.equal(plan.reviewActions[0].reason, "below_min_confidence");
   assert.equal(plan.reviewActions[0].destinationWorkspaceName, "Portfolio");
+});
+
+test("uses configured domain rules as deterministic destinations", () => {
+  const session = {
+    spaces: [
+      { uuid: "w1", name: "Space" },
+      { uuid: "w2", name: "Research" }
+    ],
+    tabs: [
+      { zenWorkspace: "w1", entries: [{ url: "https://docs.example.com/page", title: "Docs" }] }
+    ],
+    folders: [],
+    groups: []
+  };
+  const summary = summarizeSession(session, source);
+  const plan = planSortPreview(session, summary, summary.workspaces[0], {
+    ...inputs,
+    domainRules: { "docs.example.com": "Research" }
+  });
+
+  assert.equal(plan.moveCount, 1);
+  assert.equal(plan.plannedActions[0].destinationWorkspaceName, "Research");
+  assert.equal(plan.plannedActions[0].explanation, "Domain docs.example.com matched docs.example.com");
 });

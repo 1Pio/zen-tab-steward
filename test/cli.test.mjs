@@ -135,6 +135,39 @@ test("CLI smokes cover help, version, status, workspaces, backup, and sort refus
   });
   assert.equal(restore.status, 2);
   assert.equal(JSON.parse(restore.stdout).ok, false);
+
+  const configPath = await execFileAsync("node", ["dist/cli.js", "config", "path"], { env });
+  assert.equal(configPath.stdout.trim(), join(fixture.temp, "config.toml"));
+
+  const configSet = await execFileAsync("node", ["dist/cli.js", "config", "set", "defaults.min_confidence", "0.95", "--json"], { env });
+  assert.equal(JSON.parse(configSet.stdout).data.value, 0.95);
+
+  const backendSet = await execFileAsync("node", ["dist/cli.js", "config", "set", "defaults.apply_backend", "session", "--json"], { env });
+  assert.equal(JSON.parse(backendSet.stdout).data.value, "session");
+
+  await execFileAsync("node", ["dist/cli.js", "config", "set", "defaults.inbox", "Stash", "--json"], { env });
+
+  const rulesAdd = await execFileAsync("node", ["dist/cli.js", "rules", "add", "domain", "docs.example.com", "Research", "--json"], { env });
+  assert.equal(JSON.parse(rulesAdd.stdout).data.workspace, "Research");
+
+  const rulesTest = await execFileAsync("node", ["dist/cli.js", "rules", "test", "https://docs.example.com/page", "--json"], { env });
+  assert.equal(JSON.parse(rulesTest.stdout).data.match.workspaceName, "Research");
+
+  const sortWithConfigDefaults = spawnSync("node", ["dist/cli.js", "sort", "Space", "--preview", "--json"], {
+    env,
+    encoding: "utf8"
+  });
+  assert.equal(sortWithConfigDefaults.status, 0);
+  const sortWithConfigDefaultsJson = JSON.parse(sortWithConfigDefaults.stdout);
+  assert.equal(sortWithConfigDefaultsJson.data.inputs.backend, "session");
+  assert.equal(sortWithConfigDefaultsJson.data.inputs.minConfidence, 0.95);
+
+  const sortWithDefaultInbox = spawnSync("node", ["dist/cli.js", "sort", "--preview", "--json"], {
+    env,
+    encoding: "utf8"
+  });
+  assert.equal(sortWithDefaultInbox.status, 0);
+  assert.equal(JSON.parse(sortWithDefaultInbox.stdout).data.sourceWorkspace.name, "Stash");
 });
 
 async function makeZenFixture() {
