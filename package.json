@@ -1,0 +1,42 @@
+{
+  "name": "zen-tab-steward",
+  "version": "0.1.0",
+  "description": "Safe CLI stewardship for Zen Browser tabs and workspaces.",
+  "type": "module",
+  "bin": {
+    "zts": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "smoke": "npm run build && node dist/cli.js status && node dist/cli.js workspaces && (node dist/cli.js sort Space --preview || test $? -eq 2)"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1Pio/zen-tab-steward.git"
+  },
+  "keywords": [
+    "zen-browser",
+    "tabs",
+    "cli"
+  ],
+  "author": "1Pio",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/1Pio/zen-tab-steward/issues"
+  },
+  "homepage": "https://github.com/1Pio/zen-tab-steward#readme",
+  "dependencies": {
+    "commander": "^15.0.0",
+    "lz4js": "^0.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0",
+    "typescript": "^6.0.3"
+  }
+}

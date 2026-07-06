@@ -1,0 +1,118 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { execFile, spawnSync } from "node:child_process";
+import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
+import { encodeLiteralJsonLz4ForFixture } from "../dist/mozlz4.js";
+
+const execFileAsync = promisify(execFile);
+
+test("CLI smokes cover help, version, status, workspaces, backup, and sort refusal", async () => {
+  const fixture = await makeZenFixture();
+  const env = {
+    ...process.env,
+    ZTS_ZEN_APP_SUPPORT_DIR: fixture.appSupportDir,
+    ZTS_STATE_DIR: fixture.stateDir,
+    ZTS_CONFIG_PATH: join(fixture.temp, "config.toml")
+  };
+
+  const help = await execFileAsync("node", ["dist/cli.js", "--help"], { env });
+  assert.match(help.stdout, /Zen Tab Steward/);
+
+  const version = await execFileAsync("node", ["dist/cli.js", "--version"], { env });
+  assert.match(version.stdout, /^0\.1\.0/);
+
+  const status = await execFileAsync("node", ["dist/cli.js", "status", "--json"], { env });
+  const statusJson = JSON.parse(status.stdout);
+  assert.equal(statusJson.ok, true);
+  assert.equal(statusJson.data.profile.name, "Default");
+  assert.equal(statusJson.data.session.workspaceCount, 2);
+  assert.equal(statusJson.data.session.tabCount, 3);
+
+  const workspaces = await execFileAsync("node", ["dist/cli.js", "workspaces"], { env });
+  assert.match(workspaces.stdout, /Space/);
+  assert.match(workspaces.stdout, /Stash/);
+
+  const backup = await execFileAsync("node", ["dist/cli.js", "backup", "--json"], { env });
+  const backupJson = JSON.parse(backup.stdout);
+  assert.equal(backupJson.ok, true);
+  assert.equal(backupJson.data.manifest.files.length, 3);
+
+  const backupList = await execFileAsync("node", ["dist/cli.js", "backup", "list", "--json"], { env });
+  const backupListJson = JSON.parse(backupList.stdout);
+  assert.equal(backupListJson.ok, true);
+  assert.equal(backupListJson.data.backups.length, 1);
+
+  const sort = spawnSync("node", ["dist/cli.js", "sort", "Space", "--dry-run", "--json"], {
+    env,
+    encoding: "utf8"
+  });
+  assert.equal(sort.status, 2);
+  const sortJson = JSON.parse(sort.stdout);
+  assert.equal(sortJson.ok, false);
+  assert.match(sortJson.blockers.join("\n"), /Sort apply is not implemented/);
+
+  const missingSort = spawnSync("node", ["dist/cli.js", "sort", "Missing Workspace", "--json"], {
+    env,
+    encoding: "utf8"
+  });
+  assert.equal(missingSort.status, 1);
+  assert.match(JSON.parse(missingSort.stdout).blockers.join("\n"), /Source workspace not found/);
+
+  const restore = spawnSync("node", ["dist/cli.js", "backup", "restore", "missing", "--json"], {
+    env,
+    encoding: "utf8"
+  });
+  assert.equal(restore.status, 2);
+  assert.equal(JSON.parse(restore.stdout).ok, false);
+});
+
+async function makeZenFixture() {
+  const temp = await mkdtemp(join(tmpdir(), "zts-cli-"));
+  const appSupportDir = join(temp, "zen");
+  const profilePath = join(appSupportDir, "Profiles", "abc.Default");
+  const stateDir = join(temp, "state");
+  await mkdir(join(profilePath, "sessionstore-backups"), { recursive: true });
+  await writeFile(
+    join(appSupportDir, "profiles.ini"),
+    [
+      "[Profile0]",
+      "Name=Default",
+      "IsRelative=1",
+      "Path=Profiles/abc.Default",
+      "Default=1",
+      ""
+    ].join("\n")
+  );
+  await writeFile(
+    join(appSupportDir, "installs.ini"),
+    [
+      "[Install]",
+      "Default=Profiles/abc.Default",
+      "Locked=1",
+      ""
+    ].join("\n")
+  );
+
+  const session = {
+    spaces: [
+      { uuid: "w1", name: "Space" },
+      { uuid: "w2", name: "Stash" }
+    ],
+    tabs: [
+      { zenWorkspace: "w1", pinned: true, zenEssential: true, entries: [{ url: "https://example.com", title: "Example" }] },
+      { zenWorkspace: "w1", pinned: false, groupId: "g1", entries: [{ url: "https://github.com", title: "GitHub" }] },
+      { zenWorkspace: "w2", pinned: false, entries: [{ url: "https://example.org", title: "Other" }] }
+    ],
+    folders: [{ id: "g1", name: "Dev", workspaceId: "w1", pinned: false }],
+    groups: [{ id: "g1", name: "Dev", pinned: false }],
+    splitViewData: []
+  };
+
+  await writeFile(join(profilePath, "zen-sessions.jsonlz4"), encodeLiteralJsonLz4ForFixture(session));
+  await writeFile(join(profilePath, "sessionstore-backups", "recovery.jsonlz4"), "recovery");
+  await writeFile(join(profilePath, "sessionstore-backups", "previous.jsonlz4"), "previous");
+  return { temp, appSupportDir, profilePath, stateDir };
+}
