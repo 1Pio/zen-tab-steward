@@ -522,6 +522,16 @@ program
   .option("--json", "print stable JSON output")
   .action(async (sourceWorkspace: string | undefined, options: JsonOption & SortOptions) => {
     await runCommand("sort", options, async () => {
+      const modeConflict = sortModeConflict(options);
+      if (modeConflict) {
+        if (options.json) {
+          printJson(envelope("sort", { sourceWorkspace: sourceWorkspace ?? null }, { ok: false, blockers: [modeConflict], suggestedNextCommands: ["zts sort --help"] }));
+        } else {
+          process.stderr.write(`zts: ${modeConflict}\n`);
+        }
+        process.exitCode = 1;
+        return;
+      }
       const context = await discoverProfileContext();
       const loadedConfig = await loadConfig();
       const session = await loadSession(context.sessionFile);
@@ -561,6 +571,7 @@ program
       let applyReceipt: ApplyReceipt | undefined;
       let resolvedBackend: "session" | "live" = resolveApplyBackend(context, inputs.backend);
       let applyReady = false;
+      let cancelled = false;
 
       if (previewRequested || dryRunRequested) {
         applyBlockers = sortApplyBlockers(context, inputs.backend);
@@ -570,7 +581,7 @@ program
         if (applyBlockers.length === 0 && plan.moveCount > 0) {
           const confirmed = await confirmApply(options, plan, resolvedBackend);
           if (!confirmed) {
-            applyBlockers = ["Apply cancelled by user"];
+            cancelled = true;
           } else {
             resolvedBackend = resolveApplyBackend(context, inputs.backend);
             if (resolvedBackend === "live") {
@@ -589,10 +600,17 @@ program
       }
       applyReady = applyReady || (applyBlockers.length === 0 && Boolean(applyReceipt?.verification.ok));
 
-      const suggestedNextCommands = suggestedSortCommands({
-        applyRequested, applyReady, plan, applyBlockers, resolvedBackend, source, dryRunRequested
-      });
-      const ok = previewRequested || dryRunRequested || applyBlockers.length === 0;
+      const suggestedNextCommands = cancelled
+        ? [`zts sort ${source.name} --apply --yes`, `zts sort ${source.name} --preview`]
+        : suggestedSortCommands({
+            applyRequested, applyReady, plan, applyBlockers, resolvedBackend, source, dryRunRequested
+          });
+      const ok = cancelled || previewRequested || dryRunRequested || applyBlockers.length === 0;
+      if (cancelled && !options.json) {
+        process.stdout.write("Apply cancelled. No changes made.\n");
+        process.exitCode = 0;
+        return;
+      }
 
       const renderContext: SortRenderContext = {
         plan,
@@ -615,6 +633,7 @@ program
         sourceWorkspace: source,
         inputs,
         mode: previewRequested ? "preview" : dryRunRequested ? "dry-run" : "apply",
+        cancelled,
         plan,
         apply: {
           ready: applyReady,
@@ -677,6 +696,12 @@ interface BridgeOptions {
   fromWorkspace?: string;
   toWorkspace?: string;
   confirmLiveMove?: boolean;
+}
+
+function sortModeConflict(options: SortOptions): string | null {
+  if (options.apply && options.dryRun) return "Use either --apply or --dry-run, not both.";
+  if (options.apply && options.preview) return "Use either --apply or --preview, not both.";
+  return null;
 }
 
 function sortCommandForReceipt(sourceWorkspace: string | undefined, options: SortOptions): string {
