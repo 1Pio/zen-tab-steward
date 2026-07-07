@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applySortPlanOffline, listApplyReceipts, offlineApplyBlockers, verifyApplyReceipt } from "../dist/apply.js";
+import { applySortPlanLive, applySortPlanOffline, listApplyReceipts, offlineApplyBlockers, resolveApplyBackend, sortApplyBlockers, verifyApplyReceipt } from "../dist/apply.js";
 import { encodeLiteralJsonLz4ForFixture, readJsonLz4 } from "../dist/mozlz4.js";
 import { planSortPreview } from "../dist/sort.js";
 import { summarizeSession } from "../dist/session.js";
@@ -60,6 +60,10 @@ test("offline session backend applies planned moves with backup and receipt", as
   const written = await readJsonLz4(fixture.context.sessionFile.path);
 
   assert.equal(receipt.moveCount, 1);
+  assert.equal(receipt.plannedMoveCount, 1);
+  assert.equal(receipt.attemptedMoveCount, 1);
+  assert.equal(receipt.succeededMoveCount, 1);
+  assert.equal(receipt.failedMoveCount, 0);
   assert.deepEqual(receipt.verification, { ok: true, checkedMoves: 1 });
   assert.match(receipt.receiptPath, /session-apply\.json$/);
   assert.ok(receipt.backupId);
@@ -90,7 +94,129 @@ test("offline session backend refuses running Zen and non-primary session source
     offlineApplyBlockers({ ...fixture.context, sessionFile: { ...fixture.context.sessionFile, kind: "recovery" } }, "session"),
     ["Offline session apply requires zen-sessions.jsonlz4 as the selected session source"]
   );
-  assert.deepEqual(offlineApplyBlockers(fixture.context, "live"), ["Live sort apply backend is unavailable; run zts bridge status for the current blocker receipt"]);
+  assert.deepEqual(offlineApplyBlockers(fixture.context, "live"), ["Live sort apply requires an attachable Zen bridge; run zts bridge live-check --connect for the current gate receipt"]);
+  assert.deepEqual(sortApplyBlockers({ ...fixture.context, running: true }, "auto"), []);
+  assert.deepEqual(sortApplyBlockers(fixture.context, "live"), ["Live sort apply requires Zen to be running"]);
+  assert.deepEqual(
+    sortApplyBlockers({ ...fixture.context, running: true, sessionFile: { ...fixture.context.sessionFile, kind: "recovery" } }, "live"),
+    ["Live sort apply requires zen-sessions.jsonlz4 as the selected session source"]
+  );
+  assert.equal(resolveApplyBackend({ ...fixture.context, running: true }, "auto"), "live");
+  assert.equal(resolveApplyBackend(fixture.context, "auto"), "session");
+});
+
+test("live backend applies planned moves with backup, proof, and receipt", async () => {
+  const fixture = await makeApplyFixture();
+  const oldStateDir = process.env.ZTS_STATE_DIR;
+  const originalWebSocket = globalThis.WebSocket;
+  process.env.ZTS_STATE_DIR = fixture.stateDir;
+  const context = {
+    ...fixture.context,
+    running: true,
+    runningProcesses: [privilegedBrowserProcess(fixture.profilePath)]
+  };
+  await writeFile(join(fixture.profilePath, "WebDriverBiDiServer.json"), JSON.stringify({ ws_host: "127.0.0.1", ws_port: 9222 }));
+  const summary = summarizeSession(fixture.session, fixture.context.sessionFile);
+  const plan = planSortPreview(fixture.session, summary, summary.workspaces[0], {
+    preview: false,
+    dryRun: false,
+    minConfidence: 0.8,
+    includePinned: false,
+    includeEssentials: false,
+    to: [],
+    notTo: [],
+    only: [],
+    except: [],
+    limit: null,
+    backend: "live",
+    domainRules: {},
+    protectedDomains: []
+  });
+
+  let receipt;
+  let receipts;
+  let verification;
+  try {
+    globalThis.WebSocket = FakeLiveApplyWebSocket;
+    receipt = await applySortPlanLive(context, plan, "zts sort Space --backend live");
+    receipts = await listApplyReceipts(context.profile.id);
+    verification = await verifyApplyReceipt(context, receipt.id);
+  } finally {
+    globalThis.WebSocket = originalWebSocket;
+    FakeLiveApplyWebSocket.connectionCount = 0;
+    if (oldStateDir === undefined) delete process.env.ZTS_STATE_DIR;
+    else process.env.ZTS_STATE_DIR = oldStateDir;
+  }
+  const written = await readJsonLz4(fixture.context.sessionFile.path);
+
+  assert.equal(receipt.backend, "live");
+  assert.match(receipt.receiptPath, /live-apply\.json$/);
+  assert.ok(receipt.backupId);
+  assert.equal(receipt.moveCount, 1);
+  assert.equal(receipt.plannedMoveCount, 1);
+  assert.equal(receipt.attemptedMoveCount, 1);
+  assert.equal(receipt.succeededMoveCount, 1);
+  assert.equal(receipt.failedMoveCount, 0);
+  assert.deepEqual(receipt.verification, { ok: true, checkedMoves: 1, blockers: [] });
+  assert.equal(receipt.liveProofs.length, 1);
+  assert.equal(receipt.liveProofs[0].requestedUrl, "https://framer.com/project");
+  assert.equal(receipts[0].id, receipt.id);
+  assert.equal(receipts[0].backend, "live");
+  assert.equal(verification.verification.ok, false);
+  assert.match(verification.verification.blockers.join("\n"), /cannot be reverified from session files/);
+  assert.equal(written.tabs[0].zenWorkspace, "w1");
+});
+
+test("live backend records guarded move refusal without claiming success", async () => {
+  const fixture = await makeApplyFixture();
+  const oldStateDir = process.env.ZTS_STATE_DIR;
+  const originalWebSocket = globalThis.WebSocket;
+  process.env.ZTS_STATE_DIR = fixture.stateDir;
+  const context = {
+    ...fixture.context,
+    running: true,
+    runningProcesses: [privilegedBrowserProcess(fixture.profilePath)]
+  };
+  await writeFile(join(fixture.profilePath, "WebDriverBiDiServer.json"), JSON.stringify({ ws_host: "127.0.0.1", ws_port: 9222 }));
+  const summary = summarizeSession(fixture.session, fixture.context.sessionFile);
+  const plan = planSortPreview(fixture.session, summary, summary.workspaces[0], {
+    preview: false,
+    dryRun: false,
+    minConfidence: 0.8,
+    includePinned: false,
+    includeEssentials: false,
+    to: [],
+    notTo: [],
+    only: [],
+    except: [],
+    limit: null,
+    backend: "live",
+    domainRules: {},
+    protectedDomains: []
+  });
+
+  let receipt;
+  try {
+    globalThis.WebSocket = FakeBlockedLiveApplyWebSocket;
+    receipt = await applySortPlanLive(context, plan, "zts sort Space --backend live");
+  } finally {
+    globalThis.WebSocket = originalWebSocket;
+    FakeBlockedLiveApplyWebSocket.connectionCount = 0;
+    if (oldStateDir === undefined) delete process.env.ZTS_STATE_DIR;
+    else process.env.ZTS_STATE_DIR = oldStateDir;
+  }
+  const written = await readJsonLz4(fixture.context.sessionFile.path);
+
+  assert.equal(receipt.backend, "live");
+  assert.equal(receipt.verification.ok, false);
+  assert.equal(receipt.moveCount, 0);
+  assert.equal(receipt.plannedMoveCount, 1);
+  assert.equal(receipt.attemptedMoveCount, 1);
+  assert.equal(receipt.succeededMoveCount, 0);
+  assert.equal(receipt.failedMoveCount, 1);
+  assert.equal(receipt.liveProofs.length, 0);
+  assert.match(receipt.verification.blockers.join("\n"), /refused protected tab/);
+  assert.equal(written.tabs[0].zenWorkspace, "w1");
 });
 
 async function makeApplyFixture() {
@@ -135,4 +261,133 @@ async function makeApplyFixture() {
   };
 
   return { temp, profilePath, stateDir, session, context };
+}
+
+function privilegedBrowserProcess(profilePath) {
+  return {
+    pid: 42,
+    args: `/Applications/Zen.app/Contents/MacOS/zen -profile ${profilePath} --remote-debugging-port=9222 --remote-allow-system-access --remote-allow-hosts localhost --remote-allow-origins http://127.0.0.1:9222`,
+    profilePath
+  };
+}
+
+class FakeLiveApplyWebSocket {
+  static connectionCount = 0;
+
+  constructor(url) {
+    this.url = url;
+    this.connectionNumber = ++FakeLiveApplyWebSocket.connectionCount;
+    this.listeners = new Map();
+    setTimeout(() => this.emit("open", {}), 0);
+  }
+
+  addEventListener(type, callback) {
+    const callbacks = this.listeners.get(type) ?? [];
+    callbacks.push(callback);
+    this.listeners.set(type, callbacks);
+  }
+
+  send(payload) {
+    const request = JSON.parse(payload);
+    setTimeout(() => this.emit("message", { data: JSON.stringify(fakeBidiResponse(request)) }), 0);
+  }
+
+  close() {}
+
+  emit(type, event) {
+    for (const callback of this.listeners.get(type) ?? []) callback(event);
+  }
+}
+
+class FakeBlockedLiveApplyWebSocket extends FakeLiveApplyWebSocket {
+  static connectionCount = 0;
+
+  constructor(url) {
+    super(url);
+    this.connectionNumber = ++FakeBlockedLiveApplyWebSocket.connectionCount;
+  }
+
+  send(payload) {
+    const request = JSON.parse(payload);
+    setTimeout(() => this.emit("message", { data: JSON.stringify(fakeBlockedBidiResponse(request)) }), 0);
+  }
+}
+
+function fakeBidiResponse(request) {
+  if (request.method === "session.status") {
+    return { type: "success", id: request.id, result: { ready: true, message: "" } };
+  }
+  if (request.method === "session.new") {
+    return { type: "success", id: request.id, result: { sessionId: "session-1" } };
+  }
+  if (request.method === "browsingContext.getTree") {
+    return { type: "success", id: request.id, result: { contexts: [{ context: "chrome-1" }] } };
+  }
+  if (request.method === "script.evaluate") {
+    return {
+      type: "success",
+      id: request.id,
+      result: remoteObject({
+        requestedUrl: "https://framer.com/project",
+        requestedFromWorkspaceId: "w1",
+        requestedToWorkspaceId: "w2",
+        candidateCount: 1,
+        protectedReasons: [],
+        beforeWorkspaceId: "w1",
+        afterWorkspaceId: "w2",
+        moved: true,
+        moveResult: true,
+        tabPinned: false,
+        tabEssential: false,
+        tabGrouped: false,
+        tabFoldered: false,
+        reason: "moved"
+      })
+    };
+  }
+  if (request.method === "session.end") {
+    return { type: "success", id: request.id, result: {} };
+  }
+  return { type: "error", id: request.id, error: "unknown command", message: request.method };
+}
+
+function fakeBlockedBidiResponse(request) {
+  if (request.method !== "script.evaluate") return fakeBidiResponse(request);
+  return {
+    type: "success",
+    id: request.id,
+    result: remoteObject({
+      requestedUrl: "https://framer.com/project",
+      requestedFromWorkspaceId: "w1",
+      requestedToWorkspaceId: "w2",
+      candidateCount: 1,
+      protectedReasons: ["pinned"],
+      beforeWorkspaceId: "w1",
+      afterWorkspaceId: "w1",
+      moved: false,
+      moveResult: false,
+      tabPinned: true,
+      tabEssential: false,
+      tabGrouped: false,
+      tabFoldered: false,
+      reason: "protected"
+    })
+  };
+}
+
+function remoteObject(entries) {
+  return {
+    type: "success",
+    result: {
+      type: "object",
+      value: Object.entries(entries).map(([key, value]) => [key, remoteValue(value)])
+    }
+  };
+}
+
+function remoteValue(value) {
+  if (typeof value === "boolean") return { type: "boolean", value };
+  if (typeof value === "number") return { type: "number", value };
+  if (Array.isArray(value)) return { type: "array", value: value.map(remoteValue) };
+  return { type: "string", value };
 }

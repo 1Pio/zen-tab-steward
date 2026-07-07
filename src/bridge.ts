@@ -6,7 +6,7 @@ import { createServer } from "node:net";
 import { ProfileContext } from "./profile.js";
 import { ZenProcess } from "./processes.js";
 
-export type BridgeBackendStatus = "unavailable";
+export type BridgeBackendStatus = "gated";
 export type BridgeCheckStatus = "pass" | "fail" | "warn";
 export type BridgeProcessRole = "browser" | "content" | "gpu" | "utility" | "other";
 
@@ -37,7 +37,7 @@ export interface BridgeCheck {
 export interface BridgeInspection {
   liveBackend: {
     status: BridgeBackendStatus;
-    applySupported: false;
+    applySupported: boolean;
     reason: string;
   };
   zenRunning: boolean;
@@ -224,9 +224,9 @@ export function inspectBridge(context: ProfileContext): BridgeInspection {
 
   return {
     liveBackend: {
-      status: "unavailable",
-      applySupported: false,
-      reason: "Live sort apply is not enabled; live bridge access is limited to explicit gated proof commands."
+      status: "gated",
+      applySupported: true,
+      reason: "Live sort apply is implemented behind explicit attachment and tab-safety gates."
     },
     zenRunning: context.running,
     profilePath: context.profile.path,
@@ -622,7 +622,7 @@ export async function runBridgeProbe(options: BridgeProbeOptions = {}): Promise<
 }
 
 function bridgeBlockers(zenRunning: boolean, candidateTransportDetected: boolean, candidatePrivilegedTransportDetected: boolean): string[] {
-  const blockers = ["Live sort apply backend is not enabled; use explicit zts bridge proof commands for live bridge checks"];
+  const blockers = ["Live sort apply requires an attachable Zen bridge; run zts bridge live-check --connect for the current gate receipt"];
   if (!zenRunning) {
     blockers.push("Zen is not running, so no live browser-chrome bridge can be inspected");
     return blockers;
@@ -674,8 +674,8 @@ function bridgeChecks(
     {
       id: "live_client",
       label: "Live sort apply backend",
-      status: "fail",
-      detail: "Live sort apply is unavailable; only explicit gated bridge proof commands are implemented."
+      status: "warn",
+      detail: "Live sort apply is implemented but remains gated by explicit live attachment and tab-safety checks."
     }
   ];
 }

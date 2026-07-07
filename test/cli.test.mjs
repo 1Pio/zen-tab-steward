@@ -34,12 +34,12 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
   const bridge = await execFileAsync("node", ["dist/cli.js", "bridge", "status", "--json"], { env });
   const bridgeJson = JSON.parse(bridge.stdout);
   assert.equal(bridgeJson.ok, true);
-  assert.equal(bridgeJson.data.bridge.liveBackend.status, "unavailable");
-  assert.match(bridgeJson.blockers.join("\n"), /Live sort apply backend is not enabled/);
+  assert.equal(bridgeJson.data.bridge.liveBackend.status, "gated");
+  assert.match(bridgeJson.blockers.join("\n"), /requires an attachable Zen bridge/);
 
   const bridgeDoctor = await execFileAsync("node", ["dist/cli.js", "bridge", "doctor"], { env });
   assert.match(bridgeDoctor.stdout, /Zen live bridge doctor/);
-  assert.match(bridgeDoctor.stdout, /Live backend: unavailable/);
+  assert.match(bridgeDoctor.stdout, /Live backend: gated/);
   assert.match(bridgeDoctor.stdout, /Required launch evidence/);
 
   const bridgeLiveCheck = spawnSync("node", ["dist/cli.js", "bridge", "live-check", "--json"], {
@@ -217,6 +217,16 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
   const limitedSortJson = JSON.parse(limitedSort.stdout);
   assert.equal(limitedSortJson.data.plan.moveCount, 0);
   assert.equal(limitedSortJson.data.plan.reviewActions.some((action) => action.reason === "over_move_limit"), true);
+
+  const liveSortClosed = spawnSync("node", ["dist/cli.js", "sort", "Space", "--backend", "live", "--json"], {
+    env,
+    encoding: "utf8"
+  });
+  assert.equal(liveSortClosed.status, 2);
+  const liveSortClosedJson = JSON.parse(liveSortClosed.stdout);
+  assert.equal(liveSortClosedJson.ok, false);
+  assert.equal(liveSortClosedJson.data.applied, false);
+  assert.match(liveSortClosedJson.blockers.join("\n"), /requires Zen to be running/);
 
   const plainSort = spawnSync("node", ["dist/cli.js", "sort", "Space", "--json"], {
     env,

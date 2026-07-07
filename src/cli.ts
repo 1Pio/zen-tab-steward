@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { Command } from "commander";
-import { applySortPlanOffline, listApplyReceipts, offlineApplyBlockers, verifyApplyReceipt } from "./apply.js";
+import { applySortPlanLive, applySortPlanOffline, listApplyReceipts, offlineApplyBlockers, resolveApplyBackend, sortApplyBlockers, verifyApplyReceipt } from "./apply.js";
 import { createBackup, listBackups, pruneBackups, restoreBackup } from "./backup.js";
 import { inspectBridge, inspectLiveAttachment, runBridgeLiveMoveProof, runBridgeLiveReadProof, runBridgeProbe } from "./bridge.js";
 import { addDomainRuleInContents, getConfigValue, loadConfig, saveConfigContents, setConfigValueInContents, ZtsConfig } from "./config.js";
@@ -301,7 +301,7 @@ program
 
 program
   .command("apply")
-  .description("List or verify offline sort apply receipts")
+  .description("List or verify sort apply receipts")
   .argument("[action]", "list or verify")
   .argument("[receipt-id]", "apply receipt id for verify")
   .option("--json", "print stable JSON output")
@@ -552,15 +552,28 @@ program
       }
       const plan = planSortPreview(session, summary, source, inputs);
       const previewRequested = Boolean(options.preview || options.dryRun);
-      const applyBlockers = offlineApplyBlockers(context, inputs.backend);
-      const suggestedNextCommands = applyBlockers.length > 0
-        ? ["zts sort --preview", "zts status", "zts backup"]
-        : ["zts status", "zts backup"];
+      let applyBlockers = previewRequested ? offlineApplyBlockers(context, inputs.backend) : sortApplyBlockers(context, inputs.backend);
       const applyRequested = !previewRequested;
+      let applyReceipt = undefined;
+      let resolvedBackend: "session" | "live" = resolveApplyBackend(context, inputs.backend);
+      if (applyRequested && applyBlockers.length === 0) {
+        resolvedBackend = resolveApplyBackend(context, inputs.backend);
+        if (resolvedBackend === "live") {
+          const liveCheck = await inspectLiveAttachment(context, { connect: true });
+          if (!liveCheck.attachable) {
+            applyBlockers = liveCheck.blockers;
+          } else {
+            applyReceipt = await applySortPlanLive(context, plan, sortCommandForReceipt(sourceWorkspace, options));
+          }
+        } else {
+          applyReceipt = await applySortPlanOffline(context, session, plan, sortCommandForReceipt(sourceWorkspace, options));
+        }
+        if (applyReceipt && !applyReceipt.verification.ok) applyBlockers = applyReceipt.verification.blockers ?? ["Apply verification failed"];
+      }
+      const suggestedNextCommands = applyBlockers.length > 0
+        ? ["zts sort --preview", "zts status", resolvedBackend === "live" ? "zts bridge live-check --connect --json" : "zts backup"]
+        : ["zts status", "zts backup"];
       const ok = previewRequested || applyBlockers.length === 0;
-      const applyReceipt = applyRequested && applyBlockers.length === 0
-        ? await applySortPlanOffline(context, session, plan, sortCommandForReceipt(sourceWorkspace, options))
-        : undefined;
 
       const data = {
         profile: context.profile,
@@ -569,7 +582,8 @@ program
         inputs,
         plan,
         previewOnly: previewRequested,
-        applied: Boolean(applyReceipt),
+        applied: Boolean(applyReceipt?.verification.ok),
+        applyReceiptWritten: Boolean(applyReceipt),
         applyReceipt: applyReceipt ?? null,
         plannedActions: plan.plannedActions,
         skippedActions: plan.skippedActions,

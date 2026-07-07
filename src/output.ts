@@ -58,9 +58,9 @@ export function formatStatus(context: ProfileContext, summary: SessionSummary, b
     `Folders/groups: ${summary.folderGroupCount} (${summary.folderCount} folders, ${summary.groupCount} groups)`,
     `Config: ${configPath()}`,
     `Backups: ${backupRootForProfile(context.profile.id)}`,
-    `Safe sort apply: ${context.running ? "unavailable while Zen is running" : "available through offline session backend"}`,
+    `Safe sort apply: ${context.running ? "live backend is gated by bridge checks; offline session backend is unavailable while Zen is running" : "available through offline session backend"}`,
     `Live bridge: ${bridge.liveBackend.status} (${bridge.liveBackend.reason})`,
-    "Safety posture: active session writes are refused; offline session writes require Zen closed and a fresh backup",
+    "Safety posture: active session-file writes are refused; live moves require the bridge gate; offline writes require Zen closed and a fresh backup",
     "",
     "Blockers:",
     ...blockers.map((blocker) => `  - ${blocker}`),
@@ -404,7 +404,11 @@ export function formatApplyReceiptList(receipts: ApplyReceipt[]): string {
   if (receipts.length === 0) return "No apply receipts found";
   return [
     "Apply receipts",
-    ...receipts.map((receipt) => `${receipt.id}  ${receipt.backend}  ${receipt.moveCount} moves  ${receipt.profileId}`)
+    ...receipts.map((receipt) => {
+      const planned = receipt.plannedMoveCount ?? receipt.moves.length;
+      const succeeded = receipt.succeededMoveCount ?? receipt.moveCount;
+      return `${receipt.id}  ${receipt.backend}  ${succeeded}/${planned} moves  ${receipt.profileId}`;
+    })
   ].join("\n");
 }
 
@@ -461,20 +465,29 @@ export function formatSortPreview(plan: SortPlan, applyBlockers: string[], sugge
   }
 
   if (applyReceipt) {
+    const planned = applyReceipt.plannedMoveCount ?? applyReceipt.moves.length;
+    const attempted = applyReceipt.attemptedMoveCount ?? applyReceipt.moveCount;
+    const succeeded = applyReceipt.succeededMoveCount ?? applyReceipt.moveCount;
+    const failed = applyReceipt.failedMoveCount ?? 0;
     lines.push(
-      "Applied:",
+      applyReceipt.verification.ok ? "Applied:" : "Apply incomplete:",
       `  backend: ${applyReceipt.backend}`,
-      `  moves: ${applyReceipt.moveCount}`,
+      `  moves: ${succeeded}/${planned} succeeded`,
+      `  attempted: ${attempted}`,
+      `  failed: ${failed}`,
       `  backup: ${applyReceipt.backupId ?? "not needed"}`,
       `  receipt: ${applyReceipt.receiptPath}`
     );
+    if (!applyReceipt.verification.ok && applyBlockers.length > 0) {
+      lines.push("Blockers:", ...applyBlockers.map((blocker) => `  - ${blocker}`));
+    }
   } else if (applyBlockers.length > 0) {
     lines.push(
       "Apply refused:",
       ...applyBlockers.map((blocker) => `  - ${blocker}`)
     );
   } else {
-    lines.push("Apply available: session backend");
+    lines.push("Apply available with selected backend");
   }
 
   if (suggestedNextCommands.length > 0) {
@@ -510,7 +523,7 @@ export function formatSortDryRun(plan: SortPlan, applyBlockers: string[], sugges
       ...applyBlockers.map((blocker) => `  - ${blocker}`)
     );
   } else {
-    lines.push("Apply available: session backend");
+    lines.push("Apply available with selected backend");
   }
 
   if (suggestedNextCommands.length > 0) {

@@ -11,16 +11,16 @@ const profilePath = "/Users/main/Library/Application Support/zen/Profiles/4le6r9
 test("bridge inspection fails closed when Zen is not running", () => {
   const inspection = inspectBridge(context({ running: false, runningProcesses: [] }));
 
-  assert.equal(inspection.liveBackend.status, "unavailable");
-  assert.equal(inspection.liveBackend.applySupported, false);
+  assert.equal(inspection.liveBackend.status, "gated");
+  assert.equal(inspection.liveBackend.applySupported, true);
   assert.equal(inspection.candidateTransportDetected, false);
   assert.equal(inspection.candidatePrivilegedTransportDetected, false);
-  assert.match(inspection.blockers.join("\n"), /Live sort apply backend is not enabled/);
+  assert.match(inspection.blockers.join("\n"), /requires an attachable Zen bridge/);
   assert.match(inspection.blockers.join("\n"), /not running/);
-  assert.equal(inspection.checks.find((check) => check.id === "live_client").status, "fail");
+  assert.equal(inspection.checks.find((check) => check.id === "live_client").status, "warn");
 });
 
-test("bridge inspection detects privileged remote launch evidence without enabling live apply", () => {
+test("bridge inspection detects privileged remote launch evidence without treating it as attachment proof", () => {
   const inspection = inspectBridge(context({
     running: true,
     runningProcesses: [
@@ -34,9 +34,9 @@ test("bridge inspection detects privileged remote launch evidence without enabli
 
   assert.equal(inspection.candidateTransportDetected, true);
   assert.equal(inspection.candidatePrivilegedTransportDetected, true);
-  assert.equal(inspection.liveBackend.status, "unavailable");
-  assert.equal(inspection.liveBackend.applySupported, false);
-  assert.deepEqual(inspection.blockers, ["Live sort apply backend is not enabled; use explicit zts bridge proof commands for live bridge checks"]);
+  assert.equal(inspection.liveBackend.status, "gated");
+  assert.equal(inspection.liveBackend.applySupported, true);
+  assert.deepEqual(inspection.blockers, ["Live sort apply requires an attachable Zen bridge; run zts bridge live-check --connect for the current gate receipt"]);
   assert.match(inspection.warnings.join("\n"), /Remote launch flags are only transport evidence/);
 });
 
@@ -78,7 +78,7 @@ test("bridge inspection detects candidate flags from parsed ps output with trail
   assert.equal(runningProcesses[0].profilePath, profilePath);
   assert.equal(inspection.candidateTransportDetected, true);
   assert.equal(inspection.candidatePrivilegedTransportDetected, true);
-  assert.deepEqual(inspection.blockers, ["Live sort apply backend is not enabled; use explicit zts bridge proof commands for live bridge checks"]);
+  assert.deepEqual(inspection.blockers, ["Live sort apply requires an attachable Zen bridge; run zts bridge live-check --connect for the current gate receipt"]);
 });
 
 test("live attachment check refuses when the profile has no BiDi server file", async () => {

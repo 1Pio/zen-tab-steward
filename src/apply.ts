@@ -1,6 +1,7 @@
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createBackup } from "./backup.js";
+import { BridgeLiveMoveProof, runBridgeLiveMoveProof } from "./bridge.js";
 import { readJsonLz4, writeJsonLz4 } from "./mozlz4.js";
 import { ProfileContext } from "./profile.js";
 import { RawTab, RawZenSession } from "./session.js";
@@ -22,7 +23,7 @@ export interface AppliedMove {
 export interface ApplyReceipt {
   id: string;
   createdAt: string;
-  backend: "session";
+  backend: "session" | "live";
   profilePath: string;
   profileId: string;
   sessionFile: string;
@@ -30,15 +31,21 @@ export interface ApplyReceipt {
   command: string;
   ztsVersion: string;
   moveCount: number;
+  plannedMoveCount: number;
+  attemptedMoveCount: number;
+  succeededMoveCount: number;
+  failedMoveCount: number;
   skippedCount: number;
   reviewCount: number;
   blockedCount: number;
   verification: {
     ok: boolean;
     checkedMoves: number;
+    blockers?: string[];
   };
   receiptPath: string;
   moves: AppliedMove[];
+  liveProofs?: BridgeLiveMoveProof[];
 }
 
 export interface ApplyVerificationMismatch {
@@ -79,15 +86,35 @@ export function applyReceiptRootForProfile(profileId: string): string {
 export function offlineApplyBlockers(context: ProfileContext, backend: "auto" | "live" | "session"): string[] {
   const blockers: string[] = [];
   if (backend === "live") {
-    blockers.push("Live sort apply backend is unavailable; run zts bridge status for the current blocker receipt");
+    blockers.push("Live sort apply requires an attachable Zen bridge; run zts bridge live-check --connect for the current gate receipt");
     return blockers;
   }
   if (context.running) {
-    if (backend === "auto") blockers.push("Zen is running and no enabled live sort apply backend is available; run zts bridge status for the current blocker receipt");
+    if (backend === "auto") blockers.push("Zen is running; auto apply will use the gated live backend when the attachment gate passes");
     blockers.push("Offline session apply is blocked because Zen is running");
   }
   if (context.sessionFile.kind !== "zen-sessions") {
     blockers.push("Offline session apply requires zen-sessions.jsonlz4 as the selected session source");
+  }
+  return blockers;
+}
+
+export function sortApplyBlockers(context: ProfileContext, backend: "auto" | "live" | "session"): string[] {
+  if (backend === "session") return offlineApplyBlockers(context, "session");
+  if (backend === "live") return liveApplyStaticBlockers(context);
+  return context.running ? liveApplyStaticBlockers(context) : offlineApplyBlockers(context, "session");
+}
+
+export function resolveApplyBackend(context: ProfileContext, backend: "auto" | "live" | "session"): "session" | "live" {
+  if (backend === "session" || backend === "live") return backend;
+  return context.running ? "live" : "session";
+}
+
+export function liveApplyStaticBlockers(context: ProfileContext): string[] {
+  const blockers: string[] = [];
+  if (!context.running) blockers.push("Live sort apply requires Zen to be running");
+  if (context.sessionFile.kind !== "zen-sessions") {
+    blockers.push("Live sort apply requires zen-sessions.jsonlz4 as the selected session source");
   }
   return blockers;
 }
@@ -131,6 +158,10 @@ export async function applySortPlanOffline(
     command,
     ztsVersion: VERSION,
     moveCount: moves.length,
+    plannedMoveCount: moves.length,
+    attemptedMoveCount: moves.length,
+    succeededMoveCount: moves.length,
+    failedMoveCount: 0,
     skippedCount: plan.skipCount,
     reviewCount: plan.reviewCount,
     blockedCount: plan.blockedCount,
@@ -142,11 +173,78 @@ export async function applySortPlanOffline(
   return receipt;
 }
 
+export async function applySortPlanLive(
+  context: ProfileContext,
+  plan: SortPlan,
+  command: string
+): Promise<ApplyReceipt> {
+  const blockers = liveApplyStaticBlockers(context);
+  if (blockers.length > 0) throw new Error(blockers.join("; "));
+
+  const moves = plan.plannedActions.map(liveMoveFromAction);
+  const backup = moves.length > 0 ? await createBackup(context, command) : null;
+  const liveProofs: BridgeLiveMoveProof[] = [];
+  const verificationBlockers: string[] = [];
+  let attemptedMoveCount = 0;
+
+  for (const move of moves) {
+    attemptedMoveCount += 1;
+    const proofReceipt = await runBridgeLiveMoveProof(context, {
+      confirmLiveMove: true,
+      url: move.url,
+      fromWorkspaceId: move.fromWorkspaceId,
+      toWorkspaceId: move.toWorkspaceId
+    });
+    if (!proofReceipt.ok || !proofReceipt.moveProof) {
+      verificationBlockers.push(...proofReceipt.blockers);
+      break;
+    }
+    liveProofs.push(proofReceipt.moveProof);
+  }
+
+  const verification = {
+    ok: verificationBlockers.length === 0 && liveProofs.length === moves.length,
+    checkedMoves: liveProofs.length,
+    blockers: verificationBlockers
+  };
+
+  const createdAt = new Date().toISOString();
+  const id = createdAt;
+  const receiptRoot = applyReceiptRootForProfile(context.profile.id);
+  await mkdir(receiptRoot, { recursive: true });
+  const receiptPath = join(receiptRoot, `${id}--live-apply.json`);
+  const receipt: ApplyReceipt = {
+    id,
+    createdAt,
+    backend: "live",
+    profilePath: context.profile.path,
+    profileId: context.profile.id,
+    sessionFile: context.sessionFile.path,
+    backupId: backup?.id ?? null,
+    command,
+    ztsVersion: VERSION,
+    moveCount: liveProofs.length,
+    plannedMoveCount: moves.length,
+    attemptedMoveCount,
+    succeededMoveCount: liveProofs.length,
+    failedMoveCount: attemptedMoveCount - liveProofs.length,
+    skippedCount: plan.skipCount,
+    reviewCount: plan.reviewCount,
+    blockedCount: plan.blockedCount,
+    verification,
+    receiptPath,
+    moves,
+    liveProofs
+  };
+  await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, "utf8");
+  return receipt;
+}
+
 export async function listApplyReceipts(profileId: string): Promise<ApplyReceipt[]> {
   const root = applyReceiptRootForProfile(profileId);
   try {
     const entries = await readdir(root);
-    const receiptFiles = entries.filter((entry) => entry.endsWith("--session-apply.json")).sort().reverse();
+    const receiptFiles = entries.filter((entry) => /--(session|live)-apply\.json$/.test(entry)).sort().reverse();
     const receipts: ApplyReceipt[] = [];
     for (const receiptFile of receiptFiles) {
       receipts.push(JSON.parse(await readFile(join(root, receiptFile), "utf8")) as ApplyReceipt);
@@ -160,12 +258,14 @@ export async function listApplyReceipts(profileId: string): Promise<ApplyReceipt
 
 export async function findApplyReceipt(profileId: string, receiptId: string): Promise<ApplyReceipt | null> {
   const root = applyReceiptRootForProfile(profileId);
-  try {
-    return JSON.parse(await readFile(join(root, `${receiptId}--session-apply.json`), "utf8")) as ApplyReceipt;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw error;
+  for (const suffix of ["session", "live"]) {
+    try {
+      return JSON.parse(await readFile(join(root, `${receiptId}--${suffix}-apply.json`), "utf8")) as ApplyReceipt;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
   }
+  return null;
 }
 
 export async function verifyApplyReceipt(context: ProfileContext, receiptId: string): Promise<ApplyVerificationReport> {
@@ -188,6 +288,14 @@ export async function verifyApplyReceipt(context: ProfileContext, receiptId: str
       mismatchCount: 0,
       mismatches: [],
       blockers
+    };
+  } else if (receipt.backend === "live") {
+    verification = {
+      ok: false,
+      checkedMoves: 0,
+      mismatchCount: 0,
+      mismatches: [],
+      blockers: ["Live apply receipts cannot be reverified from session files yet; rely on the recorded live proof receipt or run a fresh live read/check"]
     };
   } else {
     verification = await verifyMovesDetailed(context.sessionFile.path, receipt.moves);
@@ -331,6 +439,23 @@ function applyTabMove(session: RawZenSession, action: EntityPlan): AppliedMove {
     throw new Error(`Planned move ${action.entityId} no longer matches source workspace ${action.sourceWorkspaceId}`);
   }
   tab.zenWorkspace = action.destinationWorkspaceId;
+  return {
+    entityId: action.entityId,
+    tabIndex: action.tabIndex,
+    title: action.title,
+    url: action.url,
+    fromWorkspaceId: action.sourceWorkspaceId,
+    fromWorkspaceName: action.sourceWorkspaceName,
+    toWorkspaceId: action.destinationWorkspaceId,
+    toWorkspaceName: action.destinationWorkspaceName
+  };
+}
+
+function liveMoveFromAction(action: EntityPlan): AppliedMove {
+  if (action.entityType !== "tab") throw new Error(`Unsupported entity type for live apply: ${action.entityType}`);
+  if (!action.destinationWorkspaceId || !action.destinationWorkspaceName) {
+    throw new Error(`Planned move ${action.entityId} has no destination workspace`);
+  }
   return {
     entityId: action.entityId,
     tabIndex: action.tabIndex,
