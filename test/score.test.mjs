@@ -68,7 +68,7 @@ test("low-confidence semantic match routes to review instead of move", async () 
       { uuid: "w-space", name: "Space" },
       { uuid: "w-misc", name: "Notes" }
     ],
-    tabs: [{ zenWorkspace: "w-space", entries: [{ url: "https://example.com/random", title: "random notes" }] }]
+    tabs: [{ zenWorkspace: "w-space", entries: [{ url: "https://example.com/pasta-recipe", title: "cooking pasta recipe" }] }]
   };
   const summary = {
     workspaces: [
@@ -85,12 +85,13 @@ test("low-confidence semantic match routes to review instead of move", async () 
     options: {
       fieldWeights,
       componentWeights: { lexical: 0.45, dense: 0.4, domain: 0.15 },
-      minConfidence: 0.95,
+      minConfidence: 0.5,
       minMargin: 0.0,
       reviewOnTie: true,
       denseAvailable: false
     },
-    tabs: [{ entityId: "t0", title: "random notes", url: "https://example.com/random", domain: "example.com" }]
+    tabs: [{ entityId: "t0", title: "cooking pasta recipe", url: "https://example.com/pasta-recipe", domain: "example.com" }],
+    sourceWorkspaceId: "w-space"
   });
   const decision = decisions.get("t0");
   assert.equal(decision.move, false);

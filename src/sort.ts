@@ -1,5 +1,6 @@
 import { RawFolder, RawGroup, RawTab, RawZenSession, SessionSummary, WorkspaceSummary } from "./session.js";
 import { domainFromUrl, matchesUrlPattern, normalizeName, selectedTabEntry, tabProtectionReasons } from "./util.js";
+import { SemanticDecision } from "./embeddings/score.js";
 
 export interface SortInputs {
   preview: boolean;
@@ -15,6 +16,12 @@ export interface SortInputs {
   backend: "auto" | "live" | "session";
   domainRules: Record<string, string>;
   protectedDomains: string[];
+  semantic: SemanticFallback | null;
+}
+
+export interface SemanticFallback {
+  decisions: Map<string, SemanticDecision>;
+  enabled: boolean;
 }
 
 export type PlanAction = "move" | "skip" | "review" | "blocked";
@@ -142,6 +149,8 @@ export function planSortPreview(
 
     const classification = classifyByDomain(entity.domain, workspaceByName, domainRules);
     if (!classification) {
+      const semanticApplied = applySemanticFallback(entity, inputs, workspaceByName, plannedActions, reviewActions, blockedActions);
+      if (semanticApplied) return;
       reviewActions.push({
         ...entity,
         action: "review",
@@ -418,6 +427,77 @@ function structuredProtectionReasons(tabs: RawTab[], type: "folder" | "group"): 
     for (const reason of tabProtectionReasons(tab)) reasons.add(reason);
   }
   return Array.from(reasons);
+}
+
+function applySemanticFallback(
+  entity: Omit<EntityPlan, "action" | "reason" | "confidence" | "explanation">,
+  inputs: SortInputs,
+  workspaceByName: Map<string, WorkspaceSummary>,
+  plannedActions: EntityPlan[],
+  reviewActions: EntityPlan[],
+  blockedActions: EntityPlan[]
+): boolean {
+  const fallback = inputs.semantic;
+  if (!fallback?.enabled) return false;
+  const decision = fallback.decisions.get(entity.entityId);
+  if (!decision || !decision.top) return false;
+  const destination = workspaceByName.get(decision.top.workspaceId)
+    ?? workspaceByName.get(normalizeName(decision.top.workspaceId))
+    ?? workspaceByName.get(decision.top.workspaceName);
+  if (!destination) return false;
+  const evidence = decision.top.evidence.length > 0 ? decision.top.evidence.join(", ") : "semantic affinity";
+  const explanation = `Semantic match ${decision.score.toFixed(2)} -> ${destination.name} (${evidence}; margin ${decision.margin.toFixed(2)})`;
+
+  if (!decision.move) {
+    const alternatives = decision.candidates.slice(0, 3).map((c) => `${c.workspaceName} ${c.score.toFixed(2)}`).join(", ");
+    reviewActions.push({
+      ...entity,
+      action: "review",
+      reason: decision.reason,
+      destinationWorkspaceId: destination.id,
+      destinationWorkspaceName: destination.name,
+      confidence: decision.score,
+      explanation: `${explanation}; alternatives: ${alternatives}`
+    });
+    return true;
+  }
+
+  const destinationBlocker = destinationBlockedReason(destination, inputs);
+  if (destinationBlocker) {
+    blockedActions.push({
+      ...entity,
+      action: "blocked",
+      reason: destinationBlocker,
+      destinationWorkspaceId: destination.id,
+      destinationWorkspaceName: destination.name,
+      confidence: decision.score,
+      explanation: destinationBlocker === "destination_workspace_protected"
+        ? `Destination workspace ${destination.name} is protected from sorting`
+        : `Destination workspace ${destination.name} is excluded by the active sort policy`
+    });
+    return true;
+  }
+
+  const moveAction: EntityPlan = {
+    ...entity,
+    action: "move",
+    reason: "semantic_affinity",
+    destinationWorkspaceId: destination.id,
+    destinationWorkspaceName: destination.name,
+    confidence: decision.score,
+    explanation
+  };
+  if (inputs.limit !== null && plannedActions.length >= inputs.limit) {
+    reviewActions.push({
+      ...moveAction,
+      action: "review",
+      reason: "over_move_limit",
+      explanation: `${explanation}, but the planned move limit ${inputs.limit} was reached`
+    });
+    return true;
+  }
+  plannedActions.push(moveAction);
+  return true;
 }
 
 function classifyStructuredDestination(

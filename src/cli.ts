@@ -10,6 +10,12 @@ import { listTabs, loadSession, loadSessionSummary, summarizeSession, withWorksp
 import { classifyDomainForWorkspace, planSortPreview, SortInputs, SortPlan } from "./sort.js";
 import { buildIndex, loadIndex } from "./embeddings/store.js";
 import { resolveProvider } from "./embeddings/select.js";
+import { scoreTabsSemantically } from "./embeddings/index.js";
+import { buildTabEmbeddingInputs } from "./embeddings/profile.js";
+import type { EmbeddingsProvider } from "./embeddings/provider.js";
+import type { FieldWeights } from "./embeddings/provider.js";
+import type { SemanticDecision } from "./embeddings/score.js";
+import type { RawZenSession, SessionSummary, WorkspaceSummary } from "./session.js";
 import { VERSION } from "./version.js";
 
 interface JsonOption {
@@ -42,6 +48,8 @@ program
   .option("--except <patterns>", "comma-separated exclusion URL/domain patterns")
   .option("--limit <count>", "cap the number of moves planned or applied")
   .option("--backend <backend>", "backend preference: auto, live, or session")
+  .option("--semantic", "use semantic workspace-affinity as a fallback when no rule matches")
+  .option("--index", "refresh the local embeddings index before planning (use with --semantic)")
   .option("--json", "print stable JSON output")
   .action(async (sourceWorkspace: string | undefined, options: JsonOption & SortOptions) => {
     await runCommand("sort", options, async () => {
@@ -83,6 +91,39 @@ program
         }
         process.exitCode = 1;
         return;
+      }
+      const semanticEnabled = Boolean(options.semantic) || loadedConfig.config.semantic.enabled;
+      const semanticBlockers: string[] = [];
+      if (semanticEnabled) {
+        const resolvedEmbeddings = await resolveProvider(loadedConfig.config);
+        semanticBlockers.push(...resolvedEmbeddings.blockers);
+        if (semanticBlockers.length === 0) {
+          if (Boolean(options.index) || loadedConfig.config.semantic.autoIndex) {
+            const previous = await loadIndex(context.profile.id);
+            await buildIndex({
+              profileId: context.profile.id,
+              session,
+              summary,
+              domainRules: loadedConfig.config.rules.domains,
+              provider: resolvedEmbeddings.provider,
+              weights: loadedConfig.config.embeddings.weights,
+              reuse: previous
+            });
+          }
+          const decisions = await buildSemanticDecisions({
+            session,
+            summary,
+            source,
+            domainRules: loadedConfig.config.rules.domains,
+            provider: resolvedEmbeddings.provider,
+            weights: loadedConfig.config.embeddings.weights,
+            denseAvailable: resolvedEmbeddings.denseAvailable,
+            minConfidence: loadedConfig.config.semantic.minConfidence,
+            minMargin: loadedConfig.config.semantic.minMargin,
+            reviewOnTie: loadedConfig.config.semantic.reviewOnTie
+          });
+          inputs.semantic = { enabled: true, decisions };
+        }
       }
       const plan = planSortPreview(session, summary, source, inputs);
 
@@ -157,6 +198,7 @@ program
         inputs,
         mode: previewRequested ? "preview" : dryRunRequested ? "dry-run" : "apply",
         cancelled,
+        semantic: { enabled: semanticEnabled, active: Boolean(inputs.semantic?.enabled), blockers: semanticBlockers },
         plan,
         apply: {
           ready: applyReady,
@@ -178,13 +220,16 @@ program
       };
 
       if (options.json) {
-        printJson(envelope("sort", data, { ok, blockers: applyBlockers, suggestedNextCommands }));
+        printJson(envelope("sort", data, { ok, blockers: applyBlockers, warnings: semanticBlockers, suggestedNextCommands }));
         process.exitCode = ok ? 0 : 2;
       } else {
         const formatter = applyRequested
           ? (applyReceipt ? formatApplyResult : formatSortPreview)
           : dryRunRequested ? formatSortDryRun : formatSortPreview;
         process.stdout.write(`${formatter(renderContext)}`);
+        if (semanticBlockers.length > 0) {
+          process.stderr.write(`Semantic unavailable:\n${semanticBlockers.map((b) => `  - ${b}`).join("\n")}\n`);
+        }
         process.exitCode = ok ? 0 : 2;
       }
     });
@@ -821,6 +866,8 @@ interface SortOptions {
   except?: string;
   limit?: string;
   backend?: string;
+  semantic?: boolean;
+  index?: boolean;
 }
 
 interface BackupOptions {
@@ -1015,8 +1062,45 @@ function csvOption(value: string | undefined, fallback: string[]): string[] {
   return value === undefined ? fallback : splitCsv(value);
 }
 
-function sortInputs(options: SortOptions, config: ZtsConfig): SortInputs {
-  return {
+async function buildSemanticDecisions(input: {
+  session: RawZenSession;
+  summary: SessionSummary;
+  source: WorkspaceSummary;
+  domainRules: Record<string, string>;
+  provider: EmbeddingsProvider;
+  weights: FieldWeights;
+  denseAvailable: boolean;
+  minConfidence: number;
+  minMargin: number;
+  reviewOnTie: boolean;
+}): Promise<Map<string, SemanticDecision>> {
+  const tabs = buildTabEmbeddingInputs(input.session, (tab) => {
+    if (tab.zenWorkspace !== input.source.id) return false;
+    if (tab.pinned || tab.zenEssential || tab.groupId || tab.zenLiveFolderItemId) return false;
+    return true;
+  });
+  if (tabs.length === 0) return new Map();
+  const decisions = await scoreTabsSemantically({
+    session: input.session,
+    summary: input.summary,
+    domainRules: input.domainRules,
+    provider: input.provider,
+    weights: input.weights,
+    options: {
+      fieldWeights: input.weights,
+      componentWeights: { lexical: 0.45, dense: 0.4, domain: 0.15 },
+      minConfidence: input.minConfidence,
+      minMargin: input.minMargin,
+      reviewOnTie: input.reviewOnTie,
+      denseAvailable: input.denseAvailable
+    },
+    tabs,
+    sourceWorkspaceId: input.source.id
+  });
+  return decisions;
+}
+
+function sortInputs(options: SortOptions, config: ZtsConfig): SortInputs {  return {
     preview: Boolean(options.preview),
     dryRun: Boolean(options.dryRun),
     minConfidence: options.minConfidence === undefined ? config.defaults.minConfidence : Number(options.minConfidence),
@@ -1029,7 +1113,8 @@ function sortInputs(options: SortOptions, config: ZtsConfig): SortInputs {
     limit: options.limit === undefined ? null : Number(options.limit),
     backend: options.backend === undefined ? config.defaults.applyBackend : normalizeBackend(options.backend),
     domainRules: config.rules.domains,
-    protectedDomains: config.protect.domains.neverMove
+    protectedDomains: config.protect.domains.neverMove,
+    semantic: null
   };
 }
 

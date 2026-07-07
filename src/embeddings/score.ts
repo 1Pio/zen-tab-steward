@@ -2,6 +2,8 @@ import { FieldWeights, ScoredWorkspace, TabEmbedding, WorkspaceEmbedding, Worksp
 import { WorkspaceSummary } from "../session.js";
 import { cosineSparseRecords, sparseVectorNorm } from "./lexical.js";
 
+export const LEXICAL_CALIBRATION = 2.0;
+
 export interface ComponentWeights {
   lexical: number;
   dense: number;
@@ -57,7 +59,7 @@ export function scoreTabAgainstWorkspaces(
     const profile = workspaceProfiles.find((p) => p.workspaceId === workspaceEmbedding.workspaceId);
 
     const lexicalScore = tabSparse && workspaceEmbedding.sparse
-      ? clamp(cosineSparseRecords(tabSparse, tabNorm, workspaceEmbedding.sparse, sparseVectorNorm(workspaceEmbedding.sparse)))
+      ? clamp(cosineSparseRecords(tabSparse, tabNorm, workspaceEmbedding.sparse, sparseVectorNorm(workspaceEmbedding.sparse)) * LEXICAL_CALIBRATION)
       : 0;
     const denseScore = options.denseAvailable && tabDense && workspaceEmbedding.dense
       ? clamp(dot(tabDense, workspaceEmbedding.dense))
