@@ -423,8 +423,7 @@ export function formatBackupPrune(receipt: BackupPruneReceipt): string {
   return lines.join("\n");
 }
 
-export function formatApplyReceiptList(receipts: ApplyReceipt[]): string {
-  if (receipts.length === 0) return "No apply receipts found";
+export function formatApplyReceiptList(receipts: ApplyReceipt[]): string {  if (receipts.length === 0) return "No apply receipts found";
   return [
     "Apply receipts",
     ...receipts.map((receipt) => {
@@ -782,4 +781,62 @@ function humanBlockReason(reason: string): string {
     case "destination_not_allowed": return "destination not allowed";
     default: return reason;
   }
+}
+
+export interface IndexReportData {
+  providerId: string;
+  providerVersion: string;
+  profileId: string;
+  path: string;
+  total: number;
+  indexed: number;
+  reused: number;
+  workspaceCount: number;
+  denseAvailable: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export function formatIndexReport(report: IndexReportData, blockers: string[]): string {
+  const lines = [
+    `Embeddings index · ${report.providerId} v${report.providerVersion}`,
+    `Profile:      ${report.profileId}`,
+    `Path:         ${report.path}`,
+    `Workspaces:   ${report.workspaceCount}`,
+    `Tabs:         ${report.total}   (${report.indexed} indexed · ${report.reused} reused)`,
+    `Dense:        ${report.denseAvailable ? "available" : "lexical only"}`,
+    `Created:      ${report.createdAt}`,
+    `Updated:      ${report.updatedAt}`
+  ];
+  if (blockers.length > 0) {
+    lines.push("", "Blockers:", ...blockers.map((b) => `  - ${b}`));
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+export interface EmbeddingsStatusData {
+  configuredProvider: string;
+  provider: { id: string; available: boolean; kind: string; detail: string };
+  denseAvailable: boolean;
+  blockers: string[];
+  model: string;
+  cacheDir: string;
+}
+
+export function formatEmbeddingsStatus(data: EmbeddingsStatusData): string {
+  const lines = [
+    "Embeddings status",
+    `Configured provider: ${data.configuredProvider}`,
+    `Active provider:     ${data.provider.id} (${data.provider.kind})`,
+    `Available:           ${data.provider.available ? "yes" : "no"}`,
+    `Dense embeddings:    ${data.denseAvailable ? "available" : "lexical only"}`,
+    `Model:               ${data.model}`,
+    `Cache dir:           ${data.cacheDir}`,
+    "",
+    data.provider.detail
+  ];
+  if (data.blockers.length > 0) {
+    lines.push("", "Blockers:", ...data.blockers.map((b) => `  - ${b}`));
+  }
+  return `${lines.join("\n")}\n`;
 }

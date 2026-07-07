@@ -4,10 +4,12 @@ import { applySortPlanLive, applySortPlanOffline, listApplyReceipts, resolveAppl
 import { createBackup, listBackups, pruneBackups, restoreBackup } from "./backup.js";
 import { inspectBridge, inspectLiveAttachment, runBridgeLiveMoveProof, runBridgeLiveReadProof, runBridgeProbe } from "./bridge.js";
 import { addDomainRuleInContents, getConfigValue, loadConfig, saveConfigContents, setConfigValueInContents, ZtsConfig } from "./config.js";
-import { envelope, formatApplyReceiptList, formatApplyVerification, formatBackup, formatBackupList, formatBackupPrune, formatBridge, formatBridgeLiveAttachment, formatBridgeLiveMove, formatBridgeLiveRead, formatBridgeProbe, formatRestore, formatReview, formatApplyResult, formatSortDryRun, formatSortPreview, formatStatus, formatTabs, formatWorkspaces, printJson, SortRenderContext } from "./output.js";
+import { envelope, formatApplyReceiptList, formatApplyVerification, formatBackup, formatBackupList, formatBackupPrune, formatBridge, formatBridgeLiveAttachment, formatBridgeLiveMove, formatBridgeLiveRead, formatBridgeProbe, formatEmbeddingsStatus, formatIndexReport, formatRestore, formatReview, formatApplyResult, formatSortDryRun, formatSortPreview, formatStatus, formatTabs, formatWorkspaces, printJson, SortRenderContext } from "./output.js";
 import { discoverProfileContext } from "./profile.js";
 import { listTabs, loadSession, loadSessionSummary, summarizeSession, withWorkspacePolicy } from "./session.js";
 import { classifyDomainForWorkspace, planSortPreview, SortInputs, SortPlan } from "./sort.js";
+import { buildIndex, loadIndex } from "./embeddings/store.js";
+import { resolveProvider } from "./embeddings/select.js";
 import { VERSION } from "./version.js";
 
 interface JsonOption {
@@ -187,6 +189,143 @@ program
       }
     });
   });
+
+program
+  .command("index")
+  .description("Build or refresh the local embeddings index used by semantic sorting")
+  .argument("[source-workspace]", "optional workspace to scope indexing (defaults to all)")
+  .option("--json", "print stable JSON output")
+  .action(async (_sourceWorkspace: string | undefined, options: JsonOption) => {
+    await runCommand("index", options, async () => {
+      const context = await discoverProfileContext();
+      const loadedConfig = await loadConfig();
+      const session = await loadSession(context.sessionFile);
+      const summary = withWorkspacePolicy(summarizeSession(session, context.sessionFile), loadedConfig.config);
+      const resolved = await resolveProvider(loadedConfig.config);
+      const previous = await loadIndex(context.profile.id);
+      const report = await buildIndex({
+        profileId: context.profile.id,
+        session,
+        summary,
+        domainRules: loadedConfig.config.rules.domains,
+        provider: resolved.provider,
+        weights: loadedConfig.config.embeddings.weights,
+        reuse: previous
+      });
+      const data = {
+        profile: context.profile,
+        provider: { id: resolved.provider.id, version: resolved.provider.version, denseAvailable: resolved.denseAvailable },
+        report: {
+          providerId: resolved.provider.id,
+          providerVersion: resolved.provider.version,
+          profileId: context.profile.id,
+          path: report.path,
+          total: report.total,
+          indexed: report.indexed,
+          reused: report.reused,
+          workspaceCount: report.workspaceCount,
+          denseAvailable: resolved.denseAvailable,
+          createdAt: report.record.createdAt,
+          updatedAt: report.record.updatedAt
+        }
+      };
+      if (options.json) {
+        printJson(envelope("index", data, { blockers: resolved.blockers, suggestedNextCommands: ["zts sort --semantic --preview", "zts embeddings status"] }));
+      } else {
+        process.stdout.write(formatIndexReport(data.report, resolved.blockers));
+      }
+      if (resolved.blockers.length > 0) process.exitCode = 2;
+    });
+  });
+
+program
+  .command("embeddings")
+  .description("Inspect or install the embeddings providers that power semantic sorting")
+  .argument("[action]", "status, install, or test")
+  .argument("[target]", "provider id for install, or query text for test")
+  .option("--workspace <workspace>", "workspace to score against for test")
+  .option("--json", "print stable JSON output")
+  .action(async (action: string | undefined, target: string | undefined, options: JsonOption & { workspace?: string }) => {
+    const selectedAction = action ?? "status";
+    if (selectedAction === "status") {
+      await runCommand("embeddings status", options, async () => {
+        const context = await discoverProfileContext();
+        const loadedConfig = await loadConfig();
+        const resolved = await resolveProvider(loadedConfig.config);
+        const providerStatus = await resolved.provider.status();
+        const existing = await loadIndex(context.profile.id);
+        const data = {
+          profile: context.profile,
+          configuredProvider: loadedConfig.config.embeddings.provider,
+          provider: {
+            id: providerStatus.id,
+            available: providerStatus.available,
+            kind: providerStatus.kind,
+            detail: providerStatus.detail
+          },
+          denseAvailable: resolved.denseAvailable,
+          blockers: resolved.blockers,
+          model: loadedConfig.config.embeddings.model,
+          cacheDir: loadedConfig.config.embeddings.cacheDir,
+          indexPresent: Boolean(existing),
+          indexUpdatedAt: existing?.updatedAt ?? null,
+          indexTabCount: existing?.tabs.length ?? 0
+        };
+        if (options.json) {
+          printJson(envelope("embeddings status", data, { blockers: resolved.blockers }));
+        } else {
+          process.stdout.write(formatEmbeddingsStatus(data));
+        }
+        if (resolved.blockers.length > 0) process.exitCode = 2;
+      });
+      return;
+    }
+    if (selectedAction === "install") {
+      await runCommand("embeddings install", options, async () => {
+        const loadedConfig = await loadConfig();
+        const targetProvider = target ?? "bge-small";
+        if (targetProvider !== "bge-small") {
+          const message = `Unknown neural provider '${targetProvider}'. Currently supported: bge-small`;
+          if (options.json) printJson(envelope("embeddings install", { target: targetProvider }, { ok: false, blockers: [message] }));
+          else process.stderr.write(`zts: ${message}\n`);
+          process.exitCode = 1;
+          return;
+        }
+        const { ensureNeuralProvider, neuralProvider } = await import("./embeddings/neural-provider.js");
+        const result = await ensureNeuralProvider({
+          model: loadedConfig.config.embeddings.model,
+          cacheDir: loadedConfig.config.embeddings.cacheDir,
+          allowDownload: true
+        });
+        const status = await neuralProvider.status();
+        const data = {
+          target: targetProvider,
+          model: loadedConfig.config.embeddings.model,
+          cacheDir: loadedConfig.config.embeddings.cacheDir,
+          available: status.available,
+          error: result.error
+        };
+        const ok = status.available;
+        const blockers = status.available ? [] : status.blockers;
+        if (options.json) {
+          printJson(envelope("embeddings install", data, { ok, blockers, suggestedNextCommands: ["zts embeddings status", "zts config set embeddings.provider hybrid"] }));
+        } else {
+          if (ok) process.stdout.write(`Installed ${targetProvider} · ${loadedConfig.config.embeddings.model}\nCache: ${loadedConfig.config.embeddings.cacheDir}\n`);
+          else process.stderr.write(`Install incomplete:\n${blockers.map((b) => `  - ${b}`).join("\n")}\n`);
+        }
+        process.exitCode = ok ? 0 : 2;
+      });
+      return;
+    }
+    const message = `unknown embeddings action '${selectedAction}'`;
+    if (options.json) {
+      printJson(envelope("embeddings", { action: selectedAction }, { ok: false, blockers: [message], suggestedNextCommands: ["zts embeddings status"] }));
+    } else {
+      process.stderr.write(`zts: ${message}\n`);
+    }
+    process.exitCode = 1;
+  });
+
 program
   .command("status")
   .description("Report discovered profile, session counts, backend availability, and safety posture")

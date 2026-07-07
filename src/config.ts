@@ -29,6 +29,25 @@ export interface ZtsConfig {
   rules: {
     domains: Record<string, string>;
   };
+  embeddings: {
+    provider: "built-in" | "bge-small" | "hybrid";
+    allowDownload: boolean;
+    model: string;
+    cacheDir: string;
+    weights: {
+      title: number;
+      url: number;
+      domain: number;
+      description: number;
+    };
+  };
+  semantic: {
+    enabled: boolean;
+    autoIndex: boolean;
+    minConfidence: number;
+    minMargin: number;
+    reviewOnTie: boolean;
+  };
 }
 
 export interface LoadedConfig {
@@ -64,6 +83,20 @@ export const DEFAULT_CONFIG: ZtsConfig = {
   },
   rules: {
     domains: {}
+  },
+  embeddings: {
+    provider: "built-in",
+    allowDownload: false,
+    model: "Xenova/bge-small-en-v1.5",
+    cacheDir: "~/.cache/zen-tab-steward/models",
+    weights: { title: 1.0, url: 0.7, domain: 1.2, description: 0.6 }
+  },
+  semantic: {
+    enabled: false,
+    autoIndex: false,
+    minConfidence: 0.78,
+    minMargin: 0.1,
+    reviewOnTie: true
   }
 };
 
@@ -118,6 +151,9 @@ export function parseConfig(contents: string): ZtsConfig {
     if (section === "protect.workspaces") setProtectWorkspace(config, key, value);
     if (section === "protect.domains") setProtectDomain(config, key, value);
     if (section === "rules.domains" && typeof value === "string") config.rules.domains[key] = value;
+    if (section === "embeddings") setEmbeddings(config, key, value);
+    if (section === "embeddings.weights") setEmbeddingsWeights(config, key, value);
+    if (section === "semantic") setSemantic(config, key, value);
   }
 
   return config;
@@ -146,6 +182,25 @@ export function formatConfig(config: ZtsConfig): string {
     "[protect.domains]",
     `never_move = ${formatArray(config.protect.domains.neverMove)}`,
     "",
+    "[embeddings]",
+    `provider = ${quote(config.embeddings.provider)}`,
+    `allow_download = ${formatPrimitive(config.embeddings.allowDownload)}`,
+    `model = ${quote(config.embeddings.model)}`,
+    `cache_dir = ${quote(config.embeddings.cacheDir)}`,
+    "",
+    "[embeddings.weights]",
+    `title = ${formatPrimitive(config.embeddings.weights.title)}`,
+    `url = ${formatPrimitive(config.embeddings.weights.url)}`,
+    `domain = ${formatPrimitive(config.embeddings.weights.domain)}`,
+    `description = ${formatPrimitive(config.embeddings.weights.description)}`,
+    "",
+    "[semantic]",
+    `enabled = ${formatPrimitive(config.semantic.enabled)}`,
+    `auto_index = ${formatPrimitive(config.semantic.autoIndex)}`,
+    `min_confidence = ${formatPrimitive(config.semantic.minConfidence)}`,
+    `min_margin = ${formatPrimitive(config.semantic.minMargin)}`,
+    `review_on_tie = ${formatPrimitive(config.semantic.reviewOnTie)}`,
+    "",
     "[rules.domains]"
   ];
 
@@ -173,6 +228,19 @@ export function getConfigValue(config: ZtsConfig, keyPath: string): unknown {
   if (keyPath.startsWith("rules.domains.")) {
     return config.rules.domains[keyPath.slice("rules.domains.".length)];
   }
+  if (keyPath === "embeddings.provider") return config.embeddings.provider;
+  if (keyPath === "embeddings.allow_download") return config.embeddings.allowDownload;
+  if (keyPath === "embeddings.model") return config.embeddings.model;
+  if (keyPath === "embeddings.cache_dir") return config.embeddings.cacheDir;
+  if (keyPath === "embeddings.weights.title") return config.embeddings.weights.title;
+  if (keyPath === "embeddings.weights.url") return config.embeddings.weights.url;
+  if (keyPath === "embeddings.weights.domain") return config.embeddings.weights.domain;
+  if (keyPath === "embeddings.weights.description") return config.embeddings.weights.description;
+  if (keyPath === "semantic.enabled") return config.semantic.enabled;
+  if (keyPath === "semantic.auto_index") return config.semantic.autoIndex;
+  if (keyPath === "semantic.min_confidence") return config.semantic.minConfidence;
+  if (keyPath === "semantic.min_margin") return config.semantic.minMargin;
+  if (keyPath === "semantic.review_on_tie") return config.semantic.reviewOnTie;
   throw new Error(`Unsupported config key: ${keyPath}`);
 }
 
@@ -191,6 +259,19 @@ export function setConfigValue(config: ZtsConfig, keyPath: string, rawValue: str
   else if (keyPath === "protect.workspaces.from") next.protect.workspaces.from = parseStringArray(rawValue);
   else if (keyPath === "protect.workspaces.to") next.protect.workspaces.to = parseStringArray(rawValue);
   else if (keyPath === "protect.domains.never_move") next.protect.domains.neverMove = parseStringArray(rawValue);
+  else if (keyPath === "embeddings.provider") next.embeddings.provider = parseProvider(rawValue);
+  else if (keyPath === "embeddings.allow_download") next.embeddings.allowDownload = parseBoolean(rawValue);
+  else if (keyPath === "embeddings.model") next.embeddings.model = rawValue;
+  else if (keyPath === "embeddings.cache_dir") next.embeddings.cacheDir = rawValue;
+  else if (keyPath === "embeddings.weights.title") next.embeddings.weights.title = Number(rawValue);
+  else if (keyPath === "embeddings.weights.url") next.embeddings.weights.url = Number(rawValue);
+  else if (keyPath === "embeddings.weights.domain") next.embeddings.weights.domain = Number(rawValue);
+  else if (keyPath === "embeddings.weights.description") next.embeddings.weights.description = Number(rawValue);
+  else if (keyPath === "semantic.enabled") next.semantic.enabled = parseBoolean(rawValue);
+  else if (keyPath === "semantic.auto_index") next.semantic.autoIndex = parseBoolean(rawValue);
+  else if (keyPath === "semantic.min_confidence") next.semantic.minConfidence = parseConfidence(rawValue);
+  else if (keyPath === "semantic.min_margin") next.semantic.minMargin = parseFraction(rawValue);
+  else if (keyPath === "semantic.review_on_tie") next.semantic.reviewOnTie = parseBoolean(rawValue);
   else throw new Error(`Unsupported config key: ${keyPath}`);
   return next;
 }
@@ -226,6 +307,19 @@ function configPatchForSet(keyPath: string, rawValue: string): { section: string
   if (keyPath === "protect.workspaces.from") return { section: "protect.workspaces", key: "from", value: formatArray(parseStringArray(rawValue)) };
   if (keyPath === "protect.workspaces.to") return { section: "protect.workspaces", key: "to", value: formatArray(parseStringArray(rawValue)) };
   if (keyPath === "protect.domains.never_move") return { section: "protect.domains", key: "never_move", value: formatArray(parseStringArray(rawValue)) };
+  if (keyPath === "embeddings.provider") return { section: "embeddings", key: "provider", value: quote(parseProvider(rawValue)) };
+  if (keyPath === "embeddings.allow_download") return { section: "embeddings", key: "allow_download", value: formatPrimitive(parseBoolean(rawValue)) };
+  if (keyPath === "embeddings.model") return { section: "embeddings", key: "model", value: quote(rawValue) };
+  if (keyPath === "embeddings.cache_dir") return { section: "embeddings", key: "cache_dir", value: quote(rawValue) };
+  if (keyPath === "embeddings.weights.title") return { section: "embeddings.weights", key: "title", value: formatPrimitive(Number(rawValue)) };
+  if (keyPath === "embeddings.weights.url") return { section: "embeddings.weights", key: "url", value: formatPrimitive(Number(rawValue)) };
+  if (keyPath === "embeddings.weights.domain") return { section: "embeddings.weights", key: "domain", value: formatPrimitive(Number(rawValue)) };
+  if (keyPath === "embeddings.weights.description") return { section: "embeddings.weights", key: "description", value: formatPrimitive(Number(rawValue)) };
+  if (keyPath === "semantic.enabled") return { section: "semantic", key: "enabled", value: formatPrimitive(parseBoolean(rawValue)) };
+  if (keyPath === "semantic.auto_index") return { section: "semantic", key: "auto_index", value: formatPrimitive(parseBoolean(rawValue)) };
+  if (keyPath === "semantic.min_confidence") return { section: "semantic", key: "min_confidence", value: formatPrimitive(parseConfidence(rawValue)) };
+  if (keyPath === "semantic.min_margin") return { section: "semantic", key: "min_margin", value: formatPrimitive(parseFraction(rawValue)) };
+  if (keyPath === "semantic.review_on_tie") return { section: "semantic", key: "review_on_tie", value: formatPrimitive(parseBoolean(rawValue)) };
   throw new Error(`Unsupported config key: ${keyPath}`);
 }
 
@@ -295,6 +389,41 @@ function setProtectWorkspace(config: ZtsConfig, key: string, value: unknown): vo
 
 function setProtectDomain(config: ZtsConfig, key: string, value: unknown): void {
   if (key === "never_move") config.protect.domains.neverMove = parseStringArray(value);
+}
+
+function setEmbeddings(config: ZtsConfig, key: string, value: unknown): void {
+  if (key === "provider" && typeof value === "string") config.embeddings.provider = parseProvider(value);
+  if (key === "allow_download") config.embeddings.allowDownload = parseBoolean(String(value));
+  if (key === "model" && typeof value === "string") config.embeddings.model = value;
+  if (key === "cache_dir" && typeof value === "string") config.embeddings.cacheDir = value;
+}
+
+function setEmbeddingsWeights(config: ZtsConfig, key: string, value: unknown): void {
+  if (key === "title") config.embeddings.weights.title = Number(value);
+  if (key === "url") config.embeddings.weights.url = Number(value);
+  if (key === "domain") config.embeddings.weights.domain = Number(value);
+  if (key === "description") config.embeddings.weights.description = Number(value);
+}
+
+function setSemantic(config: ZtsConfig, key: string, value: unknown): void {
+  if (key === "enabled") config.semantic.enabled = parseBoolean(String(value));
+  if (key === "auto_index") config.semantic.autoIndex = parseBoolean(String(value));
+  if (key === "min_confidence") config.semantic.minConfidence = parseConfidence(String(value));
+  if (key === "min_margin") config.semantic.minMargin = parseFraction(String(value));
+  if (key === "review_on_tie") config.semantic.reviewOnTie = parseBoolean(String(value));
+}
+
+function parseProvider(value: string): ZtsConfig["embeddings"]["provider"] {
+  if (value === "built-in" || value === "bge-small" || value === "hybrid") return value;
+  throw new Error("embeddings.provider must be one of: built-in, bge-small, hybrid");
+}
+
+function parseFraction(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
+    throw new Error("fraction config values must be a number between 0 and 1");
+  }
+  return parsed;
 }
 
 function parseValue(value: string): string | number | boolean | string[] {

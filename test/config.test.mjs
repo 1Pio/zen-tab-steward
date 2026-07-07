@@ -103,3 +103,43 @@ test("parses and preserves inline comments on supported config values", () => {
   assert.match(withRule, /"docs.example.com" = "Research" # docs/);
   assert.match(withRule, /"github.com" = "Tool Development"/);
 });
+
+test("parses, formats, and round-trips the embeddings and semantic sections", () => {
+  const config = parseConfig(`
+[embeddings]
+provider = "hybrid"
+allow_download = false
+model = "Xenova/bge-small-en-v1.5"
+cache_dir = "~/.cache/zen-tab-steward/models"
+
+[embeddings.weights]
+title = 1.2
+url = 0.6
+domain = 1.4
+description = 0.8
+
+[semantic]
+enabled = true
+auto_index = true
+min_confidence = 0.82
+min_margin = 0.12
+review_on_tie = true
+`);
+  assert.equal(config.embeddings.provider, "hybrid");
+  assert.equal(config.embeddings.allowDownload, false);
+  assert.equal(config.embeddings.model, "Xenova/bge-small-en-v1.5");
+  assert.deepEqual(config.embeddings.weights, { title: 1.2, url: 0.6, domain: 1.4, description: 0.8 });
+  assert.equal(config.semantic.enabled, true);
+  assert.equal(config.semantic.autoIndex, true);
+  assert.equal(config.semantic.minConfidence, 0.82);
+  assert.equal(config.semantic.minMargin, 0.12);
+  assert.equal(config.semantic.reviewOnTie, true);
+
+  const formatted = formatConfig(config);
+  const reparsed = parseConfig(formatted);
+  assert.deepEqual(reparsed.embeddings, config.embeddings);
+  assert.deepEqual(reparsed.semantic, config.semantic);
+
+  assert.equal(getConfigValue(setConfigValue(config, "semantic.enabled", "false"), "semantic.enabled"), false);
+  assert.throws(() => parseConfig('[embeddings]\nprovider = "unknown"'), /embeddings.provider/);
+});
