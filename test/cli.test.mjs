@@ -62,6 +62,16 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
   assert.equal(bridgeLiveReadJson.data.receipt.readProof, null);
   assert.match(bridgeLiveReadJson.blockers.join("\n"), /No Zen process is running/);
 
+  const bridgeLiveMoveProof = spawnSync("node", ["dist/cli.js", "bridge", "live-move-proof", "--json"], {
+    env,
+    encoding: "utf8"
+  });
+  assert.equal(bridgeLiveMoveProof.status, 2);
+  const bridgeLiveMoveProofJson = JSON.parse(bridgeLiveMoveProof.stdout);
+  assert.equal(bridgeLiveMoveProofJson.ok, false);
+  assert.equal(bridgeLiveMoveProofJson.data.receipt.moveProof, null);
+  assert.match(bridgeLiveMoveProofJson.blockers.join("\n"), /confirm-live-move/);
+
   const unknownBridge = spawnSync("node", ["dist/cli.js", "bridge", "start", "--json"], {
     env,
     encoding: "utf8"

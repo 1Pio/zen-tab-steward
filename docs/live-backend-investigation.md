@@ -27,6 +27,16 @@ Without `--connect`, a clean preflight is still not enough to report attachable,
 
 It does not call any workspace mutation method, open tabs, move tabs, write profile files, install extensions/mods/services, or enable live sort apply.
 
+`zts bridge live-move-proof` is the first gated live movement proof. It requires:
+
+- `--confirm-live-move`,
+- `--url <exact-tab-url>`,
+- `--from-workspace <workspace-id>`,
+- `--to-workspace <workspace-id>`,
+- the same live attachment gate as `live-read`.
+
+The proof searches live `gBrowser.tabs` for exactly one tab whose current URI exactly matches the requested URL and whose `zen-workspace-id` exactly matches the requested source workspace. It refuses pinned, essential, grouped, foldered, ambiguous, unmatched, missing-workspace, and same-workspace moves before calling `gZenWorkspaces.moveTabToWorkspace(...)`. After the move call, it verifies the tab's `zen-workspace-id` equals the requested destination. This command is still a proof command, not default sorting, and it is not wired into `zts sort`.
+
 `zts bridge probe` is a separate disposable bridge proof. It starts a headless Zen process with a temporary profile, local remote debugging flags, and `--remote-allow-system-access`, verifies WebDriver BiDi `session.status`, creates a session, executes harmless script in a content context, executes harmless script in Zen browser chrome, verifies `gZenWorkspaces` is reachable, performs one temp-profile workspace tab move through Zen internals, then terminates the process and removes the temporary profile. It does not attach to the live profile or move live tabs.
 
 ## Local Evidence

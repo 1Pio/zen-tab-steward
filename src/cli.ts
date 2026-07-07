@@ -2,9 +2,9 @@
 import { Command } from "commander";
 import { applySortPlanOffline, listApplyReceipts, offlineApplyBlockers, verifyApplyReceipt } from "./apply.js";
 import { createBackup, listBackups, pruneBackups, restoreBackup } from "./backup.js";
-import { inspectBridge, inspectLiveAttachment, runBridgeLiveReadProof, runBridgeProbe } from "./bridge.js";
+import { inspectBridge, inspectLiveAttachment, runBridgeLiveMoveProof, runBridgeLiveReadProof, runBridgeProbe } from "./bridge.js";
 import { addDomainRuleInContents, getConfigValue, loadConfig, saveConfigContents, setConfigValueInContents, ZtsConfig } from "./config.js";
-import { envelope, formatApplyReceiptList, formatApplyVerification, formatBackup, formatBackupList, formatBackupPrune, formatBridge, formatBridgeLiveAttachment, formatBridgeLiveRead, formatBridgeProbe, formatRestore, formatReview, formatSortDryRun, formatSortPreview, formatStatus, formatTabs, formatWorkspaces, printJson } from "./output.js";
+import { envelope, formatApplyReceiptList, formatApplyVerification, formatBackup, formatBackupList, formatBackupPrune, formatBridge, formatBridgeLiveAttachment, formatBridgeLiveMove, formatBridgeLiveRead, formatBridgeProbe, formatRestore, formatReview, formatSortDryRun, formatSortPreview, formatStatus, formatTabs, formatWorkspaces, printJson } from "./output.js";
 import { discoverProfileContext } from "./profile.js";
 import { listTabs, loadSession, loadSessionSummary, summarizeSession, withWorkspacePolicy } from "./session.js";
 import { classifyDomainForWorkspace, planSortPreview, SortInputs } from "./sort.js";
@@ -46,8 +46,12 @@ program
 program
   .command("bridge")
   .description("Inspect the live Zen bridge boundary without changing Zen state")
-  .argument("[action]", "status, doctor, live-check, live-read, or probe")
+  .argument("[action]", "status, doctor, live-check, live-read, live-move-proof, or probe")
   .option("--connect", "for live-check, connect to the discovered local WebDriver BiDi endpoint and run session.status")
+  .option("--url <url>", "for live-move-proof, exact live tab URL to move")
+  .option("--from-workspace <workspace-id>", "for live-move-proof, exact source workspace id")
+  .option("--to-workspace <workspace-id>", "for live-move-proof, exact destination workspace id")
+  .option("--confirm-live-move", "for live-move-proof, acknowledge that one eligible live tab may be moved")
   .option("--timeout-ms <ms>", "probe timeout in milliseconds")
   .option("--json", "print stable JSON output")
   .action(async (action: string | undefined, options: JsonOption & BridgeOptions) => {
@@ -115,6 +119,35 @@ program
       return;
     }
 
+    if (selectedAction === "live-move-proof") {
+      await runCommand("bridge live-move-proof", options, async () => {
+        const context = await discoverProfileContext();
+        const timeoutMs = probeTimeoutMs(options.timeoutMs);
+        const receipt = await runBridgeLiveMoveProof(context, {
+          timeoutMs,
+          url: options.url,
+          fromWorkspaceId: options.fromWorkspace,
+          toWorkspaceId: options.toWorkspace,
+          confirmLiveMove: Boolean(options.confirmLiveMove)
+        });
+        const suggestedNextCommands = receipt.ok
+          ? ["zts bridge live-read --json", "zts sort --preview"]
+          : ["zts bridge live-read --json", "zts bridge live-check --connect --json", "zts tabs <workspace> --json"];
+        if (options.json) {
+          printJson(envelope("bridge live-move-proof", { profile: context.profile, zenRunning: context.running, receipt }, {
+            ok: receipt.ok,
+            warnings: receipt.warnings,
+            blockers: receipt.blockers,
+            suggestedNextCommands
+          }));
+        } else {
+          process.stdout.write(`${formatBridgeLiveMove(receipt, suggestedNextCommands)}\n`);
+        }
+        process.exitCode = receipt.ok ? 0 : 2;
+      });
+      return;
+    }
+
     if (selectedAction === "probe") {
       await runCommand("bridge probe", options, async () => {
         const timeoutMs = probeTimeoutMs(options.timeoutMs);
@@ -137,7 +170,7 @@ program
 
     const message = `unknown bridge action '${selectedAction}'`;
     if (options.json) {
-      printJson(envelope("bridge", { action: selectedAction }, { ok: false, blockers: [message], suggestedNextCommands: ["zts bridge status", "zts bridge doctor", "zts bridge live-check", "zts bridge live-read", "zts bridge probe"] }));
+      printJson(envelope("bridge", { action: selectedAction }, { ok: false, blockers: [message], suggestedNextCommands: ["zts bridge status", "zts bridge doctor", "zts bridge live-check", "zts bridge live-read", "zts bridge live-move-proof", "zts bridge probe"] }));
     } else {
       process.stderr.write(`zts: ${message}\n`);
     }
@@ -585,6 +618,10 @@ interface BackupOptions {
 interface BridgeOptions {
   timeoutMs?: string;
   connect?: boolean;
+  url?: string;
+  fromWorkspace?: string;
+  toWorkspace?: string;
+  confirmLiveMove?: boolean;
 }
 
 function sortCommandForReceipt(sourceWorkspace: string | undefined, options: SortOptions): string {

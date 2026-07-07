@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { bidiBaseUrlFromLog, inspectBridge, inspectLiveAttachment, runBridgeLiveReadProof, runBridgeProbe, summarizeBridgeProcess, validateBidiSessionStatus, validateBridgeLiveReadProof, validateBridgeProbeScriptProof, validateBridgeProbeWorkspaceOperation } from "../dist/bridge.js";
+import { bidiBaseUrlFromLog, inspectBridge, inspectLiveAttachment, runBridgeLiveMoveProof, runBridgeLiveReadProof, runBridgeProbe, summarizeBridgeProcess, validateBidiSessionStatus, validateBridgeLiveMoveProof, validateBridgeLiveReadProof, validateBridgeProbeScriptProof, validateBridgeProbeWorkspaceOperation } from "../dist/bridge.js";
 import { parseZenProcesses } from "../dist/processes.js";
 
 const profilePath = "/Users/main/Library/Application Support/zen/Profiles/4le6r9n3.Default (release)";
@@ -237,6 +237,85 @@ test("live read proof validates connected browser-chrome state without mutation"
   }
 });
 
+test("live move proof refuses without explicit confirmation and selectors", async () => {
+  const temp = await mkdtemp(join(tmpdir(), "zts-live-move-refuse-"));
+  try {
+    const receipt = await runBridgeLiveMoveProof(context({
+      profilePath: temp,
+      running: true,
+      runningProcesses: [privilegedBrowserProcess(temp)]
+    }), { timeoutMs: 1000 });
+
+    assert.equal(receipt.ok, false);
+    assert.equal(receipt.attachment, null);
+    assert.equal(receipt.moveProof, null);
+    assert.match(receipt.blockers.join("\n"), /confirm-live-move/);
+    assert.match(receipt.blockers.join("\n"), /--url/);
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("live move proof validates one explicit eligible tab move", async () => {
+  const temp = await mkdtemp(join(tmpdir(), "zts-live-move-pass-"));
+  const originalWebSocket = globalThis.WebSocket;
+  try {
+    await writeFile(join(temp, "WebDriverBiDiServer.json"), JSON.stringify({ ws_host: "127.0.0.1", ws_port: 9222 }));
+    globalThis.WebSocket = FakeWebSocket;
+    const receipt = await runBridgeLiveMoveProof(context({
+      profilePath: temp,
+      running: true,
+      runningProcesses: [privilegedBrowserProcess(temp)]
+    }), {
+      timeoutMs: 1000,
+      confirmLiveMove: true,
+      url: "https://example.test",
+      fromWorkspaceId: "workspace-1",
+      toWorkspaceId: "workspace-2"
+    });
+
+    assert.equal(receipt.ok, true);
+    assert.deepEqual(receipt.blockers, []);
+    assert.equal(receipt.moveProof.requestedUrl, "https://example.test");
+    assert.equal(receipt.moveProof.beforeWorkspaceId, "workspace-1");
+    assert.equal(receipt.moveProof.afterWorkspaceId, "workspace-2");
+    assert.equal(receipt.moveProof.moved, true);
+  } finally {
+    globalThis.WebSocket = originalWebSocket;
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("live move proof refuses before mutation when mutation session.status is not ready", async () => {
+  const temp = await mkdtemp(join(tmpdir(), "zts-live-move-not-ready-"));
+  const originalWebSocket = globalThis.WebSocket;
+  try {
+    await writeFile(join(temp, "WebDriverBiDiServer.json"), JSON.stringify({ ws_host: "127.0.0.1", ws_port: 9222 }));
+    globalThis.WebSocket = FakeNotReadyOnSecondConnectionWebSocket;
+    const receipt = await runBridgeLiveMoveProof(context({
+      profilePath: temp,
+      running: true,
+      runningProcesses: [privilegedBrowserProcess(temp)]
+    }), {
+      timeoutMs: 1000,
+      confirmLiveMove: true,
+      url: "https://example.test",
+      fromWorkspaceId: "workspace-1",
+      toWorkspaceId: "workspace-2"
+    });
+
+    assert.equal(receipt.ok, false);
+    assert.equal(receipt.moveProof, null);
+    assert.match(receipt.blockers.join("\n"), /reported not ready/);
+    assert.equal(FakeNotReadyOnSecondConnectionWebSocket.scriptEvaluateCount, 0);
+  } finally {
+    globalThis.WebSocket = originalWebSocket;
+    FakeNotReadyOnSecondConnectionWebSocket.connectionCount = 0;
+    FakeNotReadyOnSecondConnectionWebSocket.scriptEvaluateCount = 0;
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
 test("extracts the last WebDriver BiDi listener from probe logs", () => {
   const log = [
     "*** You are running in headless mode.",
@@ -306,6 +385,25 @@ test("validates live read proof shape and Zen chrome reachability", () => {
   assert.match(validateBridgeLiveReadProof({ ...proof, chromeEvaluation: remoteObject({ href: "chrome://browser/content/browser.xhtml", hasZenWorkspaces: true, zenWorkspacesType: "object", workspaceCount: 3, activeWorkspaceId: "" }) }), /active workspace id/);
 });
 
+test("validates live move proof shape and protected-tab refusal", () => {
+  const proof = liveMoveProof();
+
+  assert.equal(validateBridgeLiveMoveProof(proof), null);
+  assert.match(validateBridgeLiveMoveProof({ ...proof, candidateCount: 2 }), /exactly one/);
+  assert.match(validateBridgeLiveMoveProof({ ...proof, requestedToWorkspaceId: "workspace-1" }), /same source and destination/);
+  assert.match(validateBridgeLiveMoveProof({ ...proof, protectedReasons: ["pinned"], tabPinned: true, moved: false }), /protected tab/);
+  assert.match(validateBridgeLiveMoveProof({ ...proof, protectedReasons: ["grouped"], tabGrouped: true, moved: false }), /protected tab/);
+  assert.match(validateBridgeLiveMoveProof({ ...proof, protectedReasons: ["foldered"], tabFoldered: true, moved: false }), /protected tab/);
+  assert.match(validateBridgeLiveMoveProof({ ...proof, afterWorkspaceId: "workspace-1", moved: false, moveResult: false }), /requested destination/);
+});
+
+test("live move proof script checks live grouped and foldered tab property names", async () => {
+  const source = await readFile(new URL("../src/bridge.ts", import.meta.url), "utf8");
+
+  assert.match(source, /tab\?\.groupId/);
+  assert.match(source, /tab\?\.zenLiveFolderItemId/);
+});
+
 test("validates disposable workspace operation proof", () => {
   assert.equal(validateBridgeProbeWorkspaceOperation(workspaceOperation()), null);
   assert.match(validateBridgeProbeWorkspaceOperation({ ...workspaceOperation(), targetWorkspaceId: "source" }), /same source and target/);
@@ -357,6 +455,9 @@ class FakeWebSocket {
   constructor(url) {
     this.url = url;
     this.listeners = new Map();
+    this.connectionNumber = typeof this.constructor.connectionCount === "number"
+      ? ++this.constructor.connectionCount
+      : 0;
     setTimeout(() => this.emit("open", {}), 0);
   }
 
@@ -368,13 +469,30 @@ class FakeWebSocket {
 
   send(payload) {
     const request = JSON.parse(payload);
-    setTimeout(() => this.emit("message", { data: JSON.stringify(fakeBidiResponse(request)) }), 0);
+    setTimeout(() => this.emit("message", { data: JSON.stringify(this.responseFor(request)) }), 0);
   }
 
   close() {}
 
+  responseFor(request) {
+    return fakeBidiResponse(request);
+  }
+
   emit(type, event) {
     for (const callback of this.listeners.get(type) ?? []) callback(event);
+  }
+}
+
+class FakeNotReadyOnSecondConnectionWebSocket extends FakeWebSocket {
+  static connectionCount = 0;
+  static scriptEvaluateCount = 0;
+
+  responseFor(request) {
+    if (request.method === "script.evaluate") FakeNotReadyOnSecondConnectionWebSocket.scriptEvaluateCount += 1;
+    if (request.method === "session.status" && this.connectionNumber === 2) {
+      return { type: "success", id: request.id, result: { ready: false, message: "not ready" } };
+    }
+    return fakeBidiResponse(request);
   }
 }
 
@@ -389,6 +507,13 @@ function fakeBidiResponse(request) {
     return { type: "success", id: request.id, result: { contexts: [{ context: "chrome-1" }] } };
   }
   if (request.method === "script.evaluate") {
+    if (String(request.params?.expression ?? "").includes("moveTabToWorkspace")) {
+      return {
+        type: "success",
+        id: request.id,
+        result: remoteObject(liveMoveProofRemoteEntries())
+      };
+    }
     return {
       type: "success",
       id: request.id,
@@ -408,6 +533,48 @@ function fakeBidiResponse(request) {
   return { type: "error", id: request.id, error: "unknown command", message: request.method };
 }
 
+function liveMoveProof() {
+  return {
+    sessionId: "session-1",
+    chromeContextCount: 1,
+    chromeContext: "chrome-1",
+    requestedUrl: "https://example.test",
+    requestedFromWorkspaceId: "workspace-1",
+    requestedToWorkspaceId: "workspace-2",
+    candidateCount: 1,
+    protectedReasons: [],
+    beforeWorkspaceId: "workspace-1",
+    afterWorkspaceId: "workspace-2",
+    moved: true,
+    moveResult: true,
+    tabPinned: false,
+    tabEssential: false,
+    tabGrouped: false,
+    tabFoldered: false,
+    reason: "moved"
+  };
+}
+
+function liveMoveProofRemoteEntries() {
+  const proof = liveMoveProof();
+  return {
+    requestedUrl: proof.requestedUrl,
+    requestedFromWorkspaceId: proof.requestedFromWorkspaceId,
+    requestedToWorkspaceId: proof.requestedToWorkspaceId,
+    candidateCount: proof.candidateCount,
+    protectedReasons: proof.protectedReasons,
+    beforeWorkspaceId: proof.beforeWorkspaceId,
+    afterWorkspaceId: proof.afterWorkspaceId,
+    moved: proof.moved,
+    moveResult: proof.moveResult,
+    tabPinned: proof.tabPinned,
+    tabEssential: proof.tabEssential,
+    tabGrouped: proof.tabGrouped,
+    tabFoldered: proof.tabFoldered,
+    reason: proof.reason
+  };
+}
+
 function processArgs() {
   return `/Applications/Zen.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container -profile ${profilePath} --remote-debugging-port 9222 --remote-allow-system-access`;
 }
@@ -419,14 +586,17 @@ function remoteObject(entries) {
       type: "object",
       value: Object.entries(entries).map(([key, value]) => [
         key,
-        typeof value === "boolean"
-          ? { type: "boolean", value }
-          : typeof value === "number"
-            ? { type: "number", value }
-            : { type: "string", value }
+        remoteValue(value)
       ])
     }
   };
+}
+
+function remoteValue(value) {
+  if (typeof value === "boolean") return { type: "boolean", value };
+  if (typeof value === "number") return { type: "number", value };
+  if (Array.isArray(value)) return { type: "array", value: value.map(remoteValue) };
+  return { type: "string", value };
 }
 
 function workspaceOperation() {

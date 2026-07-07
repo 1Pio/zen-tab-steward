@@ -24,6 +24,7 @@ zts backup
 zts bridge status
 zts bridge live-check
 zts bridge live-read
+zts bridge live-move-proof
 zts review
 zts config path
 zts rules
@@ -67,6 +68,8 @@ Each backup includes timestamped `.bak` files and a timestamped `manifest.json` 
 `zts bridge live-check` is a stricter read-only attachment gate for the discovered live profile. It refuses unless Zen is running for the profile, a browser process explicitly matches the profile path, that browser process has candidate privileged remote-control launch flags, the profile has a local `WebDriverBiDiServer.json`, and that file points to a local-only WebDriver BiDi endpoint. It reports attachable only when `--connect` is used and WebDriver BiDi `session.status` succeeds. This command does not move tabs or enable live sort apply.
 
 `zts bridge live-read` requires the same live attachment gate, then creates a WebDriver BiDi session and runs a read-only browser-chrome script against the live profile to verify the Zen chrome context, `gZenWorkspaces`, active workspace id, and workspace count. It does not move tabs, write Zen state, or enable live sort apply.
+
+`zts bridge live-move-proof` is the first gated live movement proof. It refuses unless you pass `--confirm-live-move`, `--url <exact-tab-url>`, `--from-workspace <workspace-id>`, and `--to-workspace <workspace-id>`, and the live attachment gate passes. It moves at most one exact URL match from the exact source workspace to the exact destination workspace, and refuses pinned, essential, grouped, foldered, ambiguous, unmatched, or same-workspace moves. This is still a proof command, not default sort apply.
 
 `zts bridge probe` launches a disposable headless Zen instance with a temporary profile, checks local WebDriver BiDi, creates a session, executes harmless script in a content context, executes harmless script in Zen browser chrome, verifies `gZenWorkspaces` is reachable, performs one disposable temp-profile workspace tab move through Zen internals, then terminates the process and removes the temporary profile. It is still a proof only: it does not attach to the live profile and does not move live tabs.
 
@@ -112,6 +115,7 @@ zts bridge doctor --json
 zts bridge live-check --json
 zts bridge live-check --connect --json
 zts bridge live-read --json
+zts bridge live-move-proof --json
 zts bridge probe --json
 zts apply list --json
 zts apply verify <receipt-id> --json
@@ -139,6 +143,7 @@ The current implementation has read, backup, preview, and offline session apply 
 - It can inspect live-backend launch evidence with `zts bridge status` and `zts bridge doctor`, but those commands are read-only and do not enable live apply.
 - It can run `zts bridge live-check` as a read-only live-profile attachment gate; refusal is expected unless Zen was launched with the required remote-control flags and a local WebDriver BiDi server file exists.
 - It can run `zts bridge live-read` as a read-only live-profile browser-chrome proof after the attachment gate passes; it does not move tabs or enable live apply.
+- It can run `zts bridge live-move-proof` only with explicit confirmation and exact tab/workspace selectors; it is gated proof machinery and not default sort apply.
 - It can run a disposable `zts bridge probe` against a temporary headless profile to verify WebDriver BiDi transport, script execution, Zen chrome object reachability, and one temp-profile workspace tab move without touching live tabs.
 - It creates a fresh backup before offline session mutation.
 - It writes an apply receipt under the state directory after offline apply.

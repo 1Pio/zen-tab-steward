@@ -100,6 +100,39 @@ export interface BridgeLiveReadProof {
   activeWorkspaceId: string | null;
 }
 
+export interface BridgeLiveMoveReceipt {
+  ok: boolean;
+  startedAt: string;
+  durationMs: number;
+  profilePath: string;
+  websocketUrl: string | null;
+  attachment: BridgeLiveAttachmentInspection | null;
+  sessionStatus: unknown | null;
+  moveProof: BridgeLiveMoveProof | null;
+  warnings: string[];
+  blockers: string[];
+}
+
+export interface BridgeLiveMoveProof {
+  sessionId: string;
+  chromeContextCount: number;
+  chromeContext: string;
+  requestedUrl: string;
+  requestedFromWorkspaceId: string;
+  requestedToWorkspaceId: string;
+  candidateCount: number;
+  protectedReasons: string[];
+  beforeWorkspaceId: string;
+  afterWorkspaceId: string;
+  moved: boolean;
+  moveResult: boolean;
+  tabPinned: boolean;
+  tabEssential: boolean;
+  tabGrouped: boolean;
+  tabFoldered: boolean;
+  reason: string;
+}
+
 export interface BridgeProbeReceipt {
   ok: boolean;
   startedAt: string;
@@ -165,6 +198,14 @@ export interface BridgeLiveAttachmentOptions {
 
 export interface BridgeLiveReadOptions {
   timeoutMs?: number;
+}
+
+export interface BridgeLiveMoveOptions {
+  timeoutMs?: number;
+  url?: string;
+  fromWorkspaceId?: string;
+  toWorkspaceId?: string;
+  confirmLiveMove?: boolean;
 }
 
 export function inspectBridge(context: ProfileContext): BridgeInspection {
@@ -408,6 +449,60 @@ export async function runBridgeLiveReadProof(
     readProof,
     warnings: [
       "Live read proof is read-only. It does not move tabs, write Zen state, or enable live sort apply."
+    ],
+    blockers
+  };
+}
+
+export async function runBridgeLiveMoveProof(
+  context: ProfileContext,
+  options: BridgeLiveMoveOptions = {}
+): Promise<BridgeLiveMoveReceipt> {
+  const startedAt = new Date();
+  const startedMs = Date.now();
+  const timeoutMs = options.timeoutMs ?? 5000;
+  const blockers = liveMoveOptionBlockers(options);
+  let attachment: BridgeLiveAttachmentInspection | null = null;
+  let websocketUrl: string | null = null;
+  let sessionStatus: unknown | null = null;
+  let moveProof: BridgeLiveMoveProof | null = null;
+
+  if (blockers.length === 0) {
+    attachment = await inspectLiveAttachment(context, { connect: true, timeoutMs });
+    blockers.push(...attachment.blockers);
+    websocketUrl = attachment.endpoint?.websocketUrl ?? null;
+    sessionStatus = attachment.sessionStatus;
+  }
+
+  if (blockers.length === 0 && websocketUrl && options.url && options.fromWorkspaceId && options.toWorkspaceId) {
+    try {
+      const liveProof = await runBidiLiveMoveProof(websocketUrl, timeoutMs, {
+        url: options.url,
+        fromWorkspaceId: options.fromWorkspaceId,
+        toWorkspaceId: options.toWorkspaceId
+      });
+      sessionStatus = liveProof.sessionStatus;
+      moveProof = liveProof.moveProof;
+      const statusError = validateBidiSessionStatus(sessionStatus);
+      if (statusError) blockers.push(statusError);
+      const proofError = validateBridgeLiveMoveProof(moveProof);
+      if (proofError) blockers.push(proofError);
+    } catch (error) {
+      blockers.push(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  return {
+    ok: blockers.length === 0,
+    startedAt: startedAt.toISOString(),
+    durationMs: Date.now() - startedMs,
+    profilePath: context.profile.path,
+    websocketUrl,
+    attachment,
+    sessionStatus,
+    moveProof,
+    warnings: [
+      "Live move proof can move one live tab only when every explicit safety gate passes."
     ],
     blockers
   };
@@ -713,6 +808,29 @@ export function validateBridgeLiveReadProof(value: unknown): string | null {
   return null;
 }
 
+export function validateBridgeLiveMoveProof(value: unknown): string | null {
+  if (!isRecord(value)) return "WebDriver BiDi live move proof was not returned";
+  if (typeof value.sessionId !== "string" || value.sessionId.length === 0) return "WebDriver BiDi live move proof had no session id";
+  if (typeof value.chromeContextCount !== "number" || !Number.isInteger(value.chromeContextCount) || value.chromeContextCount < 1) return "WebDriver BiDi live move proof found no chrome contexts";
+  if (typeof value.chromeContext !== "string" || value.chromeContext.length === 0) return "WebDriver BiDi live move proof had no chrome context id";
+  if (typeof value.requestedUrl !== "string" || value.requestedUrl.length === 0) return "WebDriver BiDi live move proof had no requested URL";
+  if (typeof value.requestedFromWorkspaceId !== "string" || value.requestedFromWorkspaceId.length === 0) return "WebDriver BiDi live move proof had no source workspace id";
+  if (typeof value.requestedToWorkspaceId !== "string" || value.requestedToWorkspaceId.length === 0) return "WebDriver BiDi live move proof had no destination workspace id";
+  if (value.requestedFromWorkspaceId === value.requestedToWorkspaceId) return "WebDriver BiDi live move proof used the same source and destination workspace";
+  if (value.candidateCount !== 1) return "WebDriver BiDi live move proof did not find exactly one matching tab";
+  if (Array.isArray(value.protectedReasons) && value.protectedReasons.length > 0) {
+    return `WebDriver BiDi live move proof refused protected tab: ${value.protectedReasons.join(", ")}`;
+  }
+  if (value.beforeWorkspaceId !== value.requestedFromWorkspaceId) return "WebDriver BiDi live move proof source workspace did not match the selected tab";
+  if (value.afterWorkspaceId !== value.requestedToWorkspaceId) return "WebDriver BiDi live move proof did not move the tab to the requested destination";
+  if (value.moved !== true || value.moveResult !== true) return "WebDriver BiDi live move proof did not report a successful move";
+  if (value.tabPinned !== false) return "WebDriver BiDi live move proof unexpectedly used a pinned tab";
+  if (value.tabEssential !== false) return "WebDriver BiDi live move proof unexpectedly used an essential tab";
+  if (value.tabGrouped !== false) return "WebDriver BiDi live move proof unexpectedly used a grouped tab";
+  if (value.tabFoldered !== false) return "WebDriver BiDi live move proof unexpectedly used a foldered tab";
+  return null;
+}
+
 export function validateBridgeProbeWorkspaceOperation(value: unknown): string | null {
   if (!isRecord(value)) return "WebDriver BiDi workspace operation proof was not returned";
   if (typeof value.initialWorkspaceCount !== "number" || value.initialWorkspaceCount < 1) return "WebDriver BiDi workspace operation proof had no initial workspaces";
@@ -758,6 +876,18 @@ function parseBidiServerFile(contents: string): { endpoint: BridgeLiveEndpoint |
       websocketUrl: `ws://${formatWebsocketHost(host)}:${port}/session`
     }
   };
+}
+
+function liveMoveOptionBlockers(options: BridgeLiveMoveOptions): string[] {
+  const blockers: string[] = [];
+  if (!options.confirmLiveMove) blockers.push("Live move proof requires --confirm-live-move");
+  if (!options.url) blockers.push("Live move proof requires --url <exact-tab-url>");
+  if (!options.fromWorkspaceId) blockers.push("Live move proof requires --from-workspace <workspace-id>");
+  if (!options.toWorkspaceId) blockers.push("Live move proof requires --to-workspace <workspace-id>");
+  if (options.fromWorkspaceId && options.toWorkspaceId && options.fromWorkspaceId === options.toWorkspaceId) {
+    blockers.push("Live move proof source and destination workspaces must differ");
+  }
+  return blockers;
 }
 
 function isLocalHost(host: string): boolean {
@@ -846,6 +976,8 @@ async function runBidiScriptProof(
     ws.addEventListener("open", async () => {
       try {
         const sessionStatus = await send("session.status");
+        const statusError = validateBidiSessionStatus(sessionStatus);
+        if (statusError) throw new Error(statusError);
         const session = await send("session.new", { capabilities: { alwaysMatch: { webSocketUrl: true } } });
         const sessionId = sessionIdFromSessionNew(session.result);
         const contentTree = await send("browsingContext.getTree");
@@ -962,6 +1094,8 @@ async function runBidiLiveReadProof(
     ws.addEventListener("open", async () => {
       try {
         const sessionStatus = await send("session.status");
+        const statusError = validateBidiSessionStatus(sessionStatus);
+        if (statusError) throw new Error(statusError);
         const session = await send("session.new", { capabilities: { alwaysMatch: { webSocketUrl: true } } });
         const sessionId = sessionIdFromSessionNew(session.result);
         const chromeTree = await send("browsingContext.getTree", { "moz:scope": "chrome" });
@@ -1019,6 +1153,118 @@ async function runBidiLiveReadProof(
   });
 }
 
+async function runBidiLiveMoveProof(
+  websocketUrl: string,
+  timeoutMs: number,
+  request: { url: string; fromWorkspaceId: string; toWorkspaceId: string }
+): Promise<{ sessionStatus: unknown; moveProof: BridgeLiveMoveProof }> {
+  const WebSocketConstructor = globalThis.WebSocket;
+  if (!WebSocketConstructor) throw new Error("This Node runtime does not provide a WebSocket client");
+
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocketConstructor(websocketUrl);
+    let nextId = 1;
+    const pending = new Map<number, { method: string; resolve: (value: Record<string, unknown>) => void; reject: (error: Error) => void }>();
+    let settled = false;
+    const timer = setTimeout(() => {
+      settled = true;
+      ws.close();
+      reject(new Error("Timed out waiting for WebDriver BiDi live move proof"));
+    }, timeoutMs);
+
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      ws.close();
+      reject(error);
+    };
+    const finish = (value: { sessionStatus: unknown; moveProof: BridgeLiveMoveProof }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      ws.close();
+      resolve(value);
+    };
+    const send = (method: string, params: Record<string, unknown> = {}) => {
+      const id = nextId++;
+      ws.send(JSON.stringify({ id, method, params }));
+      return new Promise<Record<string, unknown>>((resolveCommand, rejectCommand) => {
+        pending.set(id, { method, resolve: resolveCommand, reject: rejectCommand });
+      });
+    };
+
+    ws.addEventListener("open", async () => {
+      try {
+        const sessionStatus = await send("session.status");
+        const statusError = validateBidiSessionStatus(sessionStatus);
+        if (statusError) throw new Error(statusError);
+        const session = await send("session.new", { capabilities: { alwaysMatch: { webSocketUrl: true } } });
+        const sessionId = sessionIdFromSessionNew(session.result);
+        const chromeTree = await send("browsingContext.getTree", { "moz:scope": "chrome" });
+        const chromeContext = firstContextId(chromeTree.result, "chrome");
+        const moveEvaluation = await send("script.evaluate", {
+          expression: liveMoveProofScript(request),
+          awaitPromise: true,
+          target: { context: chromeContext },
+          resultOwnership: "none"
+        });
+
+        try {
+          await send("session.end");
+        } catch {
+          // Move verification is captured before this cleanup attempt.
+        }
+
+        finish({
+          sessionStatus,
+          moveProof: {
+            sessionId,
+            chromeContextCount: contextCount(chromeTree.result),
+            chromeContext,
+            requestedUrl: remoteStringValue(moveEvaluation.result, "requestedUrl") ?? "",
+            requestedFromWorkspaceId: remoteStringValue(moveEvaluation.result, "requestedFromWorkspaceId") ?? "",
+            requestedToWorkspaceId: remoteStringValue(moveEvaluation.result, "requestedToWorkspaceId") ?? "",
+            candidateCount: remoteNumberValue(moveEvaluation.result, "candidateCount") ?? 0,
+            protectedReasons: remoteStringArrayValue(moveEvaluation.result, "protectedReasons"),
+            beforeWorkspaceId: remoteStringValue(moveEvaluation.result, "beforeWorkspaceId") ?? "",
+            afterWorkspaceId: remoteStringValue(moveEvaluation.result, "afterWorkspaceId") ?? "",
+            moved: remoteBooleanValue(moveEvaluation.result, "moved") === true,
+            moveResult: remoteBooleanValue(moveEvaluation.result, "moveResult") === true,
+            tabPinned: remoteBooleanValue(moveEvaluation.result, "tabPinned") === true,
+            tabEssential: remoteBooleanValue(moveEvaluation.result, "tabEssential") === true,
+            tabGrouped: remoteBooleanValue(moveEvaluation.result, "tabGrouped") === true,
+            tabFoldered: remoteBooleanValue(moveEvaluation.result, "tabFoldered") === true,
+            reason: remoteStringValue(moveEvaluation.result, "reason") ?? ""
+          }
+        });
+      } catch (error) {
+        fail(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+    ws.addEventListener("message", (event) => {
+      let message: unknown;
+      try {
+        message = JSON.parse(String(event.data));
+      } catch {
+        fail(new Error("WebDriver BiDi returned non-JSON response"));
+        return;
+      }
+      if (!isRecord(message)) return;
+      if (message.type === "event") return;
+      if (typeof message.id !== "number") return;
+      const command = pending.get(message.id);
+      if (!command) return;
+      pending.delete(message.id);
+      if (message.type === "success") command.resolve(message);
+      else command.reject(new Error(`${command.method}: ${String(message.error ?? "error")}: ${String(message.message ?? "unknown error")}`));
+    });
+    ws.addEventListener("error", () => {
+      fail(new Error("WebDriver BiDi WebSocket connection failed"));
+    });
+  });
+}
+
 function liveReadProofScript(): string {
   return `(() => {
     const hasZenWorkspaces = typeof gZenWorkspaces !== "undefined";
@@ -1036,6 +1282,91 @@ function liveReadProofScript(): string {
       workspaceCount: Array.isArray(workspaces) ? workspaces.length : 0,
       activeWorkspaceId
     };
+  })()`;
+}
+
+function liveMoveProofScript(request: { url: string; fromWorkspaceId: string; toWorkspaceId: string }): string {
+  const payload = JSON.stringify(request);
+  return `(() => {
+    const request = ${payload};
+    const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+    const tabUrl = tab => tab?.linkedBrowser?.currentURI?.spec || "";
+    const protectedReasonsFor = tab => {
+      const reasons = [];
+      if (tab?.pinned) reasons.push("pinned");
+      if (tab?.hasAttribute?.("zen-essential")) reasons.push("essential");
+      if (tab?.group || tab?.groupId || tab?.hasAttribute?.("group") || tab?.hasAttribute?.("groupid") || tab?.hasAttribute?.("zen-group-id")) reasons.push("grouped");
+      if (tab?.zenLiveFolderItemId || tab?.hasAttribute?.("zen-live-folder-item-id") || tab?.hasAttribute?.("zen-folder-id")) reasons.push("foldered");
+      return reasons;
+    };
+    return (async () => {
+      await window.gZenWorkspaces.promiseInitialized;
+      const workspaces = gZenWorkspaces.getWorkspaces();
+      const source = workspaces.find(workspace => workspace.uuid === request.fromWorkspaceId);
+      const target = workspaces.find(workspace => workspace.uuid === request.toWorkspaceId);
+      const base = {
+        requestedUrl: request.url,
+        requestedFromWorkspaceId: request.fromWorkspaceId,
+        requestedToWorkspaceId: request.toWorkspaceId,
+        candidateCount: 0,
+        protectedReasons: [],
+        beforeWorkspaceId: "",
+        afterWorkspaceId: "",
+        moved: false,
+        moveResult: false,
+        tabPinned: false,
+        tabEssential: false,
+        tabGrouped: false,
+        tabFoldered: false,
+        reason: ""
+      };
+      if (!source || !target || source.uuid === target.uuid) {
+        return { ...base, reason: "workspace_not_found_or_same" };
+      }
+      const candidates = Array.from(gBrowser.tabs).filter(tab =>
+        tab.getAttribute("zen-workspace-id") === source.uuid && tabUrl(tab) === request.url
+      );
+      if (candidates.length !== 1) {
+        return { ...base, candidateCount: candidates.length, reason: "candidate_count" };
+      }
+      const tab = candidates[0];
+      const protectedReasons = protectedReasonsFor(tab);
+      const beforeWorkspaceId = tab.getAttribute("zen-workspace-id");
+      const tabPinned = !!tab.pinned;
+      const tabEssential = tab.hasAttribute("zen-essential");
+      const tabGrouped = protectedReasons.includes("grouped");
+      const tabFoldered = protectedReasons.includes("foldered");
+      if (protectedReasons.length > 0) {
+        return {
+          ...base,
+          candidateCount: candidates.length,
+          protectedReasons,
+          beforeWorkspaceId,
+          afterWorkspaceId: beforeWorkspaceId,
+          tabPinned,
+          tabEssential,
+          tabGrouped,
+          tabFoldered,
+          reason: "protected_tab"
+        };
+      }
+      const moveResult = gZenWorkspaces.moveTabToWorkspace(tab, target.uuid);
+      await sleep(250);
+      const afterWorkspaceId = tab.getAttribute("zen-workspace-id");
+      return {
+        ...base,
+        candidateCount: candidates.length,
+        beforeWorkspaceId,
+        afterWorkspaceId,
+        moved: afterWorkspaceId === target.uuid,
+        moveResult: moveResult === true,
+        tabPinned,
+        tabEssential,
+        tabGrouped,
+        tabFoldered,
+        reason: afterWorkspaceId === target.uuid ? "moved" : "move_failed"
+      };
+    })();
   })()`;
 }
 
@@ -1136,6 +1467,14 @@ function remoteNumberValue(value: unknown, key: string): number | null {
 function remoteBooleanValue(value: unknown, key: string): boolean | null {
   const entry = remoteObjectEntry(value, key);
   return entry && entry.type === "boolean" && typeof entry.value === "boolean" ? entry.value : null;
+}
+
+function remoteStringArrayValue(value: unknown, key: string): string[] {
+  const entry = remoteObjectEntry(value, key);
+  if (!entry || entry.type !== "array" || !Array.isArray(entry.value)) return [];
+  return entry.value
+    .map((item) => isRecord(item) && item.type === "string" && typeof item.value === "string" ? item.value : null)
+    .filter((item): item is string => item !== null);
 }
 
 function remoteObjectEntry(value: unknown, key: string): Record<string, unknown> | null {

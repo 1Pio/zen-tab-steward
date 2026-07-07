@@ -6,7 +6,7 @@ import { configPath } from "./paths.js";
 import { backupRootForProfile } from "./backup.js";
 import { EntityPlan, SortPlan } from "./sort.js";
 import { ApplyReceipt, ApplyVerificationReport } from "./apply.js";
-import { BridgeInspection, BridgeLiveAttachmentInspection, BridgeLiveReadReceipt, BridgeProbeReceipt } from "./bridge.js";
+import { BridgeInspection, BridgeLiveAttachmentInspection, BridgeLiveMoveReceipt, BridgeLiveReadReceipt, BridgeProbeReceipt } from "./bridge.js";
 
 export interface CommandEnvelope<T> {
   version: string;
@@ -264,6 +264,48 @@ export function formatBridgeLiveRead(receipt: BridgeLiveReadReceipt, suggestedNe
       `  gZenWorkspaces: ${receipt.readProof.zenWorkspacesDetected ? "detected" : "not detected"}`,
       `  workspace count: ${receipt.readProof.workspaceCount}`,
       `  active workspace: ${receipt.readProof.activeWorkspaceId ?? "(unknown)"}`
+    );
+  }
+
+  if (suggestedNextCommands.length > 0) {
+    lines.push("", "Next:", ...suggestedNextCommands.map((command) => `  ${command}`));
+  }
+
+  return lines.join("\n");
+}
+
+export function formatBridgeLiveMove(receipt: BridgeLiveMoveReceipt, suggestedNextCommands: string[]): string {
+  const lines = [
+    "Zen live move proof",
+    `Status: ${receipt.ok ? "verified one-tab live move" : "refused"}`,
+    `Profile path: ${receipt.profilePath}`,
+    `WebSocket: ${receipt.websocketUrl ?? "(not available)"}`,
+    `Duration: ${receipt.durationMs}ms`,
+    "",
+    "Boundary:",
+    "  This can move one live tab only with explicit confirmation, exact URL, source workspace, and destination workspace.",
+    "  It refuses pinned, essential, grouped, foldered, ambiguous, and unmatched tabs."
+  ];
+
+  if (receipt.blockers.length > 0) {
+    lines.push("", "Blockers:", ...receipt.blockers.map((blocker) => `  - ${blocker}`));
+  }
+
+  if (receipt.warnings.length > 0) {
+    lines.push("", "Warnings:", ...receipt.warnings.map((warning) => `  - ${warning}`));
+  }
+
+  if (receipt.moveProof !== null) {
+    lines.push(
+      "",
+      "Move proof:",
+      `  session: ${receipt.moveProof.sessionId}`,
+      `  url: ${receipt.moveProof.requestedUrl}`,
+      `  move: ${receipt.moveProof.beforeWorkspaceId} -> ${receipt.moveProof.afterWorkspaceId}`,
+      `  requested: ${receipt.moveProof.requestedFromWorkspaceId} -> ${receipt.moveProof.requestedToWorkspaceId}`,
+      `  candidates: ${receipt.moveProof.candidateCount}`,
+      `  moved: ${receipt.moveProof.moved ? "yes" : "no"}`,
+      `  protected: ${receipt.moveProof.protectedReasons.length > 0 ? receipt.moveProof.protectedReasons.join(", ") : "no"}`
     );
   }
 
