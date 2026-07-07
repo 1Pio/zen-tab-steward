@@ -14,7 +14,7 @@
   "scripts": {
     "build": "tsc",
     "test": "npm run build && node --test test/*.test.mjs",
-    "smoke": "npm run build && node dist/cli.js status && node dist/cli.js workspaces && node dist/cli.js bridge status --json > /dev/null && node dist/cli.js review Space --json > /dev/null && node dist/cli.js apply list --json > /dev/null && (node dist/cli.js sort Space --preview || test $? -eq 2)"
+    "smoke": "npm run build && node dist/cli.js status && node dist/cli.js workspaces && node dist/cli.js bridge status --json > /dev/null && (node dist/cli.js bridge live-check --json > /dev/null || test $? -eq 2) && node dist/cli.js review Space --json > /dev/null && node dist/cli.js apply list --json > /dev/null && (node dist/cli.js sort Space --preview || test $? -eq 2)"
   },
   "repository": {
     "type": "git",

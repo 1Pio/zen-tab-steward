@@ -6,6 +6,17 @@ Date: 2026-07-07
 
 `zts bridge status` and `zts bridge doctor` now make this boundary explicit in the CLI. They are read-only inspection commands; they do not start Zen, attach to a debugger, open sockets, write profile files, install a service, install a mod, or enable live apply.
 
+`zts bridge live-check` is the stricter live-profile attachment gate. It is also read-only. It refuses unless all of the following are true:
+
+- Zen is running for the discovered profile.
+- A browser process explicitly matches the discovered profile path.
+- The matching browser process has candidate remote transport launch evidence.
+- The matching browser process has `--remote-allow-system-access`.
+- The profile contains `WebDriverBiDiServer.json`.
+- The server file contains a usable local-only `ws_host` and `ws_port`.
+
+Without `--connect`, a clean preflight is still not enough to report attachable, because the server file can be stale. With `--connect`, it also opens the local WebSocket and runs only WebDriver BiDi `session.status`; only that connected check can produce an attachable receipt. It does not create a BiDi session, execute chrome script, move tabs, write profile files, or enable live sort apply.
+
 `zts bridge probe` is a separate disposable bridge proof. It starts a headless Zen process with a temporary profile, local remote debugging flags, and `--remote-allow-system-access`, verifies WebDriver BiDi `session.status`, creates a session, executes harmless script in a content context, executes harmless script in Zen browser chrome, verifies `gZenWorkspaces` is reachable, performs one temp-profile workspace tab move through Zen internals, then terminates the process and removes the temporary profile. It does not attach to the live profile or move live tabs.
 
 ## Local Evidence
@@ -98,6 +109,12 @@ Until the same kind of operation is proven against the intended live Zen profile
 Live backend client is not implemented yet
 Current Zen browser process has no remote debugging, debugger server, or Marionette launch flag
 Current Zen browser process has no privileged remote system-access launch flag
+```
+
+`zts bridge live-check` adds the live attachment blockers. On the current live profile that includes the missing local BiDi server file:
+
+```text
+/Users/main/Library/Application Support/zen/Profiles/4le6r9n3.Default (release)/WebDriverBiDiServer.json does not exist.
 ```
 
 ## Current Safe Behavior

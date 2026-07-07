@@ -39,10 +39,10 @@ export function parseZenProcesses(stdout: string): ZenProcess[] {
 }
 
 function extractProfilePath(args: string): string | undefined {
-  const marker = " -profile ";
-  const index = args.indexOf(marker);
-  if (index === -1) return undefined;
-  let value = args.slice(index + marker.length).trim();
+  const markerMatch = args.match(/ --?profile /);
+  if (!markerMatch || markerMatch.index === undefined) return undefined;
+  const markerEnd = markerMatch.index + markerMatch[0].length;
+  let value = args.slice(markerEnd).trim();
   for (const terminator of [" org.mozilla.", " --"]) {
     const terminatorIndex = value.indexOf(terminator);
     if (terminatorIndex !== -1) value = value.slice(0, terminatorIndex).trim();

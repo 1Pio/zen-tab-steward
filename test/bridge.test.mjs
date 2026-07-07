@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bidiBaseUrlFromLog, inspectBridge, runBridgeProbe, summarizeBridgeProcess, validateBidiSessionStatus, validateBridgeProbeScriptProof, validateBridgeProbeWorkspaceOperation } from "../dist/bridge.js";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { bidiBaseUrlFromLog, inspectBridge, inspectLiveAttachment, runBridgeProbe, summarizeBridgeProcess, validateBidiSessionStatus, validateBridgeProbeScriptProof, validateBridgeProbeWorkspaceOperation } from "../dist/bridge.js";
 import { parseZenProcesses } from "../dist/processes.js";
 
 const profilePath = "/Users/main/Library/Application Support/zen/Profiles/4le6r9n3.Default (release)";
@@ -78,6 +81,121 @@ test("bridge inspection detects candidate flags from parsed ps output with trail
   assert.deepEqual(inspection.blockers, ["Live backend client is not implemented yet"]);
 });
 
+test("live attachment check refuses when the profile has no BiDi server file", async () => {
+  const temp = await mkdtemp(join(tmpdir(), "zts-live-check-missing-"));
+  try {
+    const inspection = await inspectLiveAttachment(context({
+      profilePath: temp,
+      running: true,
+      runningProcesses: [privilegedBrowserProcess(temp)]
+    }));
+
+    assert.equal(inspection.attachable, false);
+    assert.equal(inspection.serverFileExists, false);
+    assert.match(inspection.blockers.join("\n"), /WebDriverBiDiServer\.json does not exist/);
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("live attachment check refuses local server file until session.status is checked", async () => {
+  const temp = await mkdtemp(join(tmpdir(), "zts-live-check-pass-"));
+  try {
+    await writeFile(join(temp, "WebDriverBiDiServer.json"), JSON.stringify({ ws_host: "127.0.0.1", ws_port: 9222 }));
+    const inspection = await inspectLiveAttachment(context({
+      profilePath: temp,
+      running: true,
+      runningProcesses: [privilegedBrowserProcess(temp)]
+    }));
+
+    assert.equal(inspection.attachable, false);
+    assert.equal(inspection.serverFileExists, true);
+    assert.equal(inspection.endpoint.websocketUrl, "ws://127.0.0.1:9222/session");
+    assert.match(inspection.blockers.join("\n"), /session\.status was not checked/);
+    assert.equal(inspection.checks.find((check) => check.id === "local_endpoint").status, "pass");
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("live attachment check passes after connected session.status proof", async () => {
+  const temp = await mkdtemp(join(tmpdir(), "zts-live-check-connect-"));
+  const originalWebSocket = globalThis.WebSocket;
+  try {
+    await writeFile(join(temp, "WebDriverBiDiServer.json"), JSON.stringify({ ws_host: "127.0.0.1", ws_port: 9222 }));
+    globalThis.WebSocket = FakeWebSocket;
+    const inspection = await inspectLiveAttachment(context({
+      profilePath: temp,
+      running: true,
+      runningProcesses: [privilegedBrowserProcess(temp)]
+    }), { connect: true, timeoutMs: 1000 });
+
+    assert.equal(inspection.attachable, true);
+    assert.deepEqual(inspection.blockers, []);
+    assert.equal(inspection.checkedEndpoint, true);
+    assert.equal(inspection.checks.find((check) => check.id === "session_status").status, "pass");
+  } finally {
+    globalThis.WebSocket = originalWebSocket;
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("live attachment check refuses profile-less browser process evidence", async () => {
+  const temp = await mkdtemp(join(tmpdir(), "zts-live-check-profileless-"));
+  try {
+    await writeFile(join(temp, "WebDriverBiDiServer.json"), JSON.stringify({ ws_host: "127.0.0.1", ws_port: 9222 }));
+    const inspection = await inspectLiveAttachment(context({
+      profilePath: temp,
+      running: true,
+      runningProcesses: [{
+        pid: 42,
+        args: "/Applications/Zen.app/Contents/MacOS/zen --remote-debugging-port=9222 --remote-allow-system-access",
+        profilePath: undefined
+      }]
+    }));
+
+    assert.equal(inspection.attachable, false);
+    assert.match(inspection.blockers.join("\n"), /No browser process explicitly matched/);
+    assert.equal(inspection.candidateTransportDetected, false);
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("live attachment check refuses non-local BiDi endpoints", async () => {
+  const temp = await mkdtemp(join(tmpdir(), "zts-live-check-remote-"));
+  try {
+    await writeFile(join(temp, "WebDriverBiDiServer.json"), JSON.stringify({ ws_host: "0.0.0.0", ws_port: 9222 }));
+    const inspection = await inspectLiveAttachment(context({
+      profilePath: temp,
+      running: true,
+      runningProcesses: [privilegedBrowserProcess(temp)]
+    }));
+
+    assert.equal(inspection.attachable, false);
+    assert.match(inspection.blockers.join("\n"), /not local-only/);
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("live attachment check refuses malformed BiDi server files", async () => {
+  const temp = await mkdtemp(join(tmpdir(), "zts-live-check-malformed-"));
+  try {
+    await writeFile(join(temp, "WebDriverBiDiServer.json"), "{not-json");
+    const inspection = await inspectLiveAttachment(context({
+      profilePath: temp,
+      running: true,
+      runningProcesses: [privilegedBrowserProcess(temp)]
+    }));
+
+    assert.equal(inspection.attachable, false);
+    assert.match(inspection.blockers.join("\n"), /not valid JSON/);
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
 test("extracts the last WebDriver BiDi listener from probe logs", () => {
   const log = [
     "*** You are running in headless mode.",
@@ -139,12 +257,13 @@ test("bridge probe reports spawn failures as blockers and cleans up temp profile
 });
 
 function context(overrides) {
+  const selectedProfilePath = overrides.profilePath ?? profilePath;
   return {
     appSupportDir: "/Users/main/Library/Application Support/zen",
     profile: {
-      id: "4le6r9n3.Default (release)",
+      id: overrides.profileId ?? "4le6r9n3.Default (release)",
       name: "Default",
-      path: profilePath,
+      path: selectedProfilePath,
       isDefault: true,
       fromInstallDefault: true
     },
@@ -152,12 +271,47 @@ function context(overrides) {
     runningProcesses: overrides.runningProcesses,
     sessionFile: {
       kind: "zen-sessions",
-      path: `${profilePath}/zen-sessions.jsonlz4`,
+      path: `${selectedProfilePath}/zen-sessions.jsonlz4`,
       exists: true,
       size: 100,
       modifiedMs: 1
     }
   };
+}
+
+function privilegedBrowserProcess(selectedProfilePath) {
+  return {
+    pid: 42,
+    args: `/Applications/Zen.app/Contents/MacOS/zen -profile ${selectedProfilePath} --remote-debugging-port=9222 --remote-allow-system-access --remote-allow-hosts localhost --remote-allow-origins http://127.0.0.1:9222`,
+    profilePath: selectedProfilePath
+  };
+}
+
+class FakeWebSocket {
+  constructor(url) {
+    this.url = url;
+    this.listeners = new Map();
+    setTimeout(() => this.emit("open", {}), 0);
+  }
+
+  addEventListener(type, callback) {
+    const callbacks = this.listeners.get(type) ?? [];
+    callbacks.push(callback);
+    this.listeners.set(type, callbacks);
+  }
+
+  send(payload) {
+    const request = JSON.parse(payload);
+    setTimeout(() => this.emit("message", {
+      data: JSON.stringify({ type: "success", id: request.id, result: { ready: true, message: "" } })
+    }), 0);
+  }
+
+  close() {}
+
+  emit(type, event) {
+    for (const callback of this.listeners.get(type) ?? []) callback(event);
+  }
 }
 
 function processArgs() {

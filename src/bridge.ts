@@ -1,5 +1,5 @@
 import { spawn, ChildProcess } from "node:child_process";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
@@ -51,6 +51,29 @@ export interface BridgeInspection {
   warnings: string[];
   blockers: string[];
   suggestedNextCommands: string[];
+}
+
+export interface BridgeLiveAttachmentInspection {
+  profilePath: string;
+  zenRunning: boolean;
+  serverFilePath: string;
+  serverFileExists: boolean;
+  endpoint: BridgeLiveEndpoint | null;
+  candidateTransportDetected: boolean;
+  candidatePrivilegedTransportDetected: boolean;
+  checkedEndpoint: boolean;
+  sessionStatus: unknown | null;
+  attachable: boolean;
+  checks: BridgeCheck[];
+  warnings: string[];
+  blockers: string[];
+  suggestedNextCommands: string[];
+}
+
+export interface BridgeLiveEndpoint {
+  host: string;
+  port: number;
+  websocketUrl: string;
 }
 
 export interface BridgeProbeReceipt {
@@ -111,6 +134,11 @@ export interface BridgeProbeOptions {
   timeoutMs?: number;
 }
 
+export interface BridgeLiveAttachmentOptions {
+  connect?: boolean;
+  timeoutMs?: number;
+}
+
 export function inspectBridge(context: ProfileContext): BridgeInspection {
   const processes = context.runningProcesses.map((process) => summarizeBridgeProcess(process, context.profile.path));
   const browserProcesses = processes.filter((process) => process.role === "browser");
@@ -152,6 +180,165 @@ export function inspectBridge(context: ProfileContext): BridgeInspection {
     warnings,
     blockers,
     suggestedNextCommands: ["zts bridge doctor", "zts sort --preview", "zts status"]
+  };
+}
+
+export async function inspectLiveAttachment(
+  context: ProfileContext,
+  options: BridgeLiveAttachmentOptions = {}
+): Promise<BridgeLiveAttachmentInspection> {
+  const bridge = inspectBridge(context);
+  const browserProcesses = bridge.processes.filter((process) => process.role === "browser");
+  const matchingBrowserProcesses = browserProcesses.filter((process) => process.profilePath === context.profile.path);
+  const candidateTransportDetected = matchingBrowserProcesses.some(hasCandidateTransport);
+  const candidatePrivilegedTransportDetected = matchingBrowserProcesses.some(
+    (process) => hasCandidateTransport(process) && process.flags.remoteAllowSystemAccess
+  );
+  const serverFilePath = join(context.profile.path, "WebDriverBiDiServer.json");
+  const checks: BridgeCheck[] = [
+    {
+      id: "zen_running",
+      label: "Zen running",
+      status: context.running ? "pass" : "fail",
+      detail: context.running ? "A Zen process is running." : "No Zen process is running."
+    },
+    {
+      id: "matching_browser_process",
+      label: "Matching browser process",
+      status: matchingBrowserProcesses.length > 0 ? "pass" : "fail",
+      detail: matchingBrowserProcesses.length > 0
+        ? `${matchingBrowserProcesses.length} browser process${matchingBrowserProcesses.length === 1 ? "" : "es"} explicitly matched the discovered profile.`
+        : "No browser process explicitly matched the discovered profile path."
+    },
+    {
+      id: "candidate_transport",
+      label: "Remote transport launch flag",
+      status: candidateTransportDetected ? "pass" : "fail",
+      detail: candidateTransportDetected
+        ? "A matching browser process has remote debugging, debugger server, or Marionette launch evidence."
+        : "No matching browser process has remote debugging, debugger server, or Marionette launch evidence."
+    },
+    {
+      id: "privileged_transport",
+      label: "Privileged chrome access flag",
+      status: candidatePrivilegedTransportDetected ? "pass" : "fail",
+      detail: candidatePrivilegedTransportDetected
+        ? "A matching candidate browser process has --remote-allow-system-access."
+        : "No matching candidate browser process has --remote-allow-system-access."
+    }
+  ];
+  let serverFileExists = false;
+  let endpoint: BridgeLiveEndpoint | null = null;
+  let sessionStatus: unknown | null = null;
+
+  try {
+    const contents = await readFile(serverFilePath, "utf8");
+    serverFileExists = true;
+    checks.push({
+      id: "bidi_server_file",
+      label: "WebDriver BiDi server file",
+      status: "pass",
+      detail: `Found ${serverFilePath}.`
+    });
+    const parsed = parseBidiServerFile(contents);
+    if (parsed.endpoint) {
+      endpoint = parsed.endpoint;
+      checks.push({
+        id: "bidi_endpoint",
+        label: "WebDriver BiDi endpoint",
+        status: "pass",
+        detail: `${endpoint.websocketUrl}`
+      });
+      checks.push({
+        id: "local_endpoint",
+        label: "Local-only endpoint",
+        status: isLocalHost(endpoint.host) ? "pass" : "fail",
+        detail: isLocalHost(endpoint.host)
+          ? `Endpoint host ${endpoint.host} is local.`
+          : `Endpoint host ${endpoint.host} is not local-only.`
+      });
+    } else {
+      checks.push({
+        id: "bidi_endpoint",
+        label: "WebDriver BiDi endpoint",
+        status: "fail",
+        detail: parsed.error ?? "The server file did not contain a usable host and port."
+      });
+    }
+  } catch (error) {
+    const code = isRecord(error) && typeof error.code === "string" ? error.code : "";
+    checks.push({
+      id: "bidi_server_file",
+      label: "WebDriver BiDi server file",
+      status: "fail",
+      detail: code === "ENOENT" ? `${serverFilePath} does not exist.` : `Could not read ${serverFilePath}.`
+    });
+  }
+
+  if (options.connect) {
+    if (!endpoint || !isLocalHost(endpoint.host)) {
+      checks.push({
+        id: "session_status",
+        label: "WebDriver BiDi session.status",
+        status: "fail",
+        detail: "No local WebDriver BiDi endpoint is available to check."
+      });
+    } else {
+      try {
+        sessionStatus = await readBidiSessionStatus(endpoint.websocketUrl, options.timeoutMs ?? 5000);
+        const statusError = validateBidiSessionStatus(sessionStatus);
+        checks.push({
+          id: "session_status",
+          label: "WebDriver BiDi session.status",
+          status: statusError ? "fail" : "pass",
+          detail: statusError ?? "The endpoint reported ready."
+        });
+      } catch (error) {
+        checks.push({
+          id: "session_status",
+          label: "WebDriver BiDi session.status",
+          status: "fail",
+          detail: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+  }
+
+  const blockers = checks
+    .filter((check) => check.status === "fail")
+    .map((check) => check.detail);
+  if (!options.connect && blockers.length === 0) {
+    const detail = "WebDriver BiDi session.status was not checked; rerun with --connect to prove endpoint readiness.";
+    checks.push({
+      id: "session_status",
+      label: "WebDriver BiDi session.status",
+      status: "warn",
+      detail
+    });
+    blockers.push(detail);
+  }
+  const attachable = blockers.length === 0;
+  const warnings = [
+    "This is a read-only attachment gate. It does not move tabs and does not enable live sort apply."
+  ];
+
+  return {
+    profilePath: context.profile.path,
+    zenRunning: context.running,
+    serverFilePath,
+    serverFileExists,
+    endpoint,
+    candidateTransportDetected,
+    candidatePrivilegedTransportDetected,
+    checkedEndpoint: Boolean(options.connect),
+    sessionStatus,
+    attachable,
+    checks,
+    warnings,
+    blockers,
+    suggestedNextCommands: attachable
+      ? ["zts bridge live-check --connect --json", "zts bridge probe", "zts sort --preview"]
+      : ["zts bridge doctor", "zts bridge probe", "zts sort --preview"]
   };
 }
 
@@ -359,6 +546,55 @@ export function validateBidiSessionStatus(value: unknown): string | null {
   return null;
 }
 
+export function readBidiSessionStatus(websocketUrl: string, timeoutMs = 5000): Promise<unknown> {
+  const WebSocketConstructor = globalThis.WebSocket;
+  if (!WebSocketConstructor) throw new Error("This Node runtime does not provide a WebSocket client");
+
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocketConstructor(websocketUrl);
+    let settled = false;
+    const timer = setTimeout(() => {
+      settled = true;
+      ws.close();
+      reject(new Error("Timed out waiting for WebDriver BiDi session.status"));
+    }, timeoutMs);
+
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      ws.close();
+      reject(error);
+    };
+    const finish = (value: unknown) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      ws.close();
+      resolve(value);
+    };
+
+    ws.addEventListener("open", () => {
+      ws.send(JSON.stringify({ id: 1, method: "session.status", params: {} }));
+    });
+    ws.addEventListener("message", (event) => {
+      let message: unknown;
+      try {
+        message = JSON.parse(String(event.data));
+      } catch {
+        fail(new Error("WebDriver BiDi returned non-JSON response"));
+        return;
+      }
+      if (!isRecord(message)) return;
+      if (message.type === "event") return;
+      if (message.id === 1) finish(message);
+    });
+    ws.addEventListener("error", () => {
+      fail(new Error("WebDriver BiDi WebSocket connection failed"));
+    });
+  });
+}
+
 export function validateBridgeProbeScriptProof(value: unknown): string | null {
   if (!isRecord(value)) return "WebDriver BiDi script proof was not returned";
   if (typeof value.sessionId !== "string" || value.sessionId.length === 0) return "WebDriver BiDi script proof had no session id";
@@ -402,6 +638,40 @@ export function validateBridgeProbeWorkspaceOperation(value: unknown): string | 
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseBidiServerFile(contents: string): { endpoint: BridgeLiveEndpoint | null; error?: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(contents);
+  } catch {
+    return { endpoint: null, error: "The WebDriver BiDi server file was not valid JSON." };
+  }
+  if (!isRecord(parsed)) return { endpoint: null, error: "The WebDriver BiDi server file was not a JSON object." };
+  const host = typeof parsed.ws_host === "string" ? parsed.ws_host : null;
+  const port = typeof parsed.ws_port === "number"
+    ? parsed.ws_port
+    : typeof parsed.ws_port === "string"
+      ? Number(parsed.ws_port)
+      : NaN;
+  if (!host || !Number.isInteger(port) || port <= 0 || port > 65535) {
+    return { endpoint: null, error: "The WebDriver BiDi server file did not contain a usable ws_host and ws_port." };
+  }
+  return {
+    endpoint: {
+      host,
+      port,
+      websocketUrl: `ws://${formatWebsocketHost(host)}:${port}/session`
+    }
+  };
+}
+
+function isLocalHost(host: string): boolean {
+  return host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "[::1]";
+}
+
+function formatWebsocketHost(host: string): string {
+  return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
 }
 
 function appendLog(log: string, chunk: Buffer): string {

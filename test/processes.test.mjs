@@ -40,3 +40,16 @@ test("extracts profile path before later launch flags", () => {
     }
   ]);
 });
+
+test("extracts profile path from double-dash profile launch flag", () => {
+  const profilePath = "/Users/main/Library/Application Support/zen/Profiles/4le6r9n3.Default (release)";
+  const output = `101 /Applications/Zen.app/Contents/MacOS/zen --profile ${profilePath} --remote-debugging-port=9222`;
+
+  assert.deepEqual(parseZenProcesses(output), [
+    {
+      pid: 101,
+      args: output.slice("101 ".length),
+      profilePath
+    }
+  ]);
+});

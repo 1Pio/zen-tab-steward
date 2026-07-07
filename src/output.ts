@@ -6,7 +6,7 @@ import { configPath } from "./paths.js";
 import { backupRootForProfile } from "./backup.js";
 import { EntityPlan, SortPlan } from "./sort.js";
 import { ApplyReceipt, ApplyVerificationReport } from "./apply.js";
-import { BridgeInspection, BridgeProbeReceipt } from "./bridge.js";
+import { BridgeInspection, BridgeLiveAttachmentInspection, BridgeProbeReceipt } from "./bridge.js";
 
 export interface CommandEnvelope<T> {
   version: string;
@@ -186,6 +186,44 @@ export function formatBridgeProbe(receipt: BridgeProbeReceipt, suggestedNextComm
 
   if (suggestedNextCommands.length > 0) {
     lines.push("", "Next:", ...suggestedNextCommands.map((command) => `  ${command}`));
+  }
+
+  return lines.join("\n");
+}
+
+export function formatBridgeLiveAttachment(liveCheck: BridgeLiveAttachmentInspection): string {
+  const lines = [
+    "Zen live attachment check",
+    `Status: ${liveCheck.attachable ? "attachable" : "refused"}`,
+    `Profile path: ${liveCheck.profilePath}`,
+    `Zen: ${liveCheck.zenRunning ? "running" : "not running"}`,
+    `Server file: ${liveCheck.serverFileExists ? liveCheck.serverFilePath : `${liveCheck.serverFilePath} (missing)`}`,
+    `Endpoint: ${liveCheck.endpoint?.websocketUrl ?? "(not available)"}`,
+    `Candidate transport: ${liveCheck.candidateTransportDetected ? "detected" : "not detected"}`,
+    `Privileged transport: ${liveCheck.candidatePrivilegedTransportDetected ? "detected" : "not detected"}`,
+    `Endpoint checked: ${liveCheck.checkedEndpoint ? "yes" : "no"}`,
+    "",
+    "Boundary:",
+    "  This is read-only. It does not move tabs, write Zen state, or enable live sort apply.",
+    "",
+    "Checks:",
+    ...liveCheck.checks.map((check) => `  - [${check.status}] ${check.label}: ${check.detail}`)
+  ];
+
+  if (liveCheck.blockers.length > 0) {
+    lines.push("", "Blockers:", ...liveCheck.blockers.map((blocker) => `  - ${blocker}`));
+  }
+
+  if (liveCheck.warnings.length > 0) {
+    lines.push("", "Warnings:", ...liveCheck.warnings.map((warning) => `  - ${warning}`));
+  }
+
+  if (liveCheck.sessionStatus !== null) {
+    lines.push("", "Session status:", `  ${JSON.stringify(liveCheck.sessionStatus)}`);
+  }
+
+  if (liveCheck.suggestedNextCommands.length > 0) {
+    lines.push("", "Next:", ...liveCheck.suggestedNextCommands.map((command) => `  ${command}`));
   }
 
   return lines.join("\n");

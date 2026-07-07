@@ -2,9 +2,9 @@
 import { Command } from "commander";
 import { applySortPlanOffline, listApplyReceipts, offlineApplyBlockers, verifyApplyReceipt } from "./apply.js";
 import { createBackup, listBackups, pruneBackups, restoreBackup } from "./backup.js";
-import { inspectBridge, runBridgeProbe } from "./bridge.js";
+import { inspectBridge, inspectLiveAttachment, runBridgeProbe } from "./bridge.js";
 import { addDomainRuleInContents, getConfigValue, loadConfig, saveConfigContents, setConfigValueInContents, ZtsConfig } from "./config.js";
-import { envelope, formatApplyReceiptList, formatApplyVerification, formatBackup, formatBackupList, formatBackupPrune, formatBridge, formatBridgeProbe, formatRestore, formatReview, formatSortDryRun, formatSortPreview, formatStatus, formatTabs, formatWorkspaces, printJson } from "./output.js";
+import { envelope, formatApplyReceiptList, formatApplyVerification, formatBackup, formatBackupList, formatBackupPrune, formatBridge, formatBridgeLiveAttachment, formatBridgeProbe, formatRestore, formatReview, formatSortDryRun, formatSortPreview, formatStatus, formatTabs, formatWorkspaces, printJson } from "./output.js";
 import { discoverProfileContext } from "./profile.js";
 import { listTabs, loadSession, loadSessionSummary, summarizeSession, withWorkspacePolicy } from "./session.js";
 import { classifyDomainForWorkspace, planSortPreview, SortInputs } from "./sort.js";
@@ -46,7 +46,8 @@ program
 program
   .command("bridge")
   .description("Inspect the live Zen bridge boundary without changing Zen state")
-  .argument("[action]", "status, doctor, or probe")
+  .argument("[action]", "status, doctor, live-check, or probe")
+  .option("--connect", "for live-check, connect to the discovered local WebDriver BiDi endpoint and run session.status")
   .option("--timeout-ms <ms>", "probe timeout in milliseconds")
   .option("--json", "print stable JSON output")
   .action(async (action: string | undefined, options: JsonOption & BridgeOptions) => {
@@ -66,6 +67,27 @@ program
         } else {
           process.stdout.write(`${formatBridge(bridge, selectedAction)}\n`);
         }
+      });
+      return;
+    }
+
+    if (selectedAction === "live-check") {
+      await runCommand("bridge live-check", options, async () => {
+        const context = await discoverProfileContext();
+        const timeoutMs = probeTimeoutMs(options.timeoutMs);
+        const liveCheck = await inspectLiveAttachment(context, { connect: Boolean(options.connect), timeoutMs });
+        const data = { profile: context.profile, zenRunning: context.running, liveCheck };
+        if (options.json) {
+          printJson(envelope("bridge live-check", data, {
+            ok: liveCheck.attachable,
+            warnings: liveCheck.warnings,
+            blockers: liveCheck.blockers,
+            suggestedNextCommands: liveCheck.suggestedNextCommands
+          }));
+        } else {
+          process.stdout.write(`${formatBridgeLiveAttachment(liveCheck)}\n`);
+        }
+        process.exitCode = liveCheck.attachable ? 0 : 2;
       });
       return;
     }
@@ -92,7 +114,7 @@ program
 
     const message = `unknown bridge action '${selectedAction}'`;
     if (options.json) {
-      printJson(envelope("bridge", { action: selectedAction }, { ok: false, blockers: [message], suggestedNextCommands: ["zts bridge status", "zts bridge doctor", "zts bridge probe"] }));
+      printJson(envelope("bridge", { action: selectedAction }, { ok: false, blockers: [message], suggestedNextCommands: ["zts bridge status", "zts bridge doctor", "zts bridge live-check", "zts bridge probe"] }));
     } else {
       process.stderr.write(`zts: ${message}\n`);
     }
@@ -539,6 +561,7 @@ interface BackupOptions {
 
 interface BridgeOptions {
   timeoutMs?: string;
+  connect?: boolean;
 }
 
 function sortCommandForReceipt(sourceWorkspace: string | undefined, options: SortOptions): string {

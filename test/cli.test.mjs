@@ -42,6 +42,16 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
   assert.match(bridgeDoctor.stdout, /Live backend: unavailable/);
   assert.match(bridgeDoctor.stdout, /Required launch evidence/);
 
+  const bridgeLiveCheck = spawnSync("node", ["dist/cli.js", "bridge", "live-check", "--json"], {
+    env,
+    encoding: "utf8"
+  });
+  assert.equal(bridgeLiveCheck.status, 2);
+  const bridgeLiveCheckJson = JSON.parse(bridgeLiveCheck.stdout);
+  assert.equal(bridgeLiveCheckJson.ok, false);
+  assert.equal(bridgeLiveCheckJson.data.liveCheck.attachable, false);
+  assert.match(bridgeLiveCheckJson.blockers.join("\n"), /No Zen process is running/);
+
   const unknownBridge = spawnSync("node", ["dist/cli.js", "bridge", "start", "--json"], {
     env,
     encoding: "utf8"
