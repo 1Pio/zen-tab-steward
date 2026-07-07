@@ -24,485 +24,6 @@ program
   .showSuggestionAfterError();
 
 program
-  .command("status")
-  .description("Report discovered profile, session counts, backend availability, and safety posture")
-  .option("--json", "print stable JSON output")
-  .action(async (options: JsonOption) => {
-    await runCommand("status", options, async () => {
-      const context = await discoverProfileContext();
-      const loadedConfig = await loadConfig();
-      const summary = withWorkspacePolicy(await loadSessionSummary(context.sessionFile), loadedConfig.config);
-      const bridge = inspectBridge(context);
-      const data = { profile: context.profile, zenRunning: context.running, session: summary, bridge };
-
-      if (options.json) {
-        printJson(envelope("status", data, statusEnvelopeOptions(context.running, bridge.blockers)));
-      } else {
-        process.stdout.write(`${formatStatus(context, summary, bridge)}\n`);
-      }
-    });
-  });
-
-program
-  .command("bridge")
-  .description("Inspect the live Zen bridge boundary without changing Zen state")
-  .argument("[action]", "status, doctor, live-check, live-read, live-move-proof, or probe")
-  .option("--connect", "for live-check, connect to the discovered local WebDriver BiDi endpoint and run session.status")
-  .option("--url <url>", "for live-move-proof, exact live tab URL to move")
-  .option("--from-workspace <workspace-id>", "for live-move-proof, exact source workspace id")
-  .option("--to-workspace <workspace-id>", "for live-move-proof, exact destination workspace id")
-  .option("--confirm-live-move", "for live-move-proof, acknowledge that one eligible live tab may be moved")
-  .option("--timeout-ms <ms>", "probe timeout in milliseconds")
-  .option("--json", "print stable JSON output")
-  .action(async (action: string | undefined, options: JsonOption & BridgeOptions) => {
-    const selectedAction = action ?? "status";
-
-    if (selectedAction === "status" || selectedAction === "doctor") {
-      await runCommand(`bridge ${selectedAction}`, options, async () => {
-        const context = await discoverProfileContext();
-        const bridge = inspectBridge(context);
-        const data = { profile: context.profile, zenRunning: context.running, bridge };
-        if (options.json) {
-          printJson(envelope(`bridge ${selectedAction}`, data, {
-            warnings: bridge.warnings,
-            blockers: bridge.blockers,
-            suggestedNextCommands: bridge.suggestedNextCommands
-          }));
-        } else {
-          process.stdout.write(`${formatBridge(bridge, selectedAction)}\n`);
-        }
-      });
-      return;
-    }
-
-    if (selectedAction === "live-check") {
-      await runCommand("bridge live-check", options, async () => {
-        const context = await discoverProfileContext();
-        const timeoutMs = probeTimeoutMs(options.timeoutMs);
-        const liveCheck = await inspectLiveAttachment(context, { connect: Boolean(options.connect), timeoutMs });
-        const data = { profile: context.profile, zenRunning: context.running, liveCheck };
-        if (options.json) {
-          printJson(envelope("bridge live-check", data, {
-            ok: liveCheck.attachable,
-            warnings: liveCheck.warnings,
-            blockers: liveCheck.blockers,
-            suggestedNextCommands: liveCheck.suggestedNextCommands
-          }));
-        } else {
-          process.stdout.write(`${formatBridgeLiveAttachment(liveCheck)}\n`);
-        }
-        process.exitCode = liveCheck.attachable ? 0 : 2;
-      });
-      return;
-    }
-
-    if (selectedAction === "live-read") {
-      await runCommand("bridge live-read", options, async () => {
-        const context = await discoverProfileContext();
-        const timeoutMs = probeTimeoutMs(options.timeoutMs);
-        const receipt = await runBridgeLiveReadProof(context, { timeoutMs });
-        const suggestedNextCommands = receipt.ok
-          ? ["zts bridge live-check --connect --json", "zts sort --preview"]
-          : ["zts bridge live-check --connect --json", "zts bridge doctor", "zts bridge probe"];
-        if (options.json) {
-          printJson(envelope("bridge live-read", { profile: context.profile, zenRunning: context.running, receipt }, {
-            ok: receipt.ok,
-            warnings: receipt.warnings,
-            blockers: receipt.blockers,
-            suggestedNextCommands
-          }));
-        } else {
-          process.stdout.write(`${formatBridgeLiveRead(receipt, suggestedNextCommands)}\n`);
-        }
-        process.exitCode = receipt.ok ? 0 : 2;
-      });
-      return;
-    }
-
-    if (selectedAction === "live-move-proof") {
-      await runCommand("bridge live-move-proof", options, async () => {
-        const context = await discoverProfileContext();
-        const timeoutMs = probeTimeoutMs(options.timeoutMs);
-        const receipt = await runBridgeLiveMoveProof(context, {
-          timeoutMs,
-          url: options.url,
-          fromWorkspaceId: options.fromWorkspace,
-          toWorkspaceId: options.toWorkspace,
-          confirmLiveMove: Boolean(options.confirmLiveMove)
-        });
-        const suggestedNextCommands = receipt.ok
-          ? ["zts bridge live-read --json", "zts sort --preview"]
-          : ["zts bridge live-read --json", "zts bridge live-check --connect --json", "zts tabs <workspace> --json"];
-        if (options.json) {
-          printJson(envelope("bridge live-move-proof", { profile: context.profile, zenRunning: context.running, receipt }, {
-            ok: receipt.ok,
-            warnings: receipt.warnings,
-            blockers: receipt.blockers,
-            suggestedNextCommands
-          }));
-        } else {
-          process.stdout.write(`${formatBridgeLiveMove(receipt, suggestedNextCommands)}\n`);
-        }
-        process.exitCode = receipt.ok ? 0 : 2;
-      });
-      return;
-    }
-
-    if (selectedAction === "probe") {
-      await runCommand("bridge probe", options, async () => {
-        const timeoutMs = probeTimeoutMs(options.timeoutMs);
-        const receipt = await runBridgeProbe({ timeoutMs });
-        const suggestedNextCommands = receipt.ok ? ["zts bridge doctor", "zts bridge status"] : ["zts bridge probe --json", "zts bridge doctor"];
-        if (options.json) {
-          printJson(envelope("bridge probe", { receipt }, {
-            ok: receipt.ok,
-            warnings: receipt.warnings,
-            blockers: receipt.blockers,
-            suggestedNextCommands
-          }));
-        } else {
-          process.stdout.write(`${formatBridgeProbe(receipt, suggestedNextCommands)}\n`);
-        }
-        process.exitCode = receipt.ok ? 0 : 2;
-      });
-      return;
-    }
-
-    const message = `unknown bridge action '${selectedAction}'`;
-    if (options.json) {
-      printJson(envelope("bridge", { action: selectedAction }, { ok: false, blockers: [message], suggestedNextCommands: ["zts bridge status", "zts bridge doctor", "zts bridge live-check", "zts bridge live-read", "zts bridge live-move-proof", "zts bridge probe"] }));
-    } else {
-      process.stderr.write(`zts: ${message}\n`);
-    }
-    process.exitCode = 1;
-  });
-
-program
-  .command("config")
-  .description("Inspect or update the user-owned zts config")
-  .argument("[action]", "path, show, get, or set")
-  .argument("[key]", "config key for get/set")
-  .argument("[value]", "config value for set")
-  .option("--json", "print stable JSON output")
-  .action(async (action: string | undefined, key: string | undefined, value: string | undefined, options: JsonOption) => {
-    await runCommand("config", options, async () => {
-      const loaded = await loadConfig();
-      const selectedAction = action ?? "show";
-
-      if (selectedAction === "path") {
-        if (options.json) printJson(envelope("config path", { path: loaded.path, exists: loaded.exists }));
-        else process.stdout.write(`${loaded.path}\n`);
-        return;
-      }
-
-      if (selectedAction === "show") {
-        if (options.json) printJson(envelope("config show", loaded));
-        else process.stdout.write(`${JSON.stringify(loaded.config, null, 2)}\n`);
-        return;
-      }
-
-      if (selectedAction === "get" && key) {
-        const configValue = getConfigValue(loaded.config, key);
-        if (options.json) printJson(envelope("config get", { path: loaded.path, key, value: configValue }));
-        else process.stdout.write(`${String(configValue)}\n`);
-        return;
-      }
-
-      if (selectedAction === "set" && key && value !== undefined) {
-        const contents = setConfigValueInContents(loaded.contents, key, value);
-        const path = await saveConfigContents(contents);
-        const updated = (await loadConfig()).config;
-        if (options.json) printJson(envelope("config set", { path, key, value: getConfigValue(updated, key) }));
-        else process.stdout.write(`Set ${key} in ${path}\n`);
-        return;
-      }
-
-      throw new Error("Usage: zts config [path|show|get <key>|set <key> <value>]");
-    });
-  });
-
-program
-  .command("rules")
-  .description("Inspect or update deterministic routing rules")
-  .argument("[action]", "add or test")
-  .argument("[type]", "rule type, currently domain")
-  .argument("[patternOrUrl]", "domain pattern for add, URL/domain for test")
-  .argument("[workspace]", "destination workspace for add")
-  .option("--json", "print stable JSON output")
-  .action(async (action: string | undefined, type: string | undefined, patternOrUrl: string | undefined, workspace: string | undefined, options: JsonOption) => {
-    await runCommand("rules", options, async () => {
-      const loaded = await loadConfig();
-
-      if (!action) {
-        if (options.json) printJson(envelope("rules", { path: loaded.path, domainRules: loaded.config.rules.domains }));
-        else process.stdout.write(formatDomainRules(loaded.config.rules.domains));
-        return;
-      }
-
-      if (action === "add" && type === "domain" && patternOrUrl && workspace) {
-        const contents = addDomainRuleInContents(loaded.contents, patternOrUrl, workspace);
-        const path = await saveConfigContents(contents);
-        if (options.json) printJson(envelope("rules add domain", { path, pattern: patternOrUrl, workspace }));
-        else process.stdout.write(`Added domain rule ${patternOrUrl} -> ${workspace}\n`);
-        return;
-      }
-
-      if (action === "test" && type) {
-        const testInput = patternOrUrl ?? type;
-        const domain = domainFromInput(testInput);
-        const match = classifyDomainForWorkspace(domain, loaded.config.rules.domains);
-        if (options.json) printJson(envelope("rules test", { input: testInput, domain, match }));
-        else process.stdout.write(match ? `${domain} -> ${match.workspaceName} (${match.matchedPattern})\n` : `${domain} -> review\n`);
-        return;
-      }
-
-      throw new Error("Usage: zts rules [add domain <pattern> <workspace>|test <url-or-domain>]");
-    });
-  });
-
-program
-  .command("workspaces")
-  .description("List Zen workspaces with tab, pinned, essential, folder, and group counts")
-  .option("--json", "print stable JSON output")
-  .action(async (options: JsonOption) => {
-    await runCommand("workspaces", options, async () => {
-      const context = await discoverProfileContext();
-      const loadedConfig = await loadConfig();
-      const summary = withWorkspacePolicy(await loadSessionSummary(context.sessionFile), loadedConfig.config);
-      if (options.json) {
-        printJson(envelope("workspaces", { profile: context.profile, zenRunning: context.running, workspaces: summary.workspaces }));
-      } else {
-        process.stdout.write(`${formatWorkspaces(summary)}\n`);
-      }
-    });
-  });
-
-program
-  .command("tabs")
-  .description("List Zen tabs with workspace and protection metadata")
-  .argument("[workspace]", "optional workspace name or id filter")
-  .option("--workspace <workspace>", "workspace name or id filter")
-  .option("--json", "print stable JSON output")
-  .action(async (workspaceArgument: string | undefined, options: JsonOption & { workspace?: string }) => {
-    await runCommand("tabs", options, async () => {
-      const context = await discoverProfileContext();
-      const loadedConfig = await loadConfig();
-      const session = await loadSession(context.sessionFile);
-      const summary = withWorkspacePolicy(summarizeSession(session, context.sessionFile), loadedConfig.config);
-      const workspace = options.workspace ?? workspaceArgument;
-      const tabs = listTabs(session, summary, workspace);
-      if (options.json) {
-        printJson(envelope("tabs", { profile: context.profile, zenRunning: context.running, workspace: workspace ?? null, tabs }));
-      } else {
-        process.stdout.write(`${formatTabs(tabs)}\n`);
-      }
-    });
-  });
-
-program
-  .command("apply")
-  .description("List or verify sort apply receipts")
-  .argument("[action]", "list or verify")
-  .argument("[receipt-id]", "apply receipt id for verify")
-  .option("--json", "print stable JSON output")
-  .action(async (action: string | undefined, receiptId: string | undefined, options: JsonOption) => {
-    const selectedAction = action ?? "list";
-
-    if (selectedAction === "list") {
-      await runCommand("apply list", options, async () => {
-        const context = await discoverProfileContext();
-        const receipts = await listApplyReceipts(context.profile.id);
-        if (options.json) {
-          printJson(envelope("apply list", { profile: context.profile, receipts }));
-        } else {
-          process.stdout.write(`${formatApplyReceiptList(receipts)}\n`);
-        }
-      });
-      return;
-    }
-
-    if (selectedAction === "verify") {
-      await runCommand("apply verify", options, async () => {
-        const context = await discoverProfileContext();
-        if (!receiptId) throw new Error("Apply receipt id is required");
-        const report = await verifyApplyReceipt(context, receiptId);
-        const ok = report.verification.ok;
-        if (options.json) {
-          printJson(envelope("apply verify", { profile: context.profile, report }, { ok, blockers: report.verification.blockers }));
-        } else {
-          process.stdout.write(`${formatApplyVerification(report)}\n`);
-        }
-        process.exitCode = ok ? 0 : 2;
-      });
-      return;
-    }
-
-    const message = `unknown apply action '${selectedAction}'`;
-    if (options.json) {
-      printJson(envelope("apply", { action: selectedAction }, { ok: false, blockers: [message], suggestedNextCommands: ["zts apply list", "zts apply verify <receipt-id>"] }));
-    } else {
-      process.stderr.write(`zts: ${message}\n`);
-    }
-    process.exitCode = 1;
-  });
-
-program
-  .command("backup")
-  .description("Create, list, or restore backups")
-  .argument("[action]", "optional action: list, restore, or prune")
-  .argument("[backup-id]", "backup id for restore")
-  .option("--before <iso-date>", "prune backups created before an ISO date")
-  .option("--older-than <duration>", "prune backups older than a duration such as 30d, 12h, or 45m")
-  .option("--dry-run", "show prune candidates without deleting backup files")
-  .option("--json", "print stable JSON output")
-  .action(async (action: string | undefined, backupId: string | undefined, options: JsonOption & BackupOptions) => {
-    if (action === "list") {
-      await runCommand("backup list", options, async () => {
-        const context = await discoverProfileContext();
-        const backups = await listBackups(context.profile.id);
-        if (options.json) {
-          printJson(envelope("backup list", { profile: context.profile, backups }));
-        } else {
-          process.stdout.write(`${formatBackupList(backups)}\n`);
-        }
-      });
-      return;
-    }
-
-    if (action === "restore") {
-      await runCommand("backup restore", options, async () => {
-        const context = await discoverProfileContext();
-        if (context.running) {
-          const blockers = ["Restore is refused because Zen is running"];
-          const suggestedNextCommands = ["zts backup list", "zts status"];
-          if (options.json) {
-            printJson(envelope("backup restore", { backupId, profile: context.profile }, { ok: false, blockers, suggestedNextCommands }));
-          } else {
-            process.stderr.write(`Restore refused for ${backupId ?? "(missing backup id)"}\n${blockers.map((b) => `- ${b}`).join("\n")}\n`);
-          }
-          process.exitCode = 2;
-          return;
-        }
-
-        const receipt = await restoreBackup(context, backupId, `zts backup restore ${backupId ?? ""}`.trim());
-        if (options.json) {
-          printJson(envelope("backup restore", { profile: context.profile, receipt }));
-        } else {
-          process.stdout.write(`${formatRestore(receipt)}\n`);
-        }
-      });
-      return;
-    }
-
-    if (action === "prune") {
-      await runCommand("backup prune", options, async () => {
-        const context = await discoverProfileContext();
-        const cutoff = pruneCutoff(options);
-        const receipt = await pruneBackups(context.profile.id, cutoff, Boolean(options.dryRun), backupPruneCommand(options));
-        if (options.json) {
-          printJson(envelope("backup prune", { profile: context.profile, receipt }));
-        } else {
-          process.stdout.write(`${formatBackupPrune(receipt)}\n`);
-        }
-      });
-      return;
-    }
-
-    if (action) {
-      const message = `unknown backup action '${action}'`;
-      if (options.json) {
-        printJson(envelope("backup", { action }, { ok: false, blockers: [message], suggestedNextCommands: ["zts backup", "zts backup list", "zts backup prune --dry-run --older-than 30d"] }));
-      } else {
-        process.stderr.write(`zts: ${message}\n`);
-      }
-      process.exitCode = 1;
-      return;
-    }
-
-    await runCommand("backup", options, async () => {
-      const context = await discoverProfileContext();
-      const manifest = await createBackup(context, "zts backup");
-      if (options.json) {
-        printJson(envelope("backup", { manifest }));
-      } else {
-        process.stdout.write(`${formatBackup(manifest)}\n`);
-      }
-    });
-  });
-
-program
-  .command("review")
-  .description("List sort plan items that need human review")
-  .argument("[source-workspace]", "source workspace name or id")
-  .option("--min-confidence <number>", "minimum confidence required for future apply")
-  .option("--include-pinned", "include pinned tabs in review planning")
-  .option("--include-essentials", "include essentials in review planning")
-  .option("--to <workspaces>", "comma-separated destination workspace allowlist")
-  .option("--not-to <workspaces>", "comma-separated destination workspace denylist")
-  .option("--only <patterns>", "comma-separated source URL/domain patterns")
-  .option("--except <patterns>", "comma-separated exclusion URL/domain patterns")
-  .option("--limit <count>", "maximum number of move actions to plan before overflow review")
-  .option("--backend <backend>", "backend preference to include in resolved inputs")
-  .option("--json", "print stable JSON output")
-  .action(async (sourceWorkspace: string | undefined, options: JsonOption & SortOptions) => {
-    await runCommand("review", options, async () => {
-      const context = await discoverProfileContext();
-      const loadedConfig = await loadConfig();
-      const session = await loadSession(context.sessionFile);
-      const summary = withWorkspacePolicy(summarizeSession(session, context.sessionFile), loadedConfig.config);
-      const source = resolveSourceWorkspace(summary, sourceWorkspace, loadedConfig.config.defaults.inbox);
-      const inputs = sortInputs(options, loadedConfig.config);
-      const inputError = validateSortInputs(inputs);
-      if (inputError) {
-        if (options.json) {
-          printJson(envelope("review", { sourceWorkspace: sourceWorkspace ?? null, inputs }, { ok: false, blockers: [inputError], suggestedNextCommands: ["zts review --help"] }));
-        } else {
-          process.stderr.write(`zts: ${inputError}\n`);
-        }
-        process.exitCode = 1;
-        return;
-      }
-      if (!source) {
-        const message = sourceWorkspace
-          ? `Source workspace not found: ${sourceWorkspace}`
-          : "No source workspace could be resolved";
-        const suggestedNextCommands = ["zts workspaces", "zts sort --preview"];
-        if (options.json) {
-          printJson(envelope("review", { sourceWorkspace: sourceWorkspace ?? null, inputs }, { ok: false, blockers: [message], suggestedNextCommands }));
-        } else {
-          process.stderr.write(`zts: ${message}\n`);
-        }
-        process.exitCode = 1;
-        return;
-      }
-
-      const plan = planSortPreview(session, summary, source, inputs);
-      const data = {
-        profile: context.profile,
-        zenRunning: context.running,
-        sourceWorkspace: source,
-        inputs,
-        summary: {
-          moveCount: plan.moveCount,
-          skipCount: plan.skipCount,
-          reviewCount: plan.reviewCount,
-          blockedCount: plan.blockedCount
-        },
-        reviewActions: plan.reviewActions
-      };
-      const suggestedNextCommands = plan.reviewCount > 0
-        ? ["zts sort --dry-run", "zts rules test <url-or-domain>", "zts rules add domain <domain> <workspace>"]
-        : ["zts sort --preview"];
-
-      if (options.json) {
-        printJson(envelope("review", data, { suggestedNextCommands }));
-      } else {
-        process.stdout.write(`${formatReview(plan, suggestedNextCommands)}\n`);
-      }
-    });
-  });
-
-program
   .command("sort")
   .description("Plan or apply Zen tab sorting. Defaults to a glanceable preview; pass --apply to write, --dry-run for the full operational plan.")
   .argument("[source-workspace]", "source workspace name or id (defaults to configured inbox)")
@@ -666,6 +187,486 @@ program
       }
     });
   });
+program
+  .command("status")
+  .description("Report discovered profile, session counts, backend availability, and safety posture")
+  .option("--json", "print stable JSON output")
+  .action(async (options: JsonOption) => {
+    await runCommand("status", options, async () => {
+      const context = await discoverProfileContext();
+      const loadedConfig = await loadConfig();
+      const summary = withWorkspacePolicy(await loadSessionSummary(context.sessionFile), loadedConfig.config);
+      const bridge = inspectBridge(context);
+      const data = { profile: context.profile, zenRunning: context.running, session: summary, bridge };
+
+      if (options.json) {
+        printJson(envelope("status", data, statusEnvelopeOptions(context.running, bridge.blockers)));
+      } else {
+        process.stdout.write(`${formatStatus(context, summary, bridge)}\n`);
+      }
+    });
+  });
+
+program
+  .command("workspaces")
+  .description("List Zen workspaces with tab, pinned, essential, folder, and group counts")
+  .option("--json", "print stable JSON output")
+  .action(async (options: JsonOption) => {
+    await runCommand("workspaces", options, async () => {
+      const context = await discoverProfileContext();
+      const loadedConfig = await loadConfig();
+      const summary = withWorkspacePolicy(await loadSessionSummary(context.sessionFile), loadedConfig.config);
+      if (options.json) {
+        printJson(envelope("workspaces", { profile: context.profile, zenRunning: context.running, workspaces: summary.workspaces }));
+      } else {
+        process.stdout.write(`${formatWorkspaces(summary)}\n`);
+      }
+    });
+  });
+
+program
+  .command("tabs")
+  .description("List Zen tabs with workspace and protection metadata")
+  .argument("[workspace]", "optional workspace name or id filter")
+  .option("--workspace <workspace>", "workspace name or id filter")
+  .option("--json", "print stable JSON output")
+  .action(async (workspaceArgument: string | undefined, options: JsonOption & { workspace?: string }) => {
+    await runCommand("tabs", options, async () => {
+      const context = await discoverProfileContext();
+      const loadedConfig = await loadConfig();
+      const session = await loadSession(context.sessionFile);
+      const summary = withWorkspacePolicy(summarizeSession(session, context.sessionFile), loadedConfig.config);
+      const workspace = options.workspace ?? workspaceArgument;
+      const tabs = listTabs(session, summary, workspace);
+      if (options.json) {
+        printJson(envelope("tabs", { profile: context.profile, zenRunning: context.running, workspace: workspace ?? null, tabs }));
+      } else {
+        process.stdout.write(`${formatTabs(tabs)}\n`);
+      }
+    });
+  });
+
+program
+  .command("review")
+  .description("List sort plan items that need human review")
+  .argument("[source-workspace]", "source workspace name or id")
+  .option("--min-confidence <number>", "minimum confidence required for future apply")
+  .option("--include-pinned", "include pinned tabs in review planning")
+  .option("--include-essentials", "include essentials in review planning")
+  .option("--to <workspaces>", "comma-separated destination workspace allowlist")
+  .option("--not-to <workspaces>", "comma-separated destination workspace denylist")
+  .option("--only <patterns>", "comma-separated source URL/domain patterns")
+  .option("--except <patterns>", "comma-separated exclusion URL/domain patterns")
+  .option("--limit <count>", "maximum number of move actions to plan before overflow review")
+  .option("--backend <backend>", "backend preference to include in resolved inputs")
+  .option("--json", "print stable JSON output")
+  .action(async (sourceWorkspace: string | undefined, options: JsonOption & SortOptions) => {
+    await runCommand("review", options, async () => {
+      const context = await discoverProfileContext();
+      const loadedConfig = await loadConfig();
+      const session = await loadSession(context.sessionFile);
+      const summary = withWorkspacePolicy(summarizeSession(session, context.sessionFile), loadedConfig.config);
+      const source = resolveSourceWorkspace(summary, sourceWorkspace, loadedConfig.config.defaults.inbox);
+      const inputs = sortInputs(options, loadedConfig.config);
+      const inputError = validateSortInputs(inputs);
+      if (inputError) {
+        if (options.json) {
+          printJson(envelope("review", { sourceWorkspace: sourceWorkspace ?? null, inputs }, { ok: false, blockers: [inputError], suggestedNextCommands: ["zts review --help"] }));
+        } else {
+          process.stderr.write(`zts: ${inputError}\n`);
+        }
+        process.exitCode = 1;
+        return;
+      }
+      if (!source) {
+        const message = sourceWorkspace
+          ? `Source workspace not found: ${sourceWorkspace}`
+          : "No source workspace could be resolved";
+        const suggestedNextCommands = ["zts workspaces", "zts sort --preview"];
+        if (options.json) {
+          printJson(envelope("review", { sourceWorkspace: sourceWorkspace ?? null, inputs }, { ok: false, blockers: [message], suggestedNextCommands }));
+        } else {
+          process.stderr.write(`zts: ${message}\n`);
+        }
+        process.exitCode = 1;
+        return;
+      }
+
+      const plan = planSortPreview(session, summary, source, inputs);
+      const data = {
+        profile: context.profile,
+        zenRunning: context.running,
+        sourceWorkspace: source,
+        inputs,
+        summary: {
+          moveCount: plan.moveCount,
+          skipCount: plan.skipCount,
+          reviewCount: plan.reviewCount,
+          blockedCount: plan.blockedCount
+        },
+        reviewActions: plan.reviewActions
+      };
+      const suggestedNextCommands = plan.reviewCount > 0
+        ? ["zts sort --dry-run", "zts rules test <url-or-domain>", "zts rules add domain <domain> <workspace>"]
+        : ["zts sort --preview"];
+
+      if (options.json) {
+        printJson(envelope("review", data, { suggestedNextCommands }));
+      } else {
+        process.stdout.write(`${formatReview(plan, suggestedNextCommands)}\n`);
+      }
+    });
+  });
+
+program
+  .command("rules")
+  .description("Inspect or update deterministic routing rules")
+  .argument("[action]", "add or test")
+  .argument("[type]", "rule type, currently domain")
+  .argument("[patternOrUrl]", "domain pattern for add, URL/domain for test")
+  .argument("[workspace]", "destination workspace for add")
+  .option("--json", "print stable JSON output")
+  .action(async (action: string | undefined, type: string | undefined, patternOrUrl: string | undefined, workspace: string | undefined, options: JsonOption) => {
+    await runCommand("rules", options, async () => {
+      const loaded = await loadConfig();
+
+      if (!action) {
+        if (options.json) printJson(envelope("rules", { path: loaded.path, domainRules: loaded.config.rules.domains }));
+        else process.stdout.write(formatDomainRules(loaded.config.rules.domains));
+        return;
+      }
+
+      if (action === "add" && type === "domain" && patternOrUrl && workspace) {
+        const contents = addDomainRuleInContents(loaded.contents, patternOrUrl, workspace);
+        const path = await saveConfigContents(contents);
+        if (options.json) printJson(envelope("rules add domain", { path, pattern: patternOrUrl, workspace }));
+        else process.stdout.write(`Added domain rule ${patternOrUrl} -> ${workspace}\n`);
+        return;
+      }
+
+      if (action === "test" && type) {
+        const testInput = patternOrUrl ?? type;
+        const domain = domainFromInput(testInput);
+        const match = classifyDomainForWorkspace(domain, loaded.config.rules.domains);
+        if (options.json) printJson(envelope("rules test", { input: testInput, domain, match }));
+        else process.stdout.write(match ? `${domain} -> ${match.workspaceName} (${match.matchedPattern})\n` : `${domain} -> review\n`);
+        return;
+      }
+
+      throw new Error("Usage: zts rules [add domain <pattern> <workspace>|test <url-or-domain>]");
+    });
+  });
+
+program
+  .command("config")
+  .description("Inspect or update the user-owned zts config")
+  .argument("[action]", "path, show, get, or set")
+  .argument("[key]", "config key for get/set")
+  .argument("[value]", "config value for set")
+  .option("--json", "print stable JSON output")
+  .action(async (action: string | undefined, key: string | undefined, value: string | undefined, options: JsonOption) => {
+    await runCommand("config", options, async () => {
+      const loaded = await loadConfig();
+      const selectedAction = action ?? "show";
+
+      if (selectedAction === "path") {
+        if (options.json) printJson(envelope("config path", { path: loaded.path, exists: loaded.exists }));
+        else process.stdout.write(`${loaded.path}\n`);
+        return;
+      }
+
+      if (selectedAction === "show") {
+        if (options.json) printJson(envelope("config show", loaded));
+        else process.stdout.write(`${JSON.stringify(loaded.config, null, 2)}\n`);
+        return;
+      }
+
+      if (selectedAction === "get" && key) {
+        const configValue = getConfigValue(loaded.config, key);
+        if (options.json) printJson(envelope("config get", { path: loaded.path, key, value: configValue }));
+        else process.stdout.write(`${String(configValue)}\n`);
+        return;
+      }
+
+      if (selectedAction === "set" && key && value !== undefined) {
+        const contents = setConfigValueInContents(loaded.contents, key, value);
+        const path = await saveConfigContents(contents);
+        const updated = (await loadConfig()).config;
+        if (options.json) printJson(envelope("config set", { path, key, value: getConfigValue(updated, key) }));
+        else process.stdout.write(`Set ${key} in ${path}\n`);
+        return;
+      }
+
+      throw new Error("Usage: zts config [path|show|get <key>|set <key> <value>]");
+    });
+  });
+
+program
+  .command("backup")
+  .description("Create, list, or restore backups")
+  .argument("[action]", "optional action: list, restore, or prune")
+  .argument("[backup-id]", "backup id for restore")
+  .option("--before <iso-date>", "prune backups created before an ISO date")
+  .option("--older-than <duration>", "prune backups older than a duration such as 30d, 12h, or 45m")
+  .option("--dry-run", "show prune candidates without deleting backup files")
+  .option("--json", "print stable JSON output")
+  .action(async (action: string | undefined, backupId: string | undefined, options: JsonOption & BackupOptions) => {
+    if (action === "list") {
+      await runCommand("backup list", options, async () => {
+        const context = await discoverProfileContext();
+        const backups = await listBackups(context.profile.id);
+        if (options.json) {
+          printJson(envelope("backup list", { profile: context.profile, backups }));
+        } else {
+          process.stdout.write(`${formatBackupList(backups)}\n`);
+        }
+      });
+      return;
+    }
+
+    if (action === "restore") {
+      await runCommand("backup restore", options, async () => {
+        const context = await discoverProfileContext();
+        if (context.running) {
+          const blockers = ["Restore is refused because Zen is running"];
+          const suggestedNextCommands = ["zts backup list", "zts status"];
+          if (options.json) {
+            printJson(envelope("backup restore", { backupId, profile: context.profile }, { ok: false, blockers, suggestedNextCommands }));
+          } else {
+            process.stderr.write(`Restore refused for ${backupId ?? "(missing backup id)"}\n${blockers.map((b) => `- ${b}`).join("\n")}\n`);
+          }
+          process.exitCode = 2;
+          return;
+        }
+
+        const receipt = await restoreBackup(context, backupId, `zts backup restore ${backupId ?? ""}`.trim());
+        if (options.json) {
+          printJson(envelope("backup restore", { profile: context.profile, receipt }));
+        } else {
+          process.stdout.write(`${formatRestore(receipt)}\n`);
+        }
+      });
+      return;
+    }
+
+    if (action === "prune") {
+      await runCommand("backup prune", options, async () => {
+        const context = await discoverProfileContext();
+        const cutoff = pruneCutoff(options);
+        const receipt = await pruneBackups(context.profile.id, cutoff, Boolean(options.dryRun), backupPruneCommand(options));
+        if (options.json) {
+          printJson(envelope("backup prune", { profile: context.profile, receipt }));
+        } else {
+          process.stdout.write(`${formatBackupPrune(receipt)}\n`);
+        }
+      });
+      return;
+    }
+
+    if (action) {
+      const message = `unknown backup action '${action}'`;
+      if (options.json) {
+        printJson(envelope("backup", { action }, { ok: false, blockers: [message], suggestedNextCommands: ["zts backup", "zts backup list", "zts backup prune --dry-run --older-than 30d"] }));
+      } else {
+        process.stderr.write(`zts: ${message}\n`);
+      }
+      process.exitCode = 1;
+      return;
+    }
+
+    await runCommand("backup", options, async () => {
+      const context = await discoverProfileContext();
+      const manifest = await createBackup(context, "zts backup");
+      if (options.json) {
+        printJson(envelope("backup", { manifest }));
+      } else {
+        process.stdout.write(`${formatBackup(manifest)}\n`);
+      }
+    });
+  });
+
+program
+  .command("apply")
+  .description("List or verify sort apply receipts")
+  .argument("[action]", "list or verify")
+  .argument("[receipt-id]", "apply receipt id for verify")
+  .option("--json", "print stable JSON output")
+  .action(async (action: string | undefined, receiptId: string | undefined, options: JsonOption) => {
+    const selectedAction = action ?? "list";
+
+    if (selectedAction === "list") {
+      await runCommand("apply list", options, async () => {
+        const context = await discoverProfileContext();
+        const receipts = await listApplyReceipts(context.profile.id);
+        if (options.json) {
+          printJson(envelope("apply list", { profile: context.profile, receipts }));
+        } else {
+          process.stdout.write(`${formatApplyReceiptList(receipts)}\n`);
+        }
+      });
+      return;
+    }
+
+    if (selectedAction === "verify") {
+      await runCommand("apply verify", options, async () => {
+        const context = await discoverProfileContext();
+        if (!receiptId) throw new Error("Apply receipt id is required");
+        const report = await verifyApplyReceipt(context, receiptId);
+        const ok = report.verification.ok;
+        if (options.json) {
+          printJson(envelope("apply verify", { profile: context.profile, report }, { ok, blockers: report.verification.blockers }));
+        } else {
+          process.stdout.write(`${formatApplyVerification(report)}\n`);
+        }
+        process.exitCode = ok ? 0 : 2;
+      });
+      return;
+    }
+
+    const message = `unknown apply action '${selectedAction}'`;
+    if (options.json) {
+      printJson(envelope("apply", { action: selectedAction }, { ok: false, blockers: [message], suggestedNextCommands: ["zts apply list", "zts apply verify <receipt-id>"] }));
+    } else {
+      process.stderr.write(`zts: ${message}\n`);
+    }
+    process.exitCode = 1;
+  });
+
+program
+  .command("bridge")
+  .description("Inspect the live Zen bridge boundary without changing Zen state")
+  .argument("[action]", "status, doctor, live-check, live-read, live-move-proof, or probe")
+  .option("--connect", "for live-check, connect to the discovered local WebDriver BiDi endpoint and run session.status")
+  .option("--url <url>", "for live-move-proof, exact live tab URL to move")
+  .option("--from-workspace <workspace-id>", "for live-move-proof, exact source workspace id")
+  .option("--to-workspace <workspace-id>", "for live-move-proof, exact destination workspace id")
+  .option("--confirm-live-move", "for live-move-proof, acknowledge that one eligible live tab may be moved")
+  .option("--timeout-ms <ms>", "probe timeout in milliseconds")
+  .option("--json", "print stable JSON output")
+  .action(async (action: string | undefined, options: JsonOption & BridgeOptions) => {
+    const selectedAction = action ?? "status";
+
+    if (selectedAction === "status" || selectedAction === "doctor") {
+      await runCommand(`bridge ${selectedAction}`, options, async () => {
+        const context = await discoverProfileContext();
+        const bridge = inspectBridge(context);
+        const data = { profile: context.profile, zenRunning: context.running, bridge };
+        if (options.json) {
+          printJson(envelope(`bridge ${selectedAction}`, data, {
+            warnings: bridge.warnings,
+            blockers: bridge.blockers,
+            suggestedNextCommands: bridge.suggestedNextCommands
+          }));
+        } else {
+          process.stdout.write(`${formatBridge(bridge, selectedAction)}\n`);
+        }
+      });
+      return;
+    }
+
+    if (selectedAction === "live-check") {
+      await runCommand("bridge live-check", options, async () => {
+        const context = await discoverProfileContext();
+        const timeoutMs = probeTimeoutMs(options.timeoutMs);
+        const liveCheck = await inspectLiveAttachment(context, { connect: Boolean(options.connect), timeoutMs });
+        const data = { profile: context.profile, zenRunning: context.running, liveCheck };
+        if (options.json) {
+          printJson(envelope("bridge live-check", data, {
+            ok: liveCheck.attachable,
+            warnings: liveCheck.warnings,
+            blockers: liveCheck.blockers,
+            suggestedNextCommands: liveCheck.suggestedNextCommands
+          }));
+        } else {
+          process.stdout.write(`${formatBridgeLiveAttachment(liveCheck)}\n`);
+        }
+        process.exitCode = liveCheck.attachable ? 0 : 2;
+      });
+      return;
+    }
+
+    if (selectedAction === "live-read") {
+      await runCommand("bridge live-read", options, async () => {
+        const context = await discoverProfileContext();
+        const timeoutMs = probeTimeoutMs(options.timeoutMs);
+        const receipt = await runBridgeLiveReadProof(context, { timeoutMs });
+        const suggestedNextCommands = receipt.ok
+          ? ["zts bridge live-check --connect --json", "zts sort --preview"]
+          : ["zts bridge live-check --connect --json", "zts bridge doctor", "zts bridge probe"];
+        if (options.json) {
+          printJson(envelope("bridge live-read", { profile: context.profile, zenRunning: context.running, receipt }, {
+            ok: receipt.ok,
+            warnings: receipt.warnings,
+            blockers: receipt.blockers,
+            suggestedNextCommands
+          }));
+        } else {
+          process.stdout.write(`${formatBridgeLiveRead(receipt, suggestedNextCommands)}\n`);
+        }
+        process.exitCode = receipt.ok ? 0 : 2;
+      });
+      return;
+    }
+
+    if (selectedAction === "live-move-proof") {
+      await runCommand("bridge live-move-proof", options, async () => {
+        const context = await discoverProfileContext();
+        const timeoutMs = probeTimeoutMs(options.timeoutMs);
+        const receipt = await runBridgeLiveMoveProof(context, {
+          timeoutMs,
+          url: options.url,
+          fromWorkspaceId: options.fromWorkspace,
+          toWorkspaceId: options.toWorkspace,
+          confirmLiveMove: Boolean(options.confirmLiveMove)
+        });
+        const suggestedNextCommands = receipt.ok
+          ? ["zts bridge live-read --json", "zts sort --preview"]
+          : ["zts bridge live-read --json", "zts bridge live-check --connect --json", "zts tabs <workspace> --json"];
+        if (options.json) {
+          printJson(envelope("bridge live-move-proof", { profile: context.profile, zenRunning: context.running, receipt }, {
+            ok: receipt.ok,
+            warnings: receipt.warnings,
+            blockers: receipt.blockers,
+            suggestedNextCommands
+          }));
+        } else {
+          process.stdout.write(`${formatBridgeLiveMove(receipt, suggestedNextCommands)}\n`);
+        }
+        process.exitCode = receipt.ok ? 0 : 2;
+      });
+      return;
+    }
+
+    if (selectedAction === "probe") {
+      await runCommand("bridge probe", options, async () => {
+        const timeoutMs = probeTimeoutMs(options.timeoutMs);
+        const receipt = await runBridgeProbe({ timeoutMs });
+        const suggestedNextCommands = receipt.ok ? ["zts bridge doctor", "zts bridge status"] : ["zts bridge probe --json", "zts bridge doctor"];
+        if (options.json) {
+          printJson(envelope("bridge probe", { receipt }, {
+            ok: receipt.ok,
+            warnings: receipt.warnings,
+            blockers: receipt.blockers,
+            suggestedNextCommands
+          }));
+        } else {
+          process.stdout.write(`${formatBridgeProbe(receipt, suggestedNextCommands)}\n`);
+        }
+        process.exitCode = receipt.ok ? 0 : 2;
+      });
+      return;
+    }
+
+    const message = `unknown bridge action '${selectedAction}'`;
+    if (options.json) {
+      printJson(envelope("bridge", { action: selectedAction }, { ok: false, blockers: [message], suggestedNextCommands: ["zts bridge status", "zts bridge doctor", "zts bridge live-check", "zts bridge live-read", "zts bridge live-move-proof", "zts bridge probe"] }));
+    } else {
+      process.stderr.write(`zts: ${message}\n`);
+    }
+    process.exitCode = 1;
+  });
+
+
 
 interface SortOptions {
   preview?: boolean;
