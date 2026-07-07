@@ -1,3 +1,8 @@
+import { spawn, ChildProcess } from "node:child_process";
+import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createServer } from "node:net";
 import { ProfileContext } from "./profile.js";
 import { ZenProcess } from "./processes.js";
 
@@ -46,6 +51,36 @@ export interface BridgeInspection {
   warnings: string[];
   blockers: string[];
   suggestedNextCommands: string[];
+}
+
+export interface BridgeProbeReceipt {
+  ok: boolean;
+  startedAt: string;
+  durationMs: number;
+  appPath: string;
+  profilePath: string;
+  port: number;
+  websocketUrl: string | null;
+  processPid: number | null;
+  sessionStatus: unknown | null;
+  warnings: string[];
+  blockers: string[];
+  logTail: string[];
+  cleanedUp: boolean;
+}
+
+export interface BidiSessionStatusSuccess {
+  type: "success";
+  id: number;
+  result: {
+    ready: boolean;
+    message: string;
+  };
+}
+
+export interface BridgeProbeOptions {
+  appPath?: string;
+  timeoutMs?: number;
 }
 
 export function inspectBridge(context: ProfileContext): BridgeInspection {
@@ -106,6 +141,95 @@ export function summarizeBridgeProcess(process: ZenProcess, profilePath: string)
       remoteAllowOrigins: hasFlag(process.args, "--remote-allow-origins"),
       remoteAllowSystemAccess: hasFlag(process.args, "--remote-allow-system-access")
     }
+  };
+}
+
+export async function runBridgeProbe(options: BridgeProbeOptions = {}): Promise<BridgeProbeReceipt> {
+  const startedAt = new Date();
+  const startedMs = Date.now();
+  const appPath = options.appPath ?? "/Applications/Zen.app/Contents/MacOS/zen";
+  const timeoutMs = options.timeoutMs ?? 8000;
+  const probeRoot = await mkdtemp(join(tmpdir(), "zts-bridge-probe-"));
+  const profilePath = join(probeRoot, "profile");
+  await mkdir(profilePath, { recursive: true });
+  const port = await reservePort();
+  let child: ChildProcess | null = null;
+  let log = "";
+  let websocketUrl: string | null = null;
+  let sessionStatus: unknown | null = null;
+  const blockers: string[] = [];
+  const spawnErrors: string[] = [];
+  let cleanedUp = false;
+  let processStopped = true;
+
+  try {
+    const args = [
+      "--headless",
+      "--new-instance",
+      "--profile",
+      profilePath,
+      "--remote-debugging-port",
+      String(port),
+      "--remote-allow-hosts",
+      "127.0.0.1,localhost",
+      "--remote-allow-origins",
+      "*",
+      "--remote-allow-system-access",
+      "about:blank"
+    ];
+
+    child = spawn(appPath, args, { stdio: ["ignore", "pipe", "pipe"] });
+    processStopped = false;
+    child.on("error", (error) => {
+      const message = `Probe Zen process error: ${error.message}`;
+      spawnErrors.push(message);
+      log = appendTextLog(log, `${message}\n`);
+    });
+    child.stdout?.on("data", (chunk) => {
+      log = appendLog(log, chunk);
+    });
+    child.stderr?.on("data", (chunk) => {
+      log = appendLog(log, chunk);
+    });
+
+    const baseUrl = await waitForBidiBaseUrl(() => log, timeoutMs);
+    blockers.push(...spawnErrors);
+    if (!baseUrl) {
+      blockers.push("Zen did not report a WebDriver BiDi listener before timeout");
+    } else {
+      websocketUrl = `${baseUrl}/session`;
+      sessionStatus = await readBidiSessionStatus(websocketUrl, timeoutMs);
+      const validationError = validateBidiSessionStatus(sessionStatus);
+      if (validationError) blockers.push(validationError);
+    }
+  } catch (error) {
+    blockers.push(error instanceof Error ? error.message : String(error));
+  } finally {
+    if (child) processStopped = await stopChild(child);
+    if (!processStopped) blockers.push("Probe Zen process did not exit after termination signals");
+    try {
+      await rm(probeRoot, { recursive: true, force: true });
+      cleanedUp = true;
+    } catch {
+      cleanedUp = false;
+      blockers.push("Probe temporary profile could not be removed");
+    }
+  }
+
+  return {
+    ok: blockers.length === 0,
+    startedAt: startedAt.toISOString(),
+    durationMs: Date.now() - startedMs,
+    appPath,
+    profilePath,
+    port,
+    websocketUrl,
+    processPid: child?.pid ?? null,
+    sessionStatus,
+    warnings: ["Probe used a disposable headless Zen profile and did not touch the discovered live profile."],
+    blockers,
+    logTail: tailLines(log, 20),
+    cleanedUp
   };
 }
 
@@ -182,4 +306,124 @@ function processRole(args: string): BridgeProcessRole {
 
 function hasFlag(args: string, flag: string): boolean {
   return args.split(/\s+/).some((part) => part === flag || part.startsWith(`${flag}=`));
+}
+
+export function bidiBaseUrlFromLog(log: string): string | null {
+  const matches = [...log.matchAll(/^WebDriver BiDi listening on (ws:\/\/[^\s]+)$/gm)];
+  const last = matches.at(-1);
+  return last?.[1] ?? null;
+}
+
+export function validateBidiSessionStatus(value: unknown): string | null {
+  if (!isRecord(value)) return "WebDriver BiDi session.status response was not an object";
+  if (value.type !== "success") return "WebDriver BiDi session.status did not return success";
+  if (value.id !== 1) return "WebDriver BiDi session.status response id did not match request id";
+  if (!isRecord(value.result)) return "WebDriver BiDi session.status response had no result object";
+  if (value.result.ready !== true) return "WebDriver BiDi session.status reported not ready";
+  if (typeof value.result.message !== "string") return "WebDriver BiDi session.status response had no message string";
+  return null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function appendLog(log: string, chunk: Buffer): string {
+  return appendTextLog(log, chunk.toString("utf8"));
+}
+
+function appendTextLog(log: string, text: string): string {
+  const next = log + text;
+  return next.length > 64 * 1024 ? next.slice(-64 * 1024) : next;
+}
+
+async function reservePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.on("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        server.close(() => reject(new Error("Could not reserve a local TCP port")));
+        return;
+      }
+      const port = address.port;
+      server.close(() => resolve(port));
+    });
+  });
+}
+
+async function waitForBidiBaseUrl(readLog: () => string, timeoutMs: number): Promise<string | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const baseUrl = bidiBaseUrlFromLog(readLog());
+    if (baseUrl) return baseUrl;
+    await sleep(100);
+  }
+  return bidiBaseUrlFromLog(readLog());
+}
+
+async function readBidiSessionStatus(websocketUrl: string, timeoutMs: number): Promise<unknown> {
+  const WebSocketConstructor = globalThis.WebSocket;
+  if (!WebSocketConstructor) throw new Error("This Node runtime does not provide a WebSocket client");
+
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocketConstructor(websocketUrl);
+    const timer = setTimeout(() => {
+      ws.close();
+      reject(new Error("Timed out waiting for WebDriver BiDi session.status"));
+    }, timeoutMs);
+
+    ws.addEventListener("open", () => {
+      ws.send(JSON.stringify({ id: 1, method: "session.status", params: {} }));
+    });
+    ws.addEventListener("message", (event) => {
+      clearTimeout(timer);
+      ws.close();
+      try {
+        resolve(JSON.parse(String(event.data)));
+      } catch {
+        reject(new Error("WebDriver BiDi returned non-JSON session.status response"));
+      }
+    });
+    ws.addEventListener("error", () => {
+      clearTimeout(timer);
+      reject(new Error("WebDriver BiDi WebSocket connection failed"));
+    });
+  });
+}
+
+async function stopChild(child: ChildProcess): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return true;
+  child.kill("SIGTERM");
+  if (await waitForChildExit(child, 1500)) return true;
+  child.kill("SIGKILL");
+  return waitForChildExit(child, 1500);
+}
+
+function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve(child.exitCode !== null || child.signalCode !== null);
+    }, timeoutMs);
+    const onExit = () => {
+      cleanup();
+      resolve(true);
+    };
+    const cleanup = () => {
+      clearTimeout(timer);
+      child.off("exit", onExit);
+    };
+    child.once("exit", onExit);
+  });
+}
+
+function tailLines(text: string, count: number): string[] {
+  return text.trim().split(/\r?\n/).filter(Boolean).slice(-count);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

@@ -2,9 +2,9 @@
 import { Command } from "commander";
 import { applySortPlanOffline, listApplyReceipts, offlineApplyBlockers, verifyApplyReceipt } from "./apply.js";
 import { createBackup, listBackups, pruneBackups, restoreBackup } from "./backup.js";
-import { inspectBridge } from "./bridge.js";
+import { inspectBridge, runBridgeProbe } from "./bridge.js";
 import { addDomainRuleInContents, getConfigValue, loadConfig, saveConfigContents, setConfigValueInContents, ZtsConfig } from "./config.js";
-import { envelope, formatApplyReceiptList, formatApplyVerification, formatBackup, formatBackupList, formatBackupPrune, formatBridge, formatRestore, formatReview, formatSortDryRun, formatSortPreview, formatStatus, formatTabs, formatWorkspaces, printJson } from "./output.js";
+import { envelope, formatApplyReceiptList, formatApplyVerification, formatBackup, formatBackupList, formatBackupPrune, formatBridge, formatBridgeProbe, formatRestore, formatReview, formatSortDryRun, formatSortPreview, formatStatus, formatTabs, formatWorkspaces, printJson } from "./output.js";
 import { discoverProfileContext } from "./profile.js";
 import { listTabs, loadSession, loadSessionSummary, summarizeSession, withWorkspacePolicy } from "./session.js";
 import { classifyDomainForWorkspace, planSortPreview, SortInputs } from "./sort.js";
@@ -46,9 +46,10 @@ program
 program
   .command("bridge")
   .description("Inspect the live Zen bridge boundary without changing Zen state")
-  .argument("[action]", "status or doctor")
+  .argument("[action]", "status, doctor, or probe")
+  .option("--timeout-ms <ms>", "probe timeout in milliseconds")
   .option("--json", "print stable JSON output")
-  .action(async (action: string | undefined, options: JsonOption) => {
+  .action(async (action: string | undefined, options: JsonOption & BridgeOptions) => {
     const selectedAction = action ?? "status";
 
     if (selectedAction === "status" || selectedAction === "doctor") {
@@ -69,9 +70,29 @@ program
       return;
     }
 
+    if (selectedAction === "probe") {
+      await runCommand("bridge probe", options, async () => {
+        const timeoutMs = probeTimeoutMs(options.timeoutMs);
+        const receipt = await runBridgeProbe({ timeoutMs });
+        const suggestedNextCommands = receipt.ok ? ["zts bridge doctor", "zts bridge status"] : ["zts bridge probe --json", "zts bridge doctor"];
+        if (options.json) {
+          printJson(envelope("bridge probe", { receipt }, {
+            ok: receipt.ok,
+            warnings: receipt.warnings,
+            blockers: receipt.blockers,
+            suggestedNextCommands
+          }));
+        } else {
+          process.stdout.write(`${formatBridgeProbe(receipt, suggestedNextCommands)}\n`);
+        }
+        process.exitCode = receipt.ok ? 0 : 2;
+      });
+      return;
+    }
+
     const message = `unknown bridge action '${selectedAction}'`;
     if (options.json) {
-      printJson(envelope("bridge", { action: selectedAction }, { ok: false, blockers: [message], suggestedNextCommands: ["zts bridge status", "zts bridge doctor"] }));
+      printJson(envelope("bridge", { action: selectedAction }, { ok: false, blockers: [message], suggestedNextCommands: ["zts bridge status", "zts bridge doctor", "zts bridge probe"] }));
     } else {
       process.stderr.write(`zts: ${message}\n`);
     }
@@ -516,6 +537,10 @@ interface BackupOptions {
   dryRun?: boolean;
 }
 
+interface BridgeOptions {
+  timeoutMs?: string;
+}
+
 function sortCommandForReceipt(sourceWorkspace: string | undefined, options: SortOptions): string {
   const parts = ["zts", "sort"];
   if (sourceWorkspace) parts.push(sourceWorkspace);
@@ -561,6 +586,15 @@ function parseDurationMs(value: string): number {
     d: 24 * 60 * 60 * 1000
   };
   return amount * multipliers[unit];
+}
+
+function probeTimeoutMs(value?: string): number {
+  if (value === undefined) return 8000;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1000 || parsed > 30000) {
+    throw new Error("--timeout-ms must be a whole number between 1000 and 30000");
+  }
+  return parsed;
 }
 
 program.parseAsync(process.argv);

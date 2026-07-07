@@ -6,7 +6,7 @@ import { configPath } from "./paths.js";
 import { backupRootForProfile } from "./backup.js";
 import { EntityPlan, SortPlan } from "./sort.js";
 import { ApplyReceipt, ApplyVerificationReport } from "./apply.js";
-import { BridgeInspection } from "./bridge.js";
+import { BridgeInspection, BridgeProbeReceipt } from "./bridge.js";
 
 export interface CommandEnvelope<T> {
   version: string;
@@ -127,6 +127,46 @@ export function formatBridge(bridge: BridgeInspection, mode: "status" | "doctor"
 
   if (bridge.suggestedNextCommands.length > 0) {
     lines.push("", "Next:", ...bridge.suggestedNextCommands.map((command) => `  ${command}`));
+  }
+
+  return lines.join("\n");
+}
+
+export function formatBridgeProbe(receipt: BridgeProbeReceipt, suggestedNextCommands: string[]): string {
+  const lines = [
+    "Zen live bridge probe",
+    `Status: ${receipt.ok ? "verified transport" : "failed"}`,
+    `App: ${receipt.appPath}`,
+    `Disposable profile: ${receipt.profilePath}`,
+    `Port: ${receipt.port}`,
+    `WebSocket: ${receipt.websocketUrl ?? "(not discovered)"}`,
+    `Process pid: ${receipt.processPid ?? "(not started)"}`,
+    `Cleaned up: ${receipt.cleanedUp ? "yes" : "no"}`,
+    `Duration: ${receipt.durationMs}ms`,
+    "",
+    "Boundary:",
+    "  This proves only a disposable WebDriver BiDi transport handshake.",
+    "  It does not attach to the live profile and does not enable live tab sorting."
+  ];
+
+  if (receipt.blockers.length > 0) {
+    lines.push("", "Blockers:", ...receipt.blockers.map((blocker) => `  - ${blocker}`));
+  }
+
+  if (receipt.warnings.length > 0) {
+    lines.push("", "Warnings:", ...receipt.warnings.map((warning) => `  - ${warning}`));
+  }
+
+  if (receipt.sessionStatus !== null) {
+    lines.push("", "Session status:", `  ${JSON.stringify(receipt.sessionStatus)}`);
+  }
+
+  if (receipt.logTail.length > 0) {
+    lines.push("", "Log tail:", ...receipt.logTail.map((line) => `  ${line}`));
+  }
+
+  if (suggestedNextCommands.length > 0) {
+    lines.push("", "Next:", ...suggestedNextCommands.map((command) => `  ${command}`));
   }
 
   return lines.join("\n");

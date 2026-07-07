@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { inspectBridge, summarizeBridgeProcess } from "../dist/bridge.js";
+import { bidiBaseUrlFromLog, inspectBridge, runBridgeProbe, summarizeBridgeProcess, validateBidiSessionStatus } from "../dist/bridge.js";
 import { parseZenProcesses } from "../dist/processes.js";
 
 const profilePath = "/Users/main/Library/Application Support/zen/Profiles/4le6r9n3.Default (release)";
@@ -76,6 +76,33 @@ test("bridge inspection detects candidate flags from parsed ps output with trail
   assert.equal(inspection.candidateTransportDetected, true);
   assert.equal(inspection.candidatePrivilegedTransportDetected, true);
   assert.deepEqual(inspection.blockers, ["Live backend client is not implemented yet"]);
+});
+
+test("extracts the last WebDriver BiDi listener from probe logs", () => {
+  const log = [
+    "*** You are running in headless mode.",
+    "WebDriver BiDi listening on ws://127.0.0.1:11111",
+    "noise",
+    "WebDriver BiDi listening on ws://127.0.0.1:22222"
+  ].join("\n");
+
+  assert.equal(bidiBaseUrlFromLog(log), "ws://127.0.0.1:22222");
+  assert.equal(bidiBaseUrlFromLog("no listener"), null);
+});
+
+test("validates WebDriver BiDi session.status success shape", () => {
+  assert.equal(validateBidiSessionStatus({ type: "success", id: 1, result: { ready: true, message: "" } }), null);
+  assert.match(validateBidiSessionStatus({ type: "error", id: 1, error: "bad" }), /did not return success/);
+  assert.match(validateBidiSessionStatus({ type: "success", id: 2, result: { ready: true, message: "" } }), /id did not match/);
+  assert.match(validateBidiSessionStatus({ type: "success", id: 1, result: { ready: false, message: "busy" } }), /not ready/);
+});
+
+test("bridge probe reports spawn failures as blockers and cleans up temp profile", async () => {
+  const receipt = await runBridgeProbe({ appPath: "/definitely/not/zen", timeoutMs: 1000 });
+
+  assert.equal(receipt.ok, false);
+  assert.equal(receipt.cleanedUp, true);
+  assert.match(receipt.blockers.join("\n"), /Probe Zen process error/);
 });
 
 function context(overrides) {

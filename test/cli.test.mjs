@@ -49,6 +49,13 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
   assert.equal(unknownBridge.status, 1);
   assert.match(JSON.parse(unknownBridge.stdout).blockers.join("\n"), /unknown bridge action/);
 
+  const invalidProbeTimeout = spawnSync("node", ["dist/cli.js", "bridge", "probe", "--timeout-ms", "1", "--json"], {
+    env,
+    encoding: "utf8"
+  });
+  assert.equal(invalidProbeTimeout.status, 1);
+  assert.match(JSON.parse(invalidProbeTimeout.stdout).blockers.join("\n"), /timeout-ms/);
+
   const workspaces = await execFileAsync("node", ["dist/cli.js", "workspaces"], { env });
   assert.match(workspaces.stdout, /Space/);
   assert.match(workspaces.stdout, /Stash/);

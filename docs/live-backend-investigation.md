@@ -6,6 +6,8 @@ Date: 2026-07-07
 
 `zts bridge status` and `zts bridge doctor` now make this boundary explicit in the CLI. They are read-only inspection commands; they do not start Zen, attach to a debugger, open sockets, write profile files, install a service, install a mod, or enable live apply.
 
+`zts bridge probe` is a separate disposable transport proof. It starts a headless Zen process with a temporary profile, local remote debugging flags, and `--remote-allow-system-access`, verifies WebDriver BiDi `session.status`, then terminates the process and removes the temporary profile. It does not attach to the live profile or move tabs.
+
 ## Local Evidence
 
 The installed Zen app bundle contains packed browser resources:
@@ -49,11 +51,29 @@ The local Zen binary also exposes candidate Firefox remote-control flags:
 
 The currently running Zen browser process on this machine was not launched with remote debugging, debugger server, Marionette, or `--remote-allow-system-access` flags. That means there is no current privileged remote execution surface to safely test against.
 
+A disposable temp-profile probe showed that Zen prints:
+
+```text
+WebDriver BiDi listening on ws://127.0.0.1:<port>
+```
+
+The actual WebDriver BiDi WebSocket endpoint is:
+
+```text
+ws://127.0.0.1:<port>/session
+```
+
+Sending `session.status` to that endpoint returned a successful readiness response:
+
+```json
+{"type":"success","id":1,"result":{"ready":true,"message":""}}
+```
+
 ## Current Blocker
 
 No safe CLI-to-Zen browser-chrome execution channel has been proven.
 
-Until that exists, `zts` must not claim live sorting support and must not attempt UI automation, extension setup, Zen mod installation, daemon/autostart setup, or active session-file writes.
+Until code execution inside the intended live Zen browser chrome is proven, `zts` must not claim live sorting support and must not attempt UI automation, extension setup, Zen mod installation, daemon/autostart setup, or active session-file writes.
 
 `zts bridge doctor` records the current blockers:
 
