@@ -5,7 +5,7 @@ import { VERSION } from "./version.js";
 import { configPath } from "./paths.js";
 import { backupRootForProfile } from "./backup.js";
 import { EntityPlan, SortPlan } from "./sort.js";
-import { ApplyReceipt } from "./apply.js";
+import { ApplyReceipt, ApplyVerificationReport } from "./apply.js";
 
 export interface CommandEnvelope<T> {
   version: string;
@@ -137,6 +137,46 @@ export function formatRestore(receipt: RestoreReceipt): string {
     `receipt: ${receipt.receiptPath}`,
     ...receipt.files.map((file) => `  - ${file.source} (${file.size} bytes, verified)`)
   ].join("\n");
+}
+
+export function formatApplyReceiptList(receipts: ApplyReceipt[]): string {
+  if (receipts.length === 0) return "No apply receipts found";
+  return [
+    "Apply receipts",
+    ...receipts.map((receipt) => `${receipt.id}  ${receipt.backend}  ${receipt.moveCount} moves  ${receipt.profileId}`)
+  ].join("\n");
+}
+
+export function formatApplyVerification(report: ApplyVerificationReport): string {
+  const lines = [
+    "Apply verification",
+    `receipt: ${report.receiptId}`,
+    `profile: ${report.profilePath}`,
+    `session file: ${report.sessionFile}`,
+    `status: ${report.verification.ok ? "verified" : "mismatch"}`,
+    `checked moves: ${report.verification.checkedMoves}`,
+    `mismatches: ${report.verification.mismatchCount}`
+  ];
+
+  if (report.verification.blockers.length > 0) {
+    lines.push("Blockers:", ...report.verification.blockers.map((blocker) => `  - ${blocker}`));
+  }
+
+  if (report.verification.mismatches.length > 0) {
+    lines.push("Mismatches:");
+    for (const mismatch of report.verification.mismatches) {
+      lines.push(
+        `  - ${mismatch.title}`,
+        `    tab index: ${mismatch.tabIndex}`,
+        `    expected workspace: ${mismatch.expectedWorkspaceId}`,
+        `    actual workspace: ${mismatch.actualWorkspaceId ?? "(missing)"}`,
+        `    reason: ${mismatch.reason}`,
+        `    url: ${mismatch.url}`
+      );
+    }
+  }
+
+  return lines.join("\n");
 }
 
 export function formatSortPreview(plan: SortPlan, applyBlockers: string[], suggestedNextCommands: string[], applyReceipt?: ApplyReceipt): string {

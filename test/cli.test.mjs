@@ -128,8 +128,20 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
   assert.equal(plainSortJson.ok, true);
   assert.equal(plainSortJson.data.applied, true);
   assert.equal(plainSortJson.data.applyReceipt.moveCount, 1);
+  const applyReceiptId = plainSortJson.data.applyReceipt.id;
   const appliedSession = await readJsonLz4(join(fixture.profilePath, "zen-sessions.jsonlz4"));
   assert.equal(appliedSession.tabs[2].zenWorkspace, "w3");
+
+  const applyList = await execFileAsync("node", ["dist/cli.js", "apply", "list", "--json"], { env });
+  const applyListJson = JSON.parse(applyList.stdout);
+  assert.equal(applyListJson.ok, true);
+  assert.equal(applyListJson.data.receipts.length, 1);
+  assert.equal(applyListJson.data.receipts[0].id, applyReceiptId);
+
+  const applyVerify = await execFileAsync("node", ["dist/cli.js", "apply", "verify", applyReceiptId, "--json"], { env });
+  const applyVerifyJson = JSON.parse(applyVerify.stdout);
+  assert.equal(applyVerifyJson.ok, true);
+  assert.equal(applyVerifyJson.data.report.verification.checkedMoves, 1);
 
   const restoreApplied = await execFileAsync("node", ["dist/cli.js", "backup", "restore", preSortBackupId, "--json"], { env });
   const restoreAppliedJson = JSON.parse(restoreApplied.stdout);
@@ -138,6 +150,16 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
   assert.ok(restoreAppliedJson.data.receipt.safetyBackupId);
   const restoredSession = await readJsonLz4(join(fixture.profilePath, "zen-sessions.jsonlz4"));
   assert.equal(restoredSession.tabs[2].zenWorkspace, "w1");
+
+  const applyVerifyAfterRestore = spawnSync("node", ["dist/cli.js", "apply", "verify", applyReceiptId, "--json"], {
+    env,
+    encoding: "utf8"
+  });
+  assert.equal(applyVerifyAfterRestore.status, 2);
+  const applyVerifyAfterRestoreJson = JSON.parse(applyVerifyAfterRestore.stdout);
+  assert.equal(applyVerifyAfterRestoreJson.ok, false);
+  assert.equal(applyVerifyAfterRestoreJson.data.report.verification.mismatchCount, 1);
+  assert.equal(applyVerifyAfterRestoreJson.data.report.verification.mismatches[0].actualWorkspaceId, "w1");
 
   const sortWithUnknownFlag = spawnSync("node", ["dist/cli.js", "sort", "Space", "--typo"], {
     env,

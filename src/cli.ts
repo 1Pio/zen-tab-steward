@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import { Command } from "commander";
-import { applySortPlanOffline, offlineApplyBlockers } from "./apply.js";
+import { applySortPlanOffline, listApplyReceipts, offlineApplyBlockers, verifyApplyReceipt } from "./apply.js";
 import { createBackup, listBackups, restoreBackup } from "./backup.js";
 import { addDomainRuleInContents, getConfigValue, loadConfig, saveConfigContents, setConfigValueInContents, ZtsConfig } from "./config.js";
-import { envelope, formatBackup, formatBackupList, formatRestore, formatSortDryRun, formatSortPreview, formatStatus, formatTabs, formatWorkspaces, printJson } from "./output.js";
+import { envelope, formatApplyReceiptList, formatApplyVerification, formatBackup, formatBackupList, formatRestore, formatSortDryRun, formatSortPreview, formatStatus, formatTabs, formatWorkspaces, printJson } from "./output.js";
 import { discoverProfileContext } from "./profile.js";
 import { listTabs, loadSession, loadSessionSummary, summarizeSession, withWorkspacePolicy } from "./session.js";
 import { classifyDomainForWorkspace, planSortPreview, SortInputs } from "./sort.js";
@@ -161,6 +161,53 @@ program
         process.stdout.write(`${formatTabs(tabs)}\n`);
       }
     });
+  });
+
+program
+  .command("apply")
+  .description("List or verify offline sort apply receipts")
+  .argument("[action]", "list or verify")
+  .argument("[receipt-id]", "apply receipt id for verify")
+  .option("--json", "print stable JSON output")
+  .action(async (action: string | undefined, receiptId: string | undefined, options: JsonOption) => {
+    const selectedAction = action ?? "list";
+
+    if (selectedAction === "list") {
+      await runCommand("apply list", options, async () => {
+        const context = await discoverProfileContext();
+        const receipts = await listApplyReceipts(context.profile.id);
+        if (options.json) {
+          printJson(envelope("apply list", { profile: context.profile, receipts }));
+        } else {
+          process.stdout.write(`${formatApplyReceiptList(receipts)}\n`);
+        }
+      });
+      return;
+    }
+
+    if (selectedAction === "verify") {
+      await runCommand("apply verify", options, async () => {
+        const context = await discoverProfileContext();
+        if (!receiptId) throw new Error("Apply receipt id is required");
+        const report = await verifyApplyReceipt(context, receiptId);
+        const ok = report.verification.ok;
+        if (options.json) {
+          printJson(envelope("apply verify", { profile: context.profile, report }, { ok, blockers: report.verification.blockers }));
+        } else {
+          process.stdout.write(`${formatApplyVerification(report)}\n`);
+        }
+        process.exitCode = ok ? 0 : 2;
+      });
+      return;
+    }
+
+    const message = `unknown apply action '${selectedAction}'`;
+    if (options.json) {
+      printJson(envelope("apply", { action: selectedAction }, { ok: false, blockers: [message], suggestedNextCommands: ["zts apply list", "zts apply verify <receipt-id>"] }));
+    } else {
+      process.stderr.write(`zts: ${message}\n`);
+    }
+    process.exitCode = 1;
   });
 
 program

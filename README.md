@@ -60,6 +60,8 @@ Each backup includes timestamped `.bak` files and a timestamped `manifest.json` 
 
 Preview and dry-run commands exit successfully because they do not write. Preview is glance-oriented; dry-run prints the full action list with reasons and explanations. Plain `zts sort [workspace]` and `zts sort [workspace] --apply` attempt to apply eligible planned moves using the selected backend. Today, only the offline session backend can apply, and only when Zen is closed and `zen-sessions.jsonlz4` is the selected session source. If Zen is running, apply refuses and shows the same plan plus blockers.
 
+`zts apply list` lists offline sort-apply receipts for the discovered profile. `zts apply verify <receipt-id>` is read-only: it compares the receipt's recorded moves with the current selected session file and exits with status `2` if the recorded moves no longer match.
+
 `zts config` inspects and updates the user config at:
 
 ```text
@@ -88,6 +90,8 @@ zts workspaces --json
 zts tabs Space --json
 zts backup --json
 zts backup list --json
+zts apply list --json
+zts apply verify <receipt-id> --json
 zts sort Space --preview --json
 zts sort Space --dry-run --json
 zts sort Space --backend session --json
@@ -109,6 +113,7 @@ The current implementation has read, backup, preview, and offline session apply 
 - It refuses live backend apply because no safe live bridge exists yet.
 - It creates a fresh backup before offline session mutation.
 - It writes an apply receipt under the state directory after offline apply.
+- It can list and re-verify apply receipts without writing Zen state.
 - It creates a fresh safety backup and restore receipt before/after offline restore.
 - It preserves unknown Zen session fields by mutating only planned tab workspace ids.
 - It does not mutate files inside the active Zen profile while Zen is running.

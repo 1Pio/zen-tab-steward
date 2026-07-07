@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applySortPlanOffline, offlineApplyBlockers } from "../dist/apply.js";
+import { applySortPlanOffline, listApplyReceipts, offlineApplyBlockers, verifyApplyReceipt } from "../dist/apply.js";
 import { encodeLiteralJsonLz4ForFixture, readJsonLz4 } from "../dist/mozlz4.js";
 import { planSortPreview } from "../dist/sort.js";
 import { summarizeSession } from "../dist/session.js";
@@ -31,8 +31,27 @@ test("offline session backend applies planned moves with backup and receipt", as
   assert.equal(plan.moveCount, 1);
 
   let receipt;
+  let receipts;
+  let verification;
+  let identityVerification;
+  let mismatchVerification;
+  let appliedWritten;
   try {
     receipt = await applySortPlanOffline(fixture.context, fixture.session, plan, "zts sort Space --backend session");
+    receipts = await listApplyReceipts(fixture.context.profile.id);
+    await writeFile(join(fixture.stateDir, "applies", fixture.context.profile.id, "damaged--session-apply.json"), "{");
+    verification = await verifyApplyReceipt(fixture.context, receipt.id);
+    appliedWritten = await readJsonLz4(fixture.context.sessionFile.path);
+    await writeFile(fixture.context.sessionFile.path, encodeLiteralJsonLz4ForFixture({
+      ...fixture.session,
+      tabs: [
+        { zenWorkspace: "w2", entries: [{ url: "https://different.example.com", title: "Different" }] },
+        fixture.session.tabs[1]
+      ]
+    }));
+    identityVerification = await verifyApplyReceipt(fixture.context, receipt.id);
+    await writeFile(fixture.context.sessionFile.path, encodeLiteralJsonLz4ForFixture(fixture.session));
+    mismatchVerification = await verifyApplyReceipt(fixture.context, receipt.id);
   } finally {
     if (oldStateDir === undefined) delete process.env.ZTS_STATE_DIR;
     else process.env.ZTS_STATE_DIR = oldStateDir;
@@ -43,7 +62,18 @@ test("offline session backend applies planned moves with backup and receipt", as
   assert.deepEqual(receipt.verification, { ok: true, checkedMoves: 1 });
   assert.match(receipt.receiptPath, /session-apply\.json$/);
   assert.ok(receipt.backupId);
-  assert.equal(written.tabs[0].zenWorkspace, "w2");
+  assert.equal(appliedWritten.tabs[0].zenWorkspace, "w2");
+  assert.equal(receipts.length, 1);
+  assert.equal(receipts[0].id, receipt.id);
+  assert.equal(verification.verification.ok, true);
+  assert.equal(verification.verification.checkedMoves, 1);
+  assert.equal(identityVerification.verification.ok, false);
+  assert.equal(identityVerification.verification.mismatches[0].reason, "identity_mismatch");
+  assert.equal(mismatchVerification.verification.ok, false);
+  assert.equal(mismatchVerification.verification.mismatchCount, 1);
+  assert.equal(mismatchVerification.verification.mismatches[0].reason, "workspace_mismatch");
+  assert.equal(mismatchVerification.verification.mismatches[0].actualWorkspaceId, "w1");
+  assert.equal(written.tabs[0].zenWorkspace, "w1");
   assert.equal(written.tabs[1].zenWorkspace, "w1");
   assert.deepEqual(written.unknown, { preserved: true });
 });

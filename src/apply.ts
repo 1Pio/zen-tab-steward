@@ -1,9 +1,9 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createBackup } from "./backup.js";
 import { readJsonLz4, writeJsonLz4 } from "./mozlz4.js";
 import { ProfileContext } from "./profile.js";
-import { RawZenSession } from "./session.js";
+import { RawTab, RawZenSession } from "./session.js";
 import { stateDir } from "./paths.js";
 import { EntityPlan, SortPlan } from "./sort.js";
 import { VERSION } from "./version.js";
@@ -39,6 +39,41 @@ export interface ApplyReceipt {
   };
   receiptPath: string;
   moves: AppliedMove[];
+}
+
+export interface ApplyVerificationMismatch {
+  entityId: string;
+  tabIndex: number;
+  title: string;
+  url: string;
+  expectedWorkspaceId: string;
+  actualWorkspaceId: string | null;
+  actualEntityId: string | null;
+  actualTitle: string | null;
+  actualUrl: string | null;
+  reason: "missing_tab" | "identity_mismatch" | "workspace_mismatch";
+}
+
+export interface ApplyVerificationResult {
+  ok: boolean;
+  checkedMoves: number;
+  mismatchCount: number;
+  mismatches: ApplyVerificationMismatch[];
+  blockers: string[];
+}
+
+export interface ApplyVerificationReport {
+  receiptId: string;
+  profileId: string;
+  profilePath: string;
+  sessionFile: string;
+  receiptPath: string;
+  verification: ApplyVerificationResult;
+  receipt: ApplyReceipt;
+}
+
+export function applyReceiptRootForProfile(profileId: string): string {
+  return join(stateDir(), "applies", sanitizePathSegment(profileId));
 }
 
 export function offlineApplyBlockers(context: ProfileContext, backend: "auto" | "live" | "session"): string[] {
@@ -82,7 +117,7 @@ export async function applySortPlanOffline(
 
   const createdAt = new Date().toISOString();
   const id = createdAt;
-  const receiptRoot = join(stateDir(), "applies", sanitizePathSegment(context.profile.id));
+  const receiptRoot = applyReceiptRootForProfile(context.profile.id);
   await mkdir(receiptRoot, { recursive: true });
   const receiptPath = join(receiptRoot, `${id}--session-apply.json`);
   const receipt: ApplyReceipt = {
@@ -107,17 +142,181 @@ export async function applySortPlanOffline(
   return receipt;
 }
 
-async function verifyAppliedMoves(path: string, moves: AppliedMove[]): Promise<ApplyReceipt["verification"]> {
-  const written = await readJsonLz4(path) as RawZenSession;
-  if (!Array.isArray(written.tabs)) throw new Error("Post-apply verification failed: written session has no tab array");
-  for (const move of moves) {
-    const tab = written.tabs[move.tabIndex];
-    if (!tab) throw new Error(`Post-apply verification failed: missing tab index ${move.tabIndex}`);
-    if (tab.zenWorkspace !== move.toWorkspaceId) {
-      throw new Error(`Post-apply verification failed: tab ${move.entityId} is in ${tab.zenWorkspace ?? "(none)"} instead of ${move.toWorkspaceId}`);
+export async function listApplyReceipts(profileId: string): Promise<ApplyReceipt[]> {
+  const root = applyReceiptRootForProfile(profileId);
+  try {
+    const entries = await readdir(root);
+    const receiptFiles = entries.filter((entry) => entry.endsWith("--session-apply.json")).sort().reverse();
+    const receipts: ApplyReceipt[] = [];
+    for (const receiptFile of receiptFiles) {
+      receipts.push(JSON.parse(await readFile(join(root, receiptFile), "utf8")) as ApplyReceipt);
     }
+    return receipts;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+}
+
+export async function findApplyReceipt(profileId: string, receiptId: string): Promise<ApplyReceipt | null> {
+  const root = applyReceiptRootForProfile(profileId);
+  try {
+    return JSON.parse(await readFile(join(root, `${receiptId}--session-apply.json`), "utf8")) as ApplyReceipt;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+export async function verifyApplyReceipt(context: ProfileContext, receiptId: string): Promise<ApplyVerificationReport> {
+  const receipt = await findApplyReceipt(context.profile.id, receiptId);
+  if (!receipt) throw new Error(`Apply receipt not found: ${receiptId}`);
+
+  const blockers: string[] = [];
+  if (receipt.profilePath !== context.profile.path) {
+    blockers.push(`Apply receipt ${receiptId} belongs to a different profile path`);
+  }
+  if (receipt.sessionFile !== context.sessionFile.path) {
+    blockers.push(`Apply receipt ${receiptId} was written against a different session file`);
+  }
+
+  let verification: ApplyVerificationResult;
+  if (blockers.length > 0) {
+    verification = {
+      ok: false,
+      checkedMoves: 0,
+      mismatchCount: 0,
+      mismatches: [],
+      blockers
+    };
+  } else {
+    verification = await verifyMovesDetailed(context.sessionFile.path, receipt.moves);
+  }
+
+  return {
+    receiptId: receipt.id,
+    profileId: receipt.profileId,
+    profilePath: receipt.profilePath,
+    sessionFile: receipt.sessionFile,
+    receiptPath: receipt.receiptPath,
+    verification,
+    receipt
+  };
+}
+
+async function verifyAppliedMoves(path: string, moves: AppliedMove[]): Promise<ApplyReceipt["verification"]> {
+  const verification = await verifyMovesDetailed(path, moves);
+  if (verification.blockers.length > 0) throw new Error(`Post-apply verification failed: ${verification.blockers.join("; ")}`);
+  if (!verification.ok) {
+    const mismatch = verification.mismatches[0];
+    throw new Error(
+      `Post-apply verification failed: tab ${mismatch.entityId} is in ${mismatch.actualWorkspaceId ?? "(missing)"} instead of ${mismatch.expectedWorkspaceId}`
+    );
   }
   return { ok: true, checkedMoves: moves.length };
+}
+
+async function verifyMovesDetailed(path: string, moves: AppliedMove[]): Promise<ApplyVerificationResult> {
+  const written = await readJsonLz4(path) as RawZenSession;
+  if (!Array.isArray(written.tabs)) {
+    return {
+      ok: false,
+      checkedMoves: 0,
+      mismatchCount: 0,
+      mismatches: [],
+      blockers: ["Session has no tab array"]
+    };
+  }
+
+  const mismatches: ApplyVerificationMismatch[] = [];
+  for (const move of moves) {
+    const tab = written.tabs[move.tabIndex];
+    if (!tab) {
+      mismatches.push({
+        entityId: move.entityId,
+        tabIndex: move.tabIndex,
+        title: move.title,
+        url: move.url,
+        expectedWorkspaceId: move.toWorkspaceId,
+        actualWorkspaceId: null,
+        actualEntityId: null,
+        actualTitle: null,
+        actualUrl: null,
+        reason: "missing_tab"
+      });
+      continue;
+    }
+    const identity = tabIdentity(tab, move.tabIndex);
+    if (!tabMatchesMoveIdentity(tab, identity, move)) {
+      mismatches.push({
+        entityId: move.entityId,
+        tabIndex: move.tabIndex,
+        title: move.title,
+        url: move.url,
+        expectedWorkspaceId: move.toWorkspaceId,
+        actualWorkspaceId: tab.zenWorkspace ?? null,
+        actualEntityId: identity.stableEntityId ?? identity.fallbackEntityId,
+        actualTitle: identity.title,
+        actualUrl: identity.url,
+        reason: "identity_mismatch"
+      });
+      continue;
+    }
+    if (tab.zenWorkspace !== move.toWorkspaceId) {
+      mismatches.push({
+        entityId: move.entityId,
+        tabIndex: move.tabIndex,
+        title: move.title,
+        url: move.url,
+        expectedWorkspaceId: move.toWorkspaceId,
+        actualWorkspaceId: tab.zenWorkspace ?? null,
+        actualEntityId: identity.stableEntityId ?? identity.fallbackEntityId,
+        actualTitle: identity.title,
+        actualUrl: identity.url,
+        reason: "workspace_mismatch"
+      });
+    }
+  }
+
+  return {
+    ok: mismatches.length === 0,
+    checkedMoves: moves.length,
+    mismatchCount: mismatches.length,
+    mismatches,
+    blockers: []
+  };
+}
+
+function tabMatchesMoveIdentity(tab: RawTab, identity: TabIdentity, move: AppliedMove): boolean {
+  if (identity.stableEntityId) return identity.stableEntityId === move.entityId;
+  return identity.url === move.url && identity.title === move.title;
+}
+
+interface TabIdentity {
+  stableEntityId: string | null;
+  fallbackEntityId: string;
+  title: string;
+  url: string;
+}
+
+function tabIdentity(tab: RawTab, index: number): TabIdentity {
+  const entry = selectedEntry(tab);
+  const url = entry?.url ?? "about:blank";
+  const stableEntityId = tab.zenSyncId || tab.zenGlanceId ? String(tab.zenSyncId ?? tab.zenGlanceId) : null;
+  return {
+    stableEntityId,
+    fallbackEntityId: String(tab.zenWorkspace ? `${tab.zenWorkspace}:${index}` : `unknown:${index}`),
+    title: entry?.title ?? url,
+    url
+  };
+}
+
+function selectedEntry(tab: RawTab) {
+  const entries = Array.isArray(tab.entries) ? tab.entries : [];
+  if (entries.length === 0) return undefined;
+  const rawIndex = typeof tab.index === "number" ? tab.index - 1 : entries.length - 1;
+  const index = Math.min(Math.max(rawIndex, 0), entries.length - 1);
+  return entries[index];
 }
 
 function applyTabMove(session: RawZenSession, action: EntityPlan): AppliedMove {
