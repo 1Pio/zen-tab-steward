@@ -1,5 +1,6 @@
 import { readJsonLz4 } from "./mozlz4.js";
 import { SessionFileSource } from "./profile.js";
+import { ZtsConfig } from "./config.js";
 
 export interface RawZenSession {
   spaces?: RawWorkspace[];
@@ -59,7 +60,10 @@ export interface WorkspaceSummary {
   folderCount: number;
   groupCount: number;
   folderGroupCount: number;
-  protectionStatus: "unconfigured";
+  protectedStatus: "none" | "from" | "to" | "from_to";
+  defaultInbox: boolean;
+  sortableFrom: boolean;
+  sortableTo: boolean;
 }
 
 export interface SessionSummary {
@@ -72,6 +76,25 @@ export interface SessionSummary {
   groupCount: number;
   folderGroupCount: number;
   workspaces: WorkspaceSummary[];
+}
+
+export interface TabSummary {
+  id: string;
+  index: number;
+  title: string;
+  url: string;
+  domain: string;
+  workspaceId: string | null;
+  workspaceName: string | null;
+  pinned: boolean;
+  essential: boolean;
+  grouped: boolean;
+  foldered: boolean;
+  groupId: string | null;
+  folderId: string | null;
+  hidden: boolean;
+  protected: boolean;
+  protectionReasons: string[];
 }
 
 export async function loadSessionSummary(source: SessionFileSource): Promise<SessionSummary> {
@@ -111,7 +134,10 @@ export function summarizeSession(session: RawZenSession, source: SessionFileSour
       folderCount: folders.length,
       groupCount: groups.length,
       folderGroupCount: folders.length + groups.length,
-      protectionStatus: "unconfigured" as const
+      protectedStatus: "none" as const,
+      defaultInbox: false,
+      sortableFrom: true,
+      sortableTo: true
     };
   });
 
@@ -130,11 +156,99 @@ export function summarizeSession(session: RawZenSession, source: SessionFileSour
   };
 }
 
+export function withWorkspacePolicy(summary: SessionSummary, config: ZtsConfig): SessionSummary {
+  const fromProtected = new Set(config.protect.workspaces.from.map(normalizeName));
+  const toProtected = new Set(config.protect.workspaces.to.map(normalizeName));
+  const defaultInbox = normalizeName(config.defaults.inbox);
+  const sortTo = new Set(config.sort.to.map(normalizeName));
+  const sortNotTo = new Set(config.sort.notTo.map(normalizeName));
+
+  return {
+    ...summary,
+    workspaces: summary.workspaces.map((workspace) => {
+      const names = workspaceNameKeys(workspace);
+      const protectedFrom = names.some((name) => fromProtected.has(name));
+      const protectedTo = names.some((name) => toProtected.has(name));
+      const explicitlyAllowedTo = sortTo.size === 0 || names.some((name) => sortTo.has(name));
+      const explicitlyDeniedTo = names.some((name) => sortNotTo.has(name));
+      return {
+        ...workspace,
+        protectedStatus: protectedFrom && protectedTo ? "from_to" : protectedFrom ? "from" : protectedTo ? "to" : "none",
+        defaultInbox: names.includes(defaultInbox),
+        sortableFrom: !protectedFrom,
+        sortableTo: !protectedTo && explicitlyAllowedTo && !explicitlyDeniedTo
+      };
+    })
+  };
+}
+
+export function listTabs(session: RawZenSession, summary: SessionSummary, workspaceFilter?: string): TabSummary[] {
+  const rawTabs = Array.isArray(session.tabs) ? session.tabs : [];
+  const lookup = workspaceFilter ? normalizeName(workspaceFilter) : "";
+  const workspaces = new Map(summary.workspaces.map((workspace) => [workspace.id, workspace]));
+  return rawTabs
+    .map((tab, index) => {
+      const workspace = tab.zenWorkspace ? workspaces.get(tab.zenWorkspace) : undefined;
+      const entry = selectedEntry(tab);
+      const url = entry?.url ?? "about:blank";
+      const groupId = typeof tab.groupId === "string" ? tab.groupId : null;
+      const folderId = typeof tab.zenLiveFolderItemId === "string" ? tab.zenLiveFolderItemId : null;
+      const protectionReasons = tabProtectionReasons(tab);
+      return {
+        id: String(tab.zenSyncId ?? tab.zenGlanceId ?? `${tab.zenWorkspace ?? "unknown"}:${index}`),
+        index,
+        title: entry?.title ?? url,
+        url,
+        domain: domainForUrl(url),
+        workspaceId: tab.zenWorkspace ?? null,
+        workspaceName: workspace?.name ?? null,
+        pinned: Boolean(tab.pinned),
+        essential: Boolean(tab.zenEssential),
+        grouped: Boolean(groupId),
+        foldered: Boolean(folderId),
+        groupId,
+        folderId,
+        hidden: Boolean(tab.hidden),
+        protected: protectionReasons.length > 0,
+        protectionReasons
+      };
+    })
+    .filter((tab) => {
+      if (!lookup) return true;
+      return normalizeName(tab.workspaceId ?? "") === lookup || normalizeName(tab.workspaceName ?? "") === lookup;
+    });
+}
+
 function assertRawSession(value: unknown): RawZenSession {
   if (!value || typeof value !== "object") {
     throw new Error("Zen session JSON is not an object");
   }
   return value as RawZenSession;
+}
+
+function selectedEntry(tab: RawTab) {
+  const entries = Array.isArray(tab.entries) ? tab.entries : [];
+  if (entries.length === 0) return undefined;
+  const rawIndex = typeof tab.index === "number" ? tab.index - 1 : entries.length - 1;
+  const index = Math.min(Math.max(rawIndex, 0), entries.length - 1);
+  return entries[index];
+}
+
+function tabProtectionReasons(tab: RawTab): string[] {
+  const reasons: string[] = [];
+  if (tab.pinned) reasons.push("pinned");
+  if (tab.zenEssential) reasons.push("essential");
+  if (tab.groupId) reasons.push("grouped");
+  if (tab.zenLiveFolderItemId) reasons.push("foldered");
+  return reasons;
+}
+
+function domainForUrl(url: string): string {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return "";
+  }
 }
 
 function inferGroupWorkspaceIds(tabs: RawTab[]): Map<string, string> {
@@ -147,4 +261,12 @@ function inferGroupWorkspaceIds(tabs: RawTab[]): Map<string, string> {
     }
   }
   return map;
+}
+
+function workspaceNameKeys(workspace: WorkspaceSummary): string[] {
+  return [normalizeName(workspace.id), normalizeName(workspace.name)];
+}
+
+function normalizeName(value: string): string {
+  return value.trim().toLowerCase();
 }

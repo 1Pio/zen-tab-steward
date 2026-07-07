@@ -16,12 +16,14 @@ const inputs = {
   dryRun: false,
   minConfidence: 0.8,
   includePinned: false,
+  includeEssentials: false,
   to: [],
   notTo: [],
   only: [],
   except: [],
   backend: "auto",
-  domainRules: {}
+  domainRules: {},
+  protectedDomains: []
 };
 
 test("plans deterministic domain-rule moves and protection skips without applying", () => {
@@ -48,6 +50,7 @@ test("plans deterministic domain-rule moves and protection skips without applyin
   assert.equal(plan.moveCount, 2);
   assert.equal(plan.skipCount, 3);
   assert.equal(plan.reviewCount, 1);
+  assert.equal(plan.blockedCount, 0);
   assert.deepEqual(
     plan.plannedActions.map((action) => action.destinationWorkspaceName),
     ["Portfolio", "Tool Development"]
@@ -57,6 +60,42 @@ test("plans deterministic domain-rule moves and protection skips without applyin
     ["pinned_protected", "essential_protected", "grouped_or_foldered_protected"]
   );
   assert.equal(plan.reviewActions[0].reason, "no_deterministic_rule");
+});
+
+test("blocks protected domains and protected destination workspaces", () => {
+  const session = {
+    spaces: [
+      { uuid: "w1", name: "Space" },
+      { uuid: "w2", name: "Portfolio" },
+      { uuid: "w3", name: "Tool Development", }
+    ],
+    tabs: [
+      { zenWorkspace: "w1", entries: [{ url: "https://framer.com/projects/site", title: "Framer" }] },
+      { zenWorkspace: "w1", entries: [{ url: "https://github.com/1Pio/zen-tab-steward", title: "Repo" }] }
+    ],
+    folders: [],
+    groups: []
+  };
+  const summary = summarizeSession(session, source);
+  const protectedSummary = {
+    ...summary,
+    workspaces: summary.workspaces.map((workspace) => ({
+      ...workspace,
+      protectedStatus: workspace.name === "Portfolio" ? "to" : "none",
+      sortableTo: workspace.name !== "Portfolio"
+    }))
+  };
+  const plan = planSortPreview(session, protectedSummary, protectedSummary.workspaces[0], {
+    ...inputs,
+    protectedDomains: ["github.com"]
+  });
+
+  assert.equal(plan.moveCount, 0);
+  assert.equal(plan.blockedCount, 2);
+  assert.deepEqual(
+    plan.blockedActions.map((action) => action.reason),
+    ["destination_workspace_protected", "domain_protected"]
+  );
 });
 
 test("respects only, except, to, and not-to filters", () => {

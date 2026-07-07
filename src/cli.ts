@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 import { Command } from "commander";
+import { applySortPlanOffline, offlineApplyBlockers } from "./apply.js";
 import { createBackup, listBackups } from "./backup.js";
 import { addDomainRuleInContents, getConfigValue, loadConfig, saveConfigContents, setConfigValueInContents, ZtsConfig } from "./config.js";
-import { envelope, formatBackup, formatBackupList, formatSortPreview, formatStatus, formatWorkspaces, printJson } from "./output.js";
+import { envelope, formatBackup, formatBackupList, formatSortPreview, formatStatus, formatTabs, formatWorkspaces, printJson } from "./output.js";
 import { discoverProfileContext } from "./profile.js";
-import { loadSession, loadSessionSummary, summarizeSession } from "./session.js";
+import { listTabs, loadSession, loadSessionSummary, summarizeSession, withWorkspacePolicy } from "./session.js";
 import { classifyDomainForWorkspace, planSortPreview, SortInputs } from "./sort.js";
 import { VERSION } from "./version.js";
 
@@ -28,7 +29,8 @@ program
   .action(async (options: JsonOption) => {
     await runCommand("status", options, async () => {
       const context = await discoverProfileContext();
-      const summary = await loadSessionSummary(context.sessionFile);
+      const loadedConfig = await loadConfig();
+      const summary = withWorkspacePolicy(await loadSessionSummary(context.sessionFile), loadedConfig.config);
       const data = { profile: context.profile, zenRunning: context.running, session: summary };
 
       if (options.json) {
@@ -129,11 +131,34 @@ program
   .action(async (options: JsonOption) => {
     await runCommand("workspaces", options, async () => {
       const context = await discoverProfileContext();
-      const summary = await loadSessionSummary(context.sessionFile);
+      const loadedConfig = await loadConfig();
+      const summary = withWorkspacePolicy(await loadSessionSummary(context.sessionFile), loadedConfig.config);
       if (options.json) {
         printJson(envelope("workspaces", { profile: context.profile, zenRunning: context.running, workspaces: summary.workspaces }));
       } else {
         process.stdout.write(`${formatWorkspaces(summary)}\n`);
+      }
+    });
+  });
+
+program
+  .command("tabs")
+  .description("List Zen tabs with workspace and protection metadata")
+  .argument("[workspace]", "optional workspace name or id filter")
+  .option("--workspace <workspace>", "workspace name or id filter")
+  .option("--json", "print stable JSON output")
+  .action(async (workspaceArgument: string | undefined, options: JsonOption & { workspace?: string }) => {
+    await runCommand("tabs", options, async () => {
+      const context = await discoverProfileContext();
+      const loadedConfig = await loadConfig();
+      const session = await loadSession(context.sessionFile);
+      const summary = withWorkspacePolicy(summarizeSession(session, context.sessionFile), loadedConfig.config);
+      const workspace = options.workspace ?? workspaceArgument;
+      const tabs = listTabs(session, summary, workspace);
+      if (options.json) {
+        printJson(envelope("tabs", { profile: context.profile, zenRunning: context.running, workspace: workspace ?? null, tabs }));
+      } else {
+        process.stdout.write(`${formatTabs(tabs)}\n`);
       }
     });
   });
@@ -199,12 +224,14 @@ program
 
 program
   .command("sort")
-  .description("Preview tab sorting. Apply is refused until a safe backend exists.")
+  .description("Plan or apply Zen tab sorting")
   .argument("[source-workspace]", "source workspace name or id")
   .option("--preview", "show a glanceable preview without writing")
   .option("--dry-run", "show an operational dry run without writing")
+  .option("--apply", "apply planned safe moves with the selected backend")
   .option("--min-confidence <number>", "minimum confidence required for future apply")
   .option("--include-pinned", "include pinned tabs in future sort planning")
+  .option("--include-essentials", "include essentials in future sort planning")
   .option("--to <workspaces>", "comma-separated destination workspace allowlist")
   .option("--not-to <workspaces>", "comma-separated destination workspace denylist")
   .option("--only <patterns>", "comma-separated source URL/domain patterns")
@@ -216,7 +243,7 @@ program
       const context = await discoverProfileContext();
       const loadedConfig = await loadConfig();
       const session = await loadSession(context.sessionFile);
-      const summary = summarizeSession(session, context.sessionFile);
+      const summary = withWorkspacePolicy(summarizeSession(session, context.sessionFile), loadedConfig.config);
       const source = resolveSourceWorkspace(summary, sourceWorkspace, loadedConfig.config.defaults.inbox);
       const inputs = sortInputs(options, loadedConfig.config);
       const inputError = validateSortInputs(inputs);
@@ -242,12 +269,17 @@ program
         process.exitCode = 1;
         return;
       }
-      const blockers = ["Sort apply is not implemented in this tranche"];
-      if (context.running) blockers.unshift("Zen is running and no live backend is available");
-      const suggestedNextCommands = ["zts sort --preview", "zts status", "zts backup"];
       const plan = planSortPreview(session, summary, source, inputs);
       const previewRequested = Boolean(options.preview || options.dryRun);
-      const ok = previewRequested;
+      const applyBlockers = offlineApplyBlockers(context, inputs.backend);
+      const suggestedNextCommands = applyBlockers.length > 0
+        ? ["zts sort --preview", "zts status", "zts backup"]
+        : ["zts status", "zts backup"];
+      const applyRequested = !previewRequested;
+      const ok = previewRequested || applyBlockers.length === 0;
+      const applyReceipt = applyRequested && applyBlockers.length === 0
+        ? await applySortPlanOffline(context, session, plan, sortCommandForReceipt(sourceWorkspace, options))
+        : undefined;
 
       const data = {
         profile: context.profile,
@@ -255,10 +287,13 @@ program
         sourceWorkspace: source,
         inputs,
         plan,
-        previewOnly: true,
+        previewOnly: previewRequested,
+        applied: Boolean(applyReceipt),
+        applyReceipt: applyReceipt ?? null,
         plannedActions: plan.plannedActions,
         skippedActions: plan.skippedActions,
         reviewActions: plan.reviewActions,
+        blockedActions: plan.blockedActions,
         session: {
           workspaceCount: summary.workspaceCount,
           tabCount: summary.tabCount,
@@ -269,10 +304,10 @@ program
       };
 
       if (options.json) {
-        printJson(envelope("sort", data, { ok, blockers, suggestedNextCommands }));
+        printJson(envelope("sort", data, { ok, blockers: applyBlockers, suggestedNextCommands }));
         process.exitCode = ok ? 0 : 2;
       } else {
-        process.stdout.write(`${formatSortPreview(plan, blockers, suggestedNextCommands)}\n`);
+        process.stdout.write(`${formatSortPreview(plan, applyBlockers, suggestedNextCommands, applyReceipt)}\n`);
         process.exitCode = ok ? 0 : 2;
       }
     });
@@ -281,13 +316,24 @@ program
 interface SortOptions {
   preview?: boolean;
   dryRun?: boolean;
+  apply?: boolean;
   minConfidence?: string;
   includePinned?: boolean;
+  includeEssentials?: boolean;
   to?: string;
   notTo?: string;
   only?: string;
   except?: string;
   backend?: string;
+}
+
+function sortCommandForReceipt(sourceWorkspace: string | undefined, options: SortOptions): string {
+  const parts = ["zts", "sort"];
+  if (sourceWorkspace) parts.push(sourceWorkspace);
+  if (options.apply) parts.push("--apply");
+  if (options.backend) parts.push("--backend", options.backend);
+  if (options.minConfidence) parts.push("--min-confidence", options.minConfidence);
+  return parts.join(" ");
 }
 
 program.parseAsync(process.argv);
@@ -309,11 +355,11 @@ async function runCommand(command: string, options: JsonOption, action: () => Pr
 function statusEnvelopeOptions(zenRunning: boolean) {
   const blockers = zenRunning
     ? ["Offline apply is blocked because Zen is running", "Live bridge is unavailable"]
-    : ["Offline apply is not implemented in this tranche", "Live bridge is unavailable"];
+    : ["Live bridge is unavailable"];
   return {
-    warnings: ["This tranche is read/backup only and refuses active session writes"],
+    warnings: ["Active session writes are refused; offline session writes require Zen closed and a fresh backup"],
     blockers,
-    suggestedNextCommands: ["zts workspaces", "zts backup", "zts sort --preview"]
+    suggestedNextCommands: zenRunning ? ["zts workspaces", "zts backup", "zts sort --preview"] : ["zts workspaces", "zts sort --preview", "zts sort --backend session"]
   };
 }
 
@@ -332,18 +378,24 @@ function splitCsv(value?: string): string[] {
     .filter(Boolean);
 }
 
+function csvOption(value: string | undefined, fallback: string[]): string[] {
+  return value === undefined ? fallback : splitCsv(value);
+}
+
 function sortInputs(options: SortOptions, config: ZtsConfig): SortInputs {
   return {
     preview: Boolean(options.preview),
     dryRun: Boolean(options.dryRun),
     minConfidence: options.minConfidence === undefined ? config.defaults.minConfidence : Number(options.minConfidence),
     includePinned: Boolean(options.includePinned) || config.defaults.includePinned,
-    to: splitCsv(options.to),
-    notTo: splitCsv(options.notTo),
-    only: splitCsv(options.only),
-    except: splitCsv(options.except),
+    includeEssentials: Boolean(options.includeEssentials) || config.defaults.includeEssentials,
+    to: csvOption(options.to, config.sort.to),
+    notTo: csvOption(options.notTo, config.sort.notTo),
+    only: csvOption(options.only, config.sort.only),
+    except: csvOption(options.except, config.sort.except),
     backend: options.backend === undefined ? config.defaults.applyBackend : normalizeBackend(options.backend),
-    domainRules: config.rules.domains
+    domainRules: config.rules.domains,
+    protectedDomains: config.protect.domains.neverMove
   };
 }
 

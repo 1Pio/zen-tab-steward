@@ -5,11 +5,11 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { encodeLiteralJsonLz4ForFixture } from "../dist/mozlz4.js";
+import { encodeLiteralJsonLz4ForFixture, readJsonLz4 } from "../dist/mozlz4.js";
 
 const execFileAsync = promisify(execFile);
 
-test("CLI smokes cover help, version, status, workspaces, backup, and sort refusal", async () => {
+test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offline sort apply", async () => {
   const fixture = await makeZenFixture();
   const env = {
     ...process.env,
@@ -28,12 +28,19 @@ test("CLI smokes cover help, version, status, workspaces, backup, and sort refus
   const statusJson = JSON.parse(status.stdout);
   assert.equal(statusJson.ok, true);
   assert.equal(statusJson.data.profile.name, "Default");
-  assert.equal(statusJson.data.session.workspaceCount, 2);
-  assert.equal(statusJson.data.session.tabCount, 3);
+  assert.equal(statusJson.data.session.workspaceCount, 3);
+  assert.equal(statusJson.data.session.tabCount, 4);
 
   const workspaces = await execFileAsync("node", ["dist/cli.js", "workspaces"], { env });
   assert.match(workspaces.stdout, /Space/);
   assert.match(workspaces.stdout, /Stash/);
+  assert.match(workspaces.stdout, /sortable from/);
+
+  const tabs = await execFileAsync("node", ["dist/cli.js", "tabs", "Space", "--json"], { env });
+  const tabsJson = JSON.parse(tabs.stdout);
+  assert.equal(tabsJson.ok, true);
+  assert.equal(tabsJson.data.tabs.length, 3);
+  assert.equal(tabsJson.data.tabs[0].workspaceName, "Space");
 
   const backup = await execFileAsync("node", ["dist/cli.js", "backup", "--json"], { env });
   const backupJson = JSON.parse(backup.stdout);
@@ -52,8 +59,8 @@ test("CLI smokes cover help, version, status, workspaces, backup, and sort refus
   assert.equal(sort.status, 0);
   const sortJson = JSON.parse(sort.stdout);
   assert.equal(sortJson.ok, true);
-  assert.match(sortJson.blockers.join("\n"), /Sort apply is not implemented/);
-  assert.equal(sortJson.data.plan.moveCount, 0);
+  assert.equal(sortJson.data.applied, false);
+  assert.equal(sortJson.data.plan.moveCount, 1);
   assert.equal(sortJson.data.plan.skipCount, 2);
 
   const sortWithKnownFlags = spawnSync(
@@ -105,8 +112,13 @@ test("CLI smokes cover help, version, status, workspaces, backup, and sort refus
     env,
     encoding: "utf8"
   });
-  assert.equal(plainSort.status, 2);
-  assert.equal(JSON.parse(plainSort.stdout).ok, false);
+  assert.equal(plainSort.status, 0);
+  const plainSortJson = JSON.parse(plainSort.stdout);
+  assert.equal(plainSortJson.ok, true);
+  assert.equal(plainSortJson.data.applied, true);
+  assert.equal(plainSortJson.data.applyReceipt.moveCount, 1);
+  const appliedSession = await readJsonLz4(join(fixture.profilePath, "zen-sessions.jsonlz4"));
+  assert.equal(appliedSession.tabs[2].zenWorkspace, "w3");
 
   const sortWithUnknownFlag = spawnSync("node", ["dist/cli.js", "sort", "Space", "--typo"], {
     env,
@@ -144,6 +156,9 @@ test("CLI smokes cover help, version, status, workspaces, backup, and sort refus
 
   const backendSet = await execFileAsync("node", ["dist/cli.js", "config", "set", "defaults.apply_backend", "session", "--json"], { env });
   assert.equal(JSON.parse(backendSet.stdout).data.value, "session");
+
+  const protectSet = await execFileAsync("node", ["dist/cli.js", "config", "set", "protect.workspaces.from", "Stash", "--json"], { env });
+  assert.deepEqual(JSON.parse(protectSet.stdout).data.value, ["Stash"]);
 
   await execFileAsync("node", ["dist/cli.js", "config", "set", "defaults.inbox", "Stash", "--json"], { env });
 
@@ -200,11 +215,13 @@ async function makeZenFixture() {
   const session = {
     spaces: [
       { uuid: "w1", name: "Space" },
-      { uuid: "w2", name: "Stash" }
+      { uuid: "w2", name: "Stash" },
+      { uuid: "w3", name: "Portfolio" }
     ],
     tabs: [
       { zenWorkspace: "w1", pinned: true, zenEssential: true, entries: [{ url: "https://example.com", title: "Example" }] },
       { zenWorkspace: "w1", pinned: false, groupId: "g1", entries: [{ url: "https://github.com", title: "GitHub" }] },
+      { zenWorkspace: "w1", pinned: false, entries: [{ url: "https://framer.com/project", title: "Framer" }] },
       { zenWorkspace: "w2", pinned: false, entries: [{ url: "https://example.org", title: "Other" }] }
     ],
     folders: [{ id: "g1", name: "Dev", workspaceId: "w1", pinned: false }],

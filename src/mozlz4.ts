@@ -1,6 +1,7 @@
-import { readFile } from "node:fs/promises";
+import { readFile, rename, writeFile } from "node:fs/promises";
 import { Buffer } from "node:buffer";
 import { decompressBlock } from "lz4js";
+import { dirname, join } from "node:path";
 
 const MAGIC = Buffer.from([0x6d, 0x6f, 0x7a, 0x4c, 0x7a, 0x34, 0x30, 0x00]);
 const HEADER_LENGTH = 12;
@@ -55,13 +56,22 @@ export async function readJsonLz4(path: string): Promise<unknown> {
   return decodeJsonLz4Buffer(await readFile(path));
 }
 
-export function encodeLiteralJsonLz4ForFixture(value: unknown): Buffer {
+export async function writeJsonLz4(path: string, value: unknown): Promise<void> {
+  const tempPath = join(dirname(path), `.zts-${process.pid}-${Date.now()}.jsonlz4.tmp`);
+  await writeFile(tempPath, encodeJsonLz4Buffer(value));
+  await rename(tempPath, path);
+}
+
+export function encodeJsonLz4Buffer(value: unknown): Buffer {
   const payload = Buffer.from(JSON.stringify(value), "utf8");
-  const literalHeader = encodeLiteralOnlyBlock(payload);
   const header = Buffer.alloc(HEADER_LENGTH);
   MAGIC.copy(header, 0);
   header.writeUInt32LE(payload.length, 8);
-  return Buffer.concat([header, literalHeader, payload]);
+  return Buffer.concat([header, encodeLiteralOnlyBlock(payload), payload]);
+}
+
+export function encodeLiteralJsonLz4ForFixture(value: unknown): Buffer {
+  return encodeJsonLz4Buffer(value);
 }
 
 function encodeLiteralOnlyBlock(payload: Buffer): Buffer {

@@ -1,10 +1,11 @@
 import { BackupManifest } from "./backup.js";
 import { ProfileContext } from "./profile.js";
-import { SessionSummary } from "./session.js";
+import { SessionSummary, TabSummary } from "./session.js";
 import { VERSION } from "./version.js";
 import { configPath } from "./paths.js";
 import { backupRootForProfile } from "./backup.js";
 import { SortPlan } from "./sort.js";
+import { ApplyReceipt } from "./apply.js";
 
 export interface CommandEnvelope<T> {
   version: string;
@@ -39,7 +40,7 @@ export function printJson(value: unknown): void {
 export function formatStatus(context: ProfileContext, summary: SessionSummary): string {
   const blockers = context.running
     ? ["Offline apply: blocked because Zen is running", "Live bridge: unavailable"]
-    : ["Offline apply: not implemented in this tranche", "Live bridge: unavailable"];
+    : ["Live bridge: unavailable"];
 
   return [
     "Zen Tab Steward status",
@@ -56,8 +57,8 @@ export function formatStatus(context: ProfileContext, summary: SessionSummary): 
     `Folders/groups: ${summary.folderGroupCount} (${summary.folderCount} folders, ${summary.groupCount} groups)`,
     `Config: ${configPath()}`,
     `Backups: ${backupRootForProfile(context.profile.id)}`,
-    "Safe sort apply: unavailable",
-    "Safety posture: read and backup only; active session writes are refused",
+    `Safe sort apply: ${context.running ? "unavailable while Zen is running" : "available through offline session backend"}`,
+    "Safety posture: active session writes are refused; offline session writes require Zen closed and a fresh backup",
     "",
     "Blockers:",
     ...blockers.map((blocker) => `  - ${blocker}`),
@@ -79,7 +80,30 @@ export function formatWorkspaces(summary: SessionSummary): string {
       `  pinned: ${workspace.pinnedCount}`,
       `  essentials: ${workspace.essentialCount}`,
       `  folders/groups: ${workspace.folderGroupCount} (${workspace.folderCount} folders, ${workspace.groupCount} groups)`,
-      "  protection: not configured in this tranche",
+      `  protected: ${workspace.protectedStatus}`,
+      `  default inbox: ${workspace.defaultInbox ? "yes" : "no"}`,
+      `  sortable from: ${workspace.sortableFrom ? "yes" : "no"}`,
+      `  sortable to: ${workspace.sortableTo ? "yes" : "no"}`,
+      ""
+    );
+  }
+  return lines.join("\n").trimEnd();
+}
+
+export function formatTabs(tabs: TabSummary[]): string {
+  if (tabs.length === 0) return "No tabs found";
+  const lines = ["Zen tabs", ""];
+  for (const tab of tabs) {
+    lines.push(
+      `${tab.title}`,
+      `  id: ${tab.id}`,
+      `  workspace: ${tab.workspaceName ?? "(unknown)"} (${tab.workspaceId ?? "unknown"})`,
+      `  url: ${tab.url}`,
+      `  domain: ${tab.domain || "(none)"}`,
+      `  pinned: ${tab.pinned ? "yes" : "no"}`,
+      `  essential: ${tab.essential ? "yes" : "no"}`,
+      `  grouped/foldered: ${tab.grouped || tab.foldered ? "yes" : "no"}`,
+      `  protected: ${tab.protected ? tab.protectionReasons.join(", ") : "no"}`,
       ""
     );
   }
@@ -102,13 +126,14 @@ export function formatBackupList(manifests: BackupManifest[]): string {
   return ["Backups", ...manifests.map((manifest) => `${manifest.id}  ${manifest.files.length} files  ${manifest.profileId}`)].join("\n");
 }
 
-export function formatSortPreview(plan: SortPlan, applyBlockers: string[], suggestedNextCommands: string[]): string {
+export function formatSortPreview(plan: SortPlan, applyBlockers: string[], suggestedNextCommands: string[], applyReceipt?: ApplyReceipt): string {
   const lines = [
     `Sort preview: ${plan.sourceWorkspace.name}`,
     "",
     `Move ${plan.moveCount} entities`,
     `Skip ${plan.skipCount} protected or filtered`,
     `Review ${plan.reviewCount} low-confidence`,
+    `Blocked ${plan.blockedCount} unsafe`,
     ""
   ];
 
@@ -121,13 +146,30 @@ export function formatSortPreview(plan: SortPlan, applyBlockers: string[], sugge
     );
   }
 
-  lines.push(
-    "Apply refused:",
-    ...applyBlockers.map((blocker) => `  - ${blocker}`),
-    "",
-    "Next:",
-    ...suggestedNextCommands.map((command) => `  ${command}`)
-  );
+  if (applyReceipt) {
+    lines.push(
+      "Applied:",
+      `  backend: ${applyReceipt.backend}`,
+      `  moves: ${applyReceipt.moveCount}`,
+      `  backup: ${applyReceipt.backupId ?? "not needed"}`,
+      `  receipt: ${applyReceipt.receiptPath}`
+    );
+  } else if (applyBlockers.length > 0) {
+    lines.push(
+      "Apply refused:",
+      ...applyBlockers.map((blocker) => `  - ${blocker}`)
+    );
+  } else {
+    lines.push("Apply available: session backend");
+  }
+
+  if (suggestedNextCommands.length > 0) {
+    lines.push(
+      "",
+      "Next:",
+      ...suggestedNextCommands.map((command) => `  ${command}`)
+    );
+  }
 
   return lines.join("\n");
 }

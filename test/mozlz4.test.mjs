@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Buffer } from "node:buffer";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   DEFAULT_MAX_DECOMPRESSED_BYTES,
   decodeJsonLz4Buffer,
-  encodeLiteralJsonLz4ForFixture
+  encodeLiteralJsonLz4ForFixture,
+  readJsonLz4,
+  writeJsonLz4
 } from "../dist/mozlz4.js";
 
 test("decodes synthetic Mozilla JSONLZ4 buffers", () => {
@@ -34,4 +39,18 @@ test("rejects advertised decompressed sizes above the safety cap before allocati
   encoded.writeUInt32LE(DEFAULT_MAX_DECOMPRESSED_BYTES + 1, 8);
 
   assert.throws(() => decodeJsonLz4Buffer(encoded), /exceeds safety cap/);
+});
+
+test("writes JSONLZ4 files that round-trip through the decoder", async () => {
+  const temp = await mkdtemp(join(tmpdir(), "zts-jsonlz4-"));
+  const path = join(temp, "zen-sessions.jsonlz4");
+  const value = {
+    spaces: [{ uuid: "w1", name: "Space" }],
+    tabs: [{ zenWorkspace: "w1", entries: [{ url: "https://example.com", title: "Example" }] }],
+    unknown: { preserved: true }
+  };
+
+  await writeJsonLz4(path, value);
+
+  assert.deepEqual(await readJsonLz4(path), value);
 });

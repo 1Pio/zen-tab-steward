@@ -5,18 +5,21 @@ export interface SortInputs {
   dryRun: boolean;
   minConfidence: number;
   includePinned: boolean;
+  includeEssentials: boolean;
   to: string[];
   notTo: string[];
   only: string[];
   except: string[];
   backend: "auto" | "live" | "session";
   domainRules: Record<string, string>;
+  protectedDomains: string[];
 }
 
-export type PlanAction = "move" | "skip" | "review";
+export type PlanAction = "move" | "skip" | "review" | "blocked";
 
 export interface EntityPlan {
   entityId: string;
+  tabIndex: number;
   entityType: "tab";
   title: string;
   url: string;
@@ -29,6 +32,7 @@ export interface EntityPlan {
   explanation: string;
   action: PlanAction;
   reason: string;
+  protectionReasons: string[];
 }
 
 export interface DestinationSummary {
@@ -44,10 +48,12 @@ export interface SortPlan {
   moveCount: number;
   skipCount: number;
   reviewCount: number;
+  blockedCount: number;
   destinationSummaries: DestinationSummary[];
   plannedActions: EntityPlan[];
   skippedActions: EntityPlan[];
   reviewActions: EntityPlan[];
+  blockedActions: EntityPlan[];
 }
 
 const DOMAIN_RULES: Record<string, string[]> = {
@@ -64,17 +70,40 @@ export function planSortPreview(
   sourceWorkspace: WorkspaceSummary,
   inputs: SortInputs
 ): SortPlan {
-  const destinationWorkspaces = candidateDestinations(summary.workspaces, sourceWorkspace, inputs);
-  const destinationByName = new Map(destinationWorkspaces.map((workspace) => [workspace.name, workspace]));
+  const workspaceByName = workspaceLookup(summary.workspaces);
   const domainRules = effectiveDomainRules(inputs.domainRules);
   const tabs = Array.isArray(session.tabs) ? session.tabs : [];
-  const sourceTabs = tabs.filter((tab) => tab.zenWorkspace === sourceWorkspace.id);
   const plannedActions: EntityPlan[] = [];
   const skippedActions: EntityPlan[] = [];
   const reviewActions: EntityPlan[] = [];
+  const blockedActions: EntityPlan[] = [];
 
-  sourceTabs.forEach((tab, index) => {
+  tabs.forEach((tab, index) => {
+    if (tab.zenWorkspace !== sourceWorkspace.id) return;
     const entity = describeTab(tab, index, sourceWorkspace);
+    if (!sourceWorkspace.sortableFrom) {
+      blockedActions.push({
+        ...entity,
+        action: "blocked",
+        reason: "source_workspace_protected",
+        confidence: 1,
+        explanation: `Source workspace ${sourceWorkspace.name} is protected from sorting`
+      });
+      return;
+    }
+
+    const blockedReason = protectionBlockReason(entity, inputs);
+    if (blockedReason) {
+      blockedActions.push({
+        ...entity,
+        action: "blocked",
+        reason: blockedReason,
+        confidence: 1,
+        explanation: blockedExplanation(blockedReason, entity)
+      });
+      return;
+    }
+
     const skipReason = protectionSkipReason(tab, entity, inputs);
     if (skipReason) {
       skippedActions.push({
@@ -87,7 +116,7 @@ export function planSortPreview(
       return;
     }
 
-    const classification = classifyByDomain(entity.domain, destinationByName, domainRules);
+    const classification = classifyByDomain(entity.domain, workspaceByName, domainRules);
     if (!classification) {
       reviewActions.push({
         ...entity,
@@ -95,6 +124,35 @@ export function planSortPreview(
         reason: "no_deterministic_rule",
         confidence: 0,
         explanation: "No deterministic domain rule matched an available destination workspace"
+      });
+      return;
+    }
+
+    if (classification.workspace.id === sourceWorkspace.id) {
+      skippedActions.push({
+        ...entity,
+        action: "skip",
+        reason: "already_in_destination",
+        destinationWorkspaceId: classification.workspace.id,
+        destinationWorkspaceName: classification.workspace.name,
+        confidence: classification.confidence,
+        explanation: `Domain ${entity.domain} already belongs in ${sourceWorkspace.name}`
+      });
+      return;
+    }
+
+    const destinationBlocker = destinationBlockedReason(classification.workspace, inputs);
+    if (destinationBlocker) {
+      blockedActions.push({
+        ...entity,
+        action: "blocked",
+        reason: destinationBlocker,
+        destinationWorkspaceId: classification.workspace.id,
+        destinationWorkspaceName: classification.workspace.name,
+        confidence: classification.confidence,
+        explanation: destinationBlocker === "destination_workspace_protected"
+          ? `Destination workspace ${classification.workspace.name} is protected from sorting`
+          : `Destination workspace ${classification.workspace.name} is excluded by the active sort policy`
       });
       return;
     }
@@ -128,27 +186,13 @@ export function planSortPreview(
     moveCount: plannedActions.length,
     skipCount: skippedActions.length,
     reviewCount: reviewActions.length,
+    blockedCount: blockedActions.length,
     destinationSummaries: summarizeDestinations(plannedActions),
     plannedActions,
     skippedActions,
-    reviewActions
+    reviewActions,
+    blockedActions
   };
-}
-
-function candidateDestinations(
-  workspaces: WorkspaceSummary[],
-  sourceWorkspace: WorkspaceSummary,
-  inputs: SortInputs
-): WorkspaceSummary[] {
-  const allow = new Set(inputs.to.map(normalizeName));
-  const deny = new Set(inputs.notTo.map(normalizeName));
-  return workspaces.filter((workspace) => {
-    if (workspace.id === sourceWorkspace.id) return false;
-    const names = [normalizeName(workspace.name), normalizeName(workspace.id)];
-    if (allow.size > 0 && !names.some((name) => allow.has(name))) return false;
-    if (names.some((name) => deny.has(name))) return false;
-    return true;
-  });
 }
 
 function describeTab(tab: RawTab, index: number, sourceWorkspace: WorkspaceSummary): Omit<EntityPlan, "action" | "reason" | "confidence" | "explanation"> {
@@ -156,6 +200,7 @@ function describeTab(tab: RawTab, index: number, sourceWorkspace: WorkspaceSumma
   const url = entry?.url ?? "about:blank";
   return {
     entityId: String(tab.zenSyncId ?? tab.zenGlanceId ?? `${sourceWorkspace.id}:${index}`),
+    tabIndex: index,
     entityType: "tab",
     title: entry?.title ?? url,
     url,
@@ -163,7 +208,8 @@ function describeTab(tab: RawTab, index: number, sourceWorkspace: WorkspaceSumma
     sourceWorkspaceId: sourceWorkspace.id,
     sourceWorkspaceName: sourceWorkspace.name,
     destinationWorkspaceId: null,
-    destinationWorkspaceName: null
+    destinationWorkspaceName: null,
+    protectionReasons: tabProtectionReasons(tab)
   };
 }
 
@@ -176,11 +222,32 @@ function selectedEntry(tab: RawTab) {
 }
 
 function protectionSkipReason(tab: RawTab, entity: { domain: string; url: string }, inputs: SortInputs): string | null {
-  if (tab.zenEssential) return "essential_protected";
+  if (tab.zenEssential && !inputs.includeEssentials) return "essential_protected";
   if (tab.pinned && !inputs.includePinned) return "pinned_protected";
   if (tab.groupId || tab.zenLiveFolderItemId) return "grouped_or_foldered_protected";
   if (inputs.except.some((pattern) => matchesPattern(pattern, entity.domain, entity.url))) return "excluded_by_filter";
   if (inputs.only.length > 0 && !inputs.only.some((pattern) => matchesPattern(pattern, entity.domain, entity.url))) return "outside_only_filter";
+  return null;
+}
+
+function protectionBlockReason(entity: { domain: string; url: string }, inputs: SortInputs): string | null {
+  if ((inputs.protectedDomains ?? []).some((pattern) => matchesPattern(pattern, entity.domain, entity.url))) return "domain_protected";
+  return null;
+}
+
+function blockedExplanation(reason: string, entity: { domain: string }): string {
+  if (reason === "domain_protected") return `Domain ${entity.domain} is protected by config`;
+  return reason;
+}
+
+function destinationBlockedReason(workspace: WorkspaceSummary, inputs: SortInputs): string | null {
+  if (workspace.protectedStatus === "to" || workspace.protectedStatus === "from_to") return "destination_workspace_protected";
+  const names = [normalizeName(workspace.name), normalizeName(workspace.id)];
+  const allow = new Set(inputs.to.map(normalizeName));
+  const deny = new Set(inputs.notTo.map(normalizeName));
+  if (allow.size > 0 && !names.some((name) => allow.has(name))) return "destination_not_allowed";
+  if (names.some((name) => deny.has(name))) return "destination_not_allowed";
+  if (!workspace.sortableTo) return "destination_not_allowed";
   return null;
 }
 
@@ -194,12 +261,32 @@ export function classifyDomainForWorkspace(domain: string, domainRules: Record<s
 
 function classifyByDomain(domain: string, destinationByName: Map<string, WorkspaceSummary>, domainRules: Record<string, string[]>) {
   for (const [workspaceName, patterns] of Object.entries(domainRules)) {
-    const workspace = destinationByName.get(workspaceName);
+    const workspace = destinationByName.get(workspaceName) ?? destinationByName.get(normalizeName(workspaceName));
     if (!workspace) continue;
     const matchedPattern = patterns.find((pattern) => matchesPattern(pattern, domain, `https://${domain}/`));
     if (matchedPattern) return { workspace, matchedPattern, confidence: 0.9 };
   }
   return null;
+}
+
+function workspaceLookup(workspaces: WorkspaceSummary[]): Map<string, WorkspaceSummary> {
+  const lookup = new Map<string, WorkspaceSummary>();
+  for (const workspace of workspaces) {
+    lookup.set(workspace.name, workspace);
+    lookup.set(workspace.id, workspace);
+    lookup.set(normalizeName(workspace.name), workspace);
+    lookup.set(normalizeName(workspace.id), workspace);
+  }
+  return lookup;
+}
+
+function tabProtectionReasons(tab: RawTab): string[] {
+  const reasons: string[] = [];
+  if (tab.pinned) reasons.push("pinned");
+  if (tab.zenEssential) reasons.push("essential");
+  if (tab.groupId) reasons.push("grouped");
+  if (tab.zenLiveFolderItemId) reasons.push("foldered");
+  return reasons;
 }
 
 function effectiveDomainRules(configRules: Record<string, string>): Record<string, string[]> {

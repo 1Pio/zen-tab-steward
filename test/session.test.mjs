@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { summarizeSession } from "../dist/session.js";
+import { listTabs, summarizeSession, withWorkspacePolicy } from "../dist/session.js";
 
 const source = {
   kind: "zen-sessions",
@@ -53,4 +53,97 @@ test("summarizes workspaces, pinned tabs, essentials, folders, and groups", () =
       { name: "Stash", tabs: 1, pinned: 0, essentials: 0, folders: 0, groups: 0 }
     ]
   );
+});
+
+test("adds workspace policy status from config", () => {
+  const summary = summarizeSession(
+    {
+      spaces: [
+        { uuid: "w1", name: "Space" },
+        { uuid: "w2", name: "Stash" },
+        { uuid: "w3", name: "Portfolio" }
+      ],
+      tabs: [],
+      folders: [],
+      groups: []
+    },
+    source
+  );
+
+  const policySummary = withWorkspacePolicy(summary, {
+    defaults: {
+      inbox: "Space",
+      minConfidence: 0.8,
+      includePinned: false,
+      includeEssentials: false,
+      applyBackend: "auto"
+    },
+    sort: {
+      to: ["Portfolio"],
+      notTo: ["Stash"],
+      only: [],
+      except: []
+    },
+    protect: {
+      workspaces: {
+        from: ["Stash"],
+        to: ["Stash"]
+      },
+      domains: {
+        neverMove: []
+      }
+    },
+    rules: { domains: {} }
+  });
+
+  assert.deepEqual(
+    policySummary.workspaces.map((workspace) => ({
+      name: workspace.name,
+      protected: workspace.protectedStatus,
+      inbox: workspace.defaultInbox,
+      from: workspace.sortableFrom,
+      to: workspace.sortableTo
+    })),
+    [
+      { name: "Space", protected: "none", inbox: true, from: true, to: false },
+      { name: "Stash", protected: "from_to", inbox: false, from: false, to: false },
+      { name: "Portfolio", protected: "none", inbox: false, from: true, to: true }
+    ]
+  );
+});
+
+test("lists tabs with workspace and protection metadata", () => {
+  const session = {
+    spaces: [
+      { uuid: "w1", name: "Space" },
+      { uuid: "w2", name: "Portfolio" }
+    ],
+    tabs: [
+      {
+        zenWorkspace: "w1",
+        pinned: true,
+        zenEssential: true,
+        index: 1,
+        entries: [{ url: "https://example.com", title: "Example" }]
+      },
+      {
+        zenWorkspace: "w2",
+        groupId: "g1",
+        zenLiveFolderItemId: "f1",
+        entries: [{ url: "https://framer.com/project", title: "Framer" }]
+      }
+    ],
+    folders: [],
+    groups: []
+  };
+  const summary = summarizeSession(session, source);
+
+  const tabs = listTabs(session, summary, "Portfolio");
+
+  assert.equal(tabs.length, 1);
+  assert.equal(tabs[0].workspaceName, "Portfolio");
+  assert.equal(tabs[0].domain, "framer.com");
+  assert.equal(tabs[0].grouped, true);
+  assert.equal(tabs[0].foldered, true);
+  assert.deepEqual(tabs[0].protectionReasons, ["grouped", "foldered"]);
 });
