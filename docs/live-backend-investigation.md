@@ -126,7 +126,7 @@ Until the same kind of operation is proven against the intended live Zen profile
 `zts bridge doctor` records the current blockers:
 
 ```text
-Live backend client is not implemented yet
+Live sort apply backend is not enabled; use explicit zts bridge proof commands for live bridge checks
 Current Zen browser process has no remote debugging, debugger server, or Marionette launch flag
 Current Zen browser process has no privileged remote system-access launch flag
 ```
@@ -148,7 +148,7 @@ zts sort Space --json
 returns a plan and refuses apply with blockers equivalent to:
 
 ```text
-Zen is running and no live backend is available
+Zen is running and no enabled live sort apply backend is available
 Offline session apply is blocked because Zen is running
 ```
 

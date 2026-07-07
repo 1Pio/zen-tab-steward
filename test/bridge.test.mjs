@@ -15,7 +15,7 @@ test("bridge inspection fails closed when Zen is not running", () => {
   assert.equal(inspection.liveBackend.applySupported, false);
   assert.equal(inspection.candidateTransportDetected, false);
   assert.equal(inspection.candidatePrivilegedTransportDetected, false);
-  assert.match(inspection.blockers.join("\n"), /not implemented/);
+  assert.match(inspection.blockers.join("\n"), /Live sort apply backend is not enabled/);
   assert.match(inspection.blockers.join("\n"), /not running/);
   assert.equal(inspection.checks.find((check) => check.id === "live_client").status, "fail");
 });
@@ -36,7 +36,7 @@ test("bridge inspection detects privileged remote launch evidence without enabli
   assert.equal(inspection.candidatePrivilegedTransportDetected, true);
   assert.equal(inspection.liveBackend.status, "unavailable");
   assert.equal(inspection.liveBackend.applySupported, false);
-  assert.deepEqual(inspection.blockers, ["Live backend client is not implemented yet"]);
+  assert.deepEqual(inspection.blockers, ["Live sort apply backend is not enabled; use explicit zts bridge proof commands for live bridge checks"]);
   assert.match(inspection.warnings.join("\n"), /Remote launch flags are only transport evidence/);
 });
 
@@ -78,7 +78,7 @@ test("bridge inspection detects candidate flags from parsed ps output with trail
   assert.equal(runningProcesses[0].profilePath, profilePath);
   assert.equal(inspection.candidateTransportDetected, true);
   assert.equal(inspection.candidatePrivilegedTransportDetected, true);
-  assert.deepEqual(inspection.blockers, ["Live backend client is not implemented yet"]);
+  assert.deepEqual(inspection.blockers, ["Live sort apply backend is not enabled; use explicit zts bridge proof commands for live bridge checks"]);
 });
 
 test("live attachment check refuses when the profile has no BiDi server file", async () => {

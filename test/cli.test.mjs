@@ -35,7 +35,7 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
   const bridgeJson = JSON.parse(bridge.stdout);
   assert.equal(bridgeJson.ok, true);
   assert.equal(bridgeJson.data.bridge.liveBackend.status, "unavailable");
-  assert.match(bridgeJson.blockers.join("\n"), /not implemented/);
+  assert.match(bridgeJson.blockers.join("\n"), /Live sort apply backend is not enabled/);
 
   const bridgeDoctor = await execFileAsync("node", ["dist/cli.js", "bridge", "doctor"], { env });
   assert.match(bridgeDoctor.stdout, /Zen live bridge doctor/);

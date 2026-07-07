@@ -2,7 +2,7 @@
 
 Zen Tab Steward is a user-owned CLI for inspecting, backing up, planning, and carefully sorting Zen Browser tab and workspace state. The command is `zts`.
 
-The implementation is deliberately conservative. It can discover the local Zen profile, parse `zen-sessions.jsonlz4`, report workspace/tab protection state, create backups, show deterministic sort previews, and apply eligible tab moves through the offline session backend when Zen is closed. It does not write active Zen session files, install a service, start a daemon, create a browser extension, or set up autostart. The live backend is not implemented yet.
+The implementation is deliberately conservative. It can discover the local Zen profile, parse `zen-sessions.jsonlz4`, report workspace/tab protection state, create backups, show deterministic sort previews, and apply eligible tab moves through the offline session backend when Zen is closed. It also has gated live bridge proof commands, but `zts sort` does not yet enable live apply. It does not write active Zen session files, install a service, start a daemon, create a browser extension, or set up autostart.
 
 ## Install
 
@@ -139,7 +139,7 @@ The current implementation has read, backup, preview, and offline session apply 
 - It copies files for backups.
 - It restores backups only when Zen is closed.
 - It refuses sort apply while Zen is running.
-- It refuses live backend apply because no safe live bridge exists yet.
+- It refuses live backend apply from `zts sort`; live bridge work is currently exposed only as explicit gated proof commands.
 - It can inspect live-backend launch evidence with `zts bridge status` and `zts bridge doctor`, but those commands are read-only and do not enable live apply.
 - It can run `zts bridge live-check` as a read-only live-profile attachment gate; refusal is expected unless Zen was launched with the required remote-control flags and a local WebDriver BiDi server file exists.
 - It can run `zts bridge live-read` as a read-only live-profile browser-chrome proof after the attachment gate passes; it does not move tabs or enable live apply.

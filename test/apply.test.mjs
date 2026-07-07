@@ -90,7 +90,7 @@ test("offline session backend refuses running Zen and non-primary session source
     offlineApplyBlockers({ ...fixture.context, sessionFile: { ...fixture.context.sessionFile, kind: "recovery" } }, "session"),
     ["Offline session apply requires zen-sessions.jsonlz4 as the selected session source"]
   );
-  assert.deepEqual(offlineApplyBlockers(fixture.context, "live"), ["Live backend is unavailable; run zts bridge status for the current blocker receipt"]);
+  assert.deepEqual(offlineApplyBlockers(fixture.context, "live"), ["Live sort apply backend is unavailable; run zts bridge status for the current blocker receipt"]);
 });
 
 async function makeApplyFixture() {

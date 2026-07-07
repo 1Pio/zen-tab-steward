@@ -79,11 +79,11 @@ export function applyReceiptRootForProfile(profileId: string): string {
 export function offlineApplyBlockers(context: ProfileContext, backend: "auto" | "live" | "session"): string[] {
   const blockers: string[] = [];
   if (backend === "live") {
-    blockers.push("Live backend is unavailable; run zts bridge status for the current blocker receipt");
+    blockers.push("Live sort apply backend is unavailable; run zts bridge status for the current blocker receipt");
     return blockers;
   }
   if (context.running) {
-    if (backend === "auto") blockers.push("Zen is running and no live backend is available; run zts bridge status for the current blocker receipt");
+    if (backend === "auto") blockers.push("Zen is running and no enabled live sort apply backend is available; run zts bridge status for the current blocker receipt");
     blockers.push("Offline session apply is blocked because Zen is running");
   }
   if (context.sessionFile.kind !== "zen-sessions") {

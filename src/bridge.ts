@@ -226,7 +226,7 @@ export function inspectBridge(context: ProfileContext): BridgeInspection {
     liveBackend: {
       status: "unavailable",
       applySupported: false,
-      reason: "No safe CLI-to-Zen browser-chrome execution client is implemented yet."
+      reason: "Live sort apply is not enabled; live bridge access is limited to explicit gated proof commands."
     },
     zenRunning: context.running,
     profilePath: context.profile.path,
@@ -622,7 +622,7 @@ export async function runBridgeProbe(options: BridgeProbeOptions = {}): Promise<
 }
 
 function bridgeBlockers(zenRunning: boolean, candidateTransportDetected: boolean, candidatePrivilegedTransportDetected: boolean): string[] {
-  const blockers = ["Live backend client is not implemented yet"];
+  const blockers = ["Live sort apply backend is not enabled; use explicit zts bridge proof commands for live bridge checks"];
   if (!zenRunning) {
     blockers.push("Zen is not running, so no live browser-chrome bridge can be inspected");
     return blockers;
@@ -673,9 +673,9 @@ function bridgeChecks(
     },
     {
       id: "live_client",
-      label: "Live bridge client",
+      label: "Live sort apply backend",
       status: "fail",
-      detail: "No live bridge client is implemented, so live apply is unavailable."
+      detail: "Live sort apply is unavailable; only explicit gated bridge proof commands are implemented."
     }
   ];
 }
