@@ -1,6 +1,6 @@
 import { BackupManifest, BackupPruneReceipt, RestoreReceipt } from "./backup.js";
 import { ProfileContext } from "./profile.js";
-import { SessionSummary, TabSummary } from "./session.js";
+import { SessionSummary, TabSummary, WorkspaceSummary } from "./session.js";
 import { VERSION } from "./version.js";
 import { configPath } from "./paths.js";
 import { backupRootForProfile } from "./backup.js";
@@ -40,37 +40,39 @@ export function printJson(value: unknown): void {
 }
 
 export function formatStatus(context: ProfileContext, summary: SessionSummary, bridge: BridgeInspection): string {
-  const blockers = context.running
-    ? ["Offline apply: blocked because Zen is running", ...bridge.blockers.map((blocker) => `Live bridge: ${blocker}`)]
-    : bridge.blockers.map((blocker) => `Live bridge: ${blocker}`);
+  const running = context.running;
+  const sortPosture = running
+    ? "preview only — Zen is running and the live bridge is not attachable"
+    : "ready — offline session backend can apply when you pass --apply";
+  const bridgeBlockers = bridge.blockers.map((blocker) => `Live bridge: ${blocker}`);
+  const blockers = running
+    ? ["Offline apply: blocked because Zen is running", ...bridgeBlockers]
+    : bridgeBlockers;
 
   return [
-    "Zen Tab Steward status",
+    "Zen Tab Steward",
     `Version: ${VERSION}`,
-    `Profile: ${context.profile.name} (${context.profile.id})`,
+    "",
+    `Zen:          ${running ? "running" : "not running"}`,
+    `Sort:         ${sortPosture}`,
+    `Live bridge:  ${bridge.liveBackend.status} — ${bridge.liveBackend.reason}`,
+    "",
+    `Profile:      ${context.profile.name} (${context.profile.id})`,
     `Profile path: ${context.profile.path}`,
-    `Zen: ${context.running ? "running" : "not running"}`,
-    `Session read: available (${summary.source.kind})`,
-    `Session file: ${summary.source.path}`,
-    `Workspaces: ${summary.workspaceCount}`,
-    `Tabs: ${summary.tabCount}`,
-    `Pinned: ${summary.pinnedCount}`,
-    `Essentials: ${summary.essentialCount}`,
-    `Folders/groups: ${summary.folderGroupCount} (${summary.folderCount} folders, ${summary.groupCount} groups)`,
-    `Config: ${configPath()}`,
-    `Backups: ${backupRootForProfile(context.profile.id)}`,
-    `Safe sort apply: ${context.running ? "live backend is gated by bridge checks; offline session backend is unavailable while Zen is running" : "available through offline session backend"}`,
-    `Live bridge: ${bridge.liveBackend.status} (${bridge.liveBackend.reason})`,
-    "Safety posture: active session-file writes are refused; live moves require the bridge gate; offline writes require Zen closed and a fresh backup",
+    `Session:      ${summary.source.kind} · ${summary.source.path}`,
+    `Config:       ${configPath()}`,
+    `Backups:      ${backupRootForProfile(context.profile.id)}`,
     "",
-    "Blockers:",
-    ...blockers.map((blocker) => `  - ${blocker}`),
+    `Workspaces:   ${summary.workspaceCount}`,
+    `Tabs:         ${summary.tabCount}   (${summary.pinnedCount} pinned · ${summary.essentialCount} essential)`,
+    `Folders/Grp:  ${summary.folderGroupCount}   (${summary.folderCount} folders · ${summary.groupCount} groups)`,
     "",
+    ...(blockers.length > 0 ? ["Blockers:", ...blockers.map((blocker) => `  - ${blocker}`), ""] : []),
     "Next:",
     "  zts workspaces",
-    "  zts bridge status",
+    "  zts sort --preview",
     "  zts backup",
-    "  zts sort --preview"
+    ...(running ? ["  zts bridge status"] : [])
   ].join("\n");
 }
 
@@ -318,43 +320,58 @@ export function formatBridgeLiveMove(receipt: BridgeLiveMoveReceipt, suggestedNe
 }
 
 export function formatWorkspaces(summary: SessionSummary): string {
-  const lines = ["Zen workspaces", ""];
-  for (const workspace of summary.workspaces) {
-    lines.push(
-      `${workspace.name}`,
-      `  id: ${workspace.id}`,
-      `  tabs: ${workspace.tabCount}`,
-      `  pinned: ${workspace.pinnedCount}`,
-      `  essentials: ${workspace.essentialCount}`,
-      `  folders/groups: ${workspace.folderGroupCount} (${workspace.folderCount} folders, ${workspace.groupCount} groups)`,
-      `  protected: ${workspace.protectedStatus}`,
-      `  default inbox: ${workspace.defaultInbox ? "yes" : "no"}`,
-      `  sortable from: ${workspace.sortableFrom ? "yes" : "no"}`,
-      `  sortable to: ${workspace.sortableTo ? "yes" : "no"}`,
-      ""
-    );
+  const workspaces = summary.workspaces;
+  const nameWidth = Math.max(...workspaces.map((w) => w.name.length), 4);
+  const lines = [`Zen workspaces · ${workspaces.length}`, ""];
+
+  for (const workspace of workspaces) {
+    const name = workspace.name.padEnd(nameWidth);
+    const tabsLabel = workspace.tabCount === 0 ? "–" : `${workspace.tabCount} ${plural(workspace.tabCount, "tab", "tabs")}`;
+    const parts: string[] = [];
+    if (workspace.pinnedCount > 0) parts.push(`${workspace.pinnedCount} pin`);
+    if (workspace.folderGroupCount > 0) parts.push(`${workspace.folderGroupCount} grp`);
+    if (workspace.essentialCount > 0) parts.push(`${workspace.essentialCount} ess`);
+    const meta = parts.join("   ");
+    const flags = workspaceFlags(workspace);
+    const row = `  ${name}  ${tabsLabel}`.padEnd(nameWidth + 4 + 14);
+    const tail = [meta, flags].filter(Boolean).join("   ");
+    lines.push(tail ? `${row} ${tail}`.trimEnd() : row.trimEnd());
   }
-  return lines.join("\n").trimEnd();
+
+  lines.push(
+    "",
+    "pin = pinned   grp = folders + groups   ess = essentials",
+    "★ = default inbox   ⚠ = protected from sorting   (use --json for ids)"
+  );
+  return lines.join("\n");
+}
+
+function workspaceFlags(workspace: WorkspaceSummary): string {
+  const flags: string[] = [];
+  if (workspace.defaultInbox) flags.push("★");
+  if (workspace.protectedStatus !== "none") flags.push("⚠");
+  return flags.join(" ");
 }
 
 export function formatTabs(tabs: TabSummary[]): string {
-  if (tabs.length === 0) return "No tabs found";
-  const lines = ["Zen tabs", ""];
+  if (tabs.length === 0) return "No tabs found\n";
+  const lines = [`Zen tabs · ${tabs.length}`, ""];
   for (const tab of tabs) {
-    lines.push(
-      `${tab.title}`,
-      `  id: ${tab.id}`,
-      `  workspace: ${tab.workspaceName ?? "(unknown)"} (${tab.workspaceId ?? "unknown"})`,
-      `  url: ${tab.url}`,
-      `  domain: ${tab.domain || "(none)"}`,
-      `  pinned: ${tab.pinned ? "yes" : "no"}`,
-      `  essential: ${tab.essential ? "yes" : "no"}`,
-      `  grouped/foldered: ${tab.grouped || tab.foldered ? "yes" : "no"}`,
-      `  protected: ${tab.protected ? tab.protectionReasons.join(", ") : "no"}`,
-      ""
-    );
+    const marker = tabMarker(tab);
+    const title = truncate(tab.title || tab.url, 52).padEnd(54);
+    const ws = tab.workspaceName ? `  [${tab.workspaceName}]` : "";
+    lines.push(`  ${marker} ${title}${truncate(tab.url, 64)}${ws}`);
   }
-  return lines.join("\n").trimEnd();
+  lines.push("", "markers: P pinned · E essential · G grouped · F foldered · · normal tab");
+  return lines.join("\n");
+}
+
+function tabMarker(tab: TabSummary): string {
+  if (tab.pinned) return "[P]";
+  if (tab.essential) return "[E]";
+  if (tab.foldered) return "[F]";
+  if (tab.grouped) return "[G]";
+  return " · ";
 }
 
 export function formatBackup(manifest: BackupManifest): string {

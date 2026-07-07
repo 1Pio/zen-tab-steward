@@ -91,7 +91,7 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
   const workspaces = await execFileAsync("node", ["dist/cli.js", "workspaces"], { env });
   assert.match(workspaces.stdout, /Space/);
   assert.match(workspaces.stdout, /Stash/);
-  assert.match(workspaces.stdout, /sortable from/);
+  assert.match(workspaces.stdout, /pin = pinned/);
 
   const tabs = await execFileAsync("node", ["dist/cli.js", "tabs", "Space", "--json"], { env });
   const tabsJson = JSON.parse(tabs.stdout);
