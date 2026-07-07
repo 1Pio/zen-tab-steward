@@ -10,6 +10,7 @@ export interface SortInputs {
   notTo: string[];
   only: string[];
   except: string[];
+  limit: number | null;
   backend: "auto" | "live" | "session";
   domainRules: Record<string, string>;
   protectedDomains: string[];
@@ -175,7 +176,7 @@ export function planSortPreview(
       return;
     }
 
-    plannedActions.push({
+    const moveAction: EntityPlan = {
       ...entity,
       action: "move",
       reason: "domain_rule",
@@ -183,7 +184,19 @@ export function planSortPreview(
       destinationWorkspaceName: classification.workspace.name,
       confidence: classification.confidence,
       explanation: `Domain ${entity.domain} matched ${classification.matchedPattern}`
-    });
+    };
+
+    if (inputs.limit !== null && plannedActions.length >= inputs.limit) {
+      reviewActions.push({
+        ...moveAction,
+        action: "review",
+        reason: "over_move_limit",
+        explanation: `Domain ${entity.domain} matched ${classification.matchedPattern}, but the planned move limit ${inputs.limit} was reached`
+      });
+      return;
+    }
+
+    plannedActions.push(moveAction);
   });
 
   return {

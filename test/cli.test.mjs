@@ -92,6 +92,8 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
       "github.com,*.framer.com",
       "--except",
       "youtube.com",
+      "--limit",
+      "1",
       "--backend",
       "session",
       "--json"
@@ -103,6 +105,7 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
   assert.deepEqual(sortWithKnownFlagsJson.data.inputs.to, ["Portfolio", "Tool Development"]);
   assert.deepEqual(sortWithKnownFlagsJson.data.inputs.notTo, ["Stash"]);
   assert.equal(sortWithKnownFlagsJson.data.inputs.minConfidence, 0.85);
+  assert.equal(sortWithKnownFlagsJson.data.inputs.limit, 1);
   assert.equal(sortWithKnownFlagsJson.data.inputs.backend, "session");
 
   const invalidConfidence = spawnSync("node", ["dist/cli.js", "sort", "Space", "--min-confidence", "nope", "--json"], {
@@ -118,6 +121,22 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
   });
   assert.equal(invalidBackend.status, 1);
   assert.match(JSON.parse(invalidBackend.stdout).blockers.join("\n"), /backend/);
+
+  const invalidLimit = spawnSync("node", ["dist/cli.js", "sort", "Space", "--limit", "1.5", "--json"], {
+    env,
+    encoding: "utf8"
+  });
+  assert.equal(invalidLimit.status, 1);
+  assert.match(JSON.parse(invalidLimit.stdout).blockers.join("\n"), /limit/);
+
+  const limitedSort = spawnSync("node", ["dist/cli.js", "sort", "Space", "--dry-run", "--limit", "0", "--json"], {
+    env,
+    encoding: "utf8"
+  });
+  assert.equal(limitedSort.status, 0);
+  const limitedSortJson = JSON.parse(limitedSort.stdout);
+  assert.equal(limitedSortJson.data.plan.moveCount, 0);
+  assert.equal(limitedSortJson.data.plan.reviewActions.some((action) => action.reason === "over_move_limit"), true);
 
   const plainSort = spawnSync("node", ["dist/cli.js", "sort", "Space", "--json"], {
     env,

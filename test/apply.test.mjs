@@ -23,6 +23,7 @@ test("offline session backend applies planned moves with backup and receipt", as
     notTo: [],
     only: [],
     except: [],
+    limit: null,
     backend: "session",
     domainRules: {},
     protectedDomains: []

@@ -21,6 +21,7 @@ const inputs = {
   notTo: [],
   only: [],
   except: [],
+  limit: null,
   backend: "auto",
   domainRules: {},
   protectedDomains: []
@@ -187,6 +188,40 @@ test("routes deterministic matches below min confidence to review", () => {
   assert.equal(plan.reviewCount, 1);
   assert.equal(plan.reviewActions[0].reason, "below_min_confidence");
   assert.equal(plan.reviewActions[0].destinationWorkspaceName, "Portfolio");
+});
+
+test("limits planned moves without hiding eligible overflow actions", () => {
+  const session = {
+    spaces: [
+      { uuid: "w1", name: "Space" },
+      { uuid: "w2", name: "Portfolio" },
+      { uuid: "w3", name: "Tool Development" }
+    ],
+    tabs: [
+      { zenWorkspace: "w1", entries: [{ url: "https://framer.com/projects/site", title: "Framer" }] },
+      { zenWorkspace: "w1", entries: [{ url: "https://github.com/1Pio/zen-tab-steward", title: "Repo" }] },
+      { zenWorkspace: "w1", entries: [{ url: "https://framer.university/course", title: "Course" }] }
+    ],
+    folders: [],
+    groups: []
+  };
+  const summary = summarizeSession(session, source);
+  const plan = planSortPreview(session, summary, summary.workspaces[0], {
+    ...inputs,
+    limit: 1
+  });
+
+  assert.equal(plan.moveCount, 1);
+  assert.equal(plan.reviewCount, 2);
+  assert.equal(plan.plannedActions[0].title, "Framer");
+  assert.deepEqual(
+    plan.reviewActions.map((action) => action.reason),
+    ["over_move_limit", "over_move_limit"]
+  );
+  assert.deepEqual(
+    plan.destinationSummaries.map((destination) => [destination.workspaceName, destination.tabCount]),
+    [["Portfolio", 1]]
+  );
 });
 
 test("uses configured domain rules as deterministic destinations", () => {

@@ -291,6 +291,7 @@ program
   .option("--not-to <workspaces>", "comma-separated destination workspace denylist")
   .option("--only <patterns>", "comma-separated source URL/domain patterns")
   .option("--except <patterns>", "comma-separated exclusion URL/domain patterns")
+  .option("--limit <count>", "maximum number of move actions to plan or apply")
   .option("--backend <backend>", "backend preference: auto, live, or session")
   .option("--json", "print stable JSON output")
   .action(async (sourceWorkspace: string | undefined, options: JsonOption & SortOptions) => {
@@ -379,6 +380,7 @@ interface SortOptions {
   notTo?: string;
   only?: string;
   except?: string;
+  limit?: string;
   backend?: string;
 }
 
@@ -388,6 +390,7 @@ function sortCommandForReceipt(sourceWorkspace: string | undefined, options: Sor
   if (options.apply) parts.push("--apply");
   if (options.backend) parts.push("--backend", options.backend);
   if (options.minConfidence) parts.push("--min-confidence", options.minConfidence);
+  if (options.limit) parts.push("--limit", options.limit);
   return parts.join(" ");
 }
 
@@ -448,6 +451,7 @@ function sortInputs(options: SortOptions, config: ZtsConfig): SortInputs {
     notTo: csvOption(options.notTo, config.sort.notTo),
     only: csvOption(options.only, config.sort.only),
     except: csvOption(options.except, config.sort.except),
+    limit: options.limit === undefined ? null : Number(options.limit),
     backend: options.backend === undefined ? config.defaults.applyBackend : normalizeBackend(options.backend),
     domainRules: config.rules.domains,
     protectedDomains: config.protect.domains.neverMove
@@ -460,6 +464,9 @@ function validateSortInputs(inputs: SortInputs): string | null {
   }
   if (inputs.backend !== "auto" && inputs.backend !== "live" && inputs.backend !== "session") {
     return "--backend must be one of: auto, live, session";
+  }
+  if (inputs.limit !== null && (!Number.isInteger(inputs.limit) || inputs.limit < 0)) {
+    return "--limit must be a whole number greater than or equal to 0";
   }
   return null;
 }

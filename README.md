@@ -58,7 +58,7 @@ Each backup includes timestamped `.bak` files and a timestamped `manifest.json` 
 
 `zts sort [workspace] --preview` produces a safe read-only preview. It uses deterministic domain rules where a matching destination workspace exists, skips pinned tabs and essentials by default, and treats grouped/foldered tabs as protected so they are not split. Every tab from the source workspace is classified as move, skip, review, or blocked.
 
-Preview and dry-run commands exit successfully because they do not write. Preview is glance-oriented; dry-run prints the full action list with reasons and explanations. Plain `zts sort [workspace]` and `zts sort [workspace] --apply` attempt to apply eligible planned moves using the selected backend. Today, only the offline session backend can apply, and only when Zen is closed and `zen-sessions.jsonlz4` is the selected session source. If Zen is running, apply refuses and shows the same plan plus blockers.
+Preview and dry-run commands exit successfully because they do not write. Preview is glance-oriented; dry-run prints the full action list with reasons and explanations. Use `--limit <count>` to cap planned move actions for a controlled proof; eligible overflow actions are kept in review with reason `over_move_limit`. Plain `zts sort [workspace]` and `zts sort [workspace] --apply` attempt to apply eligible planned moves using the selected backend. Today, only the offline session backend can apply, and only when Zen is closed and `zen-sessions.jsonlz4` is the selected session source. If Zen is running, apply refuses and shows the same plan plus blockers.
 
 `zts apply list` lists offline sort-apply receipts for the discovered profile. `zts apply verify <receipt-id>` is read-only: it compares the receipt's recorded moves with the current selected session file and exits with status `2` if the recorded moves no longer match.
 
@@ -94,6 +94,7 @@ zts apply list --json
 zts apply verify <receipt-id> --json
 zts sort Space --preview --json
 zts sort Space --dry-run --json
+zts sort Space --dry-run --limit 3 --json
 zts sort Space --backend session --json
 zts config show --json
 zts rules test https://github.com/1Pio/zen-tab-steward --json
