@@ -63,10 +63,23 @@ export interface BridgeProbeReceipt {
   websocketUrl: string | null;
   processPid: number | null;
   sessionStatus: unknown | null;
+  scriptProof: BridgeProbeScriptProof | null;
   warnings: string[];
   blockers: string[];
   logTail: string[];
   cleanedUp: boolean;
+}
+
+export interface BridgeProbeScriptProof {
+  sessionId: string;
+  contentContextCount: number;
+  chromeContextCount: number;
+  contentContext: string;
+  chromeContext: string;
+  contentEvaluation: unknown;
+  chromeEvaluation: unknown;
+  chromeUrl: string | null;
+  zenWorkspacesDetected: boolean;
 }
 
 export interface BidiSessionStatusSuccess {
@@ -157,6 +170,7 @@ export async function runBridgeProbe(options: BridgeProbeOptions = {}): Promise<
   let log = "";
   let websocketUrl: string | null = null;
   let sessionStatus: unknown | null = null;
+  let scriptProof: BridgeProbeScriptProof | null = null;
   const blockers: string[] = [];
   const spawnErrors: string[] = [];
   let cleanedUp = false;
@@ -198,9 +212,13 @@ export async function runBridgeProbe(options: BridgeProbeOptions = {}): Promise<
       blockers.push("Zen did not report a WebDriver BiDi listener before timeout");
     } else {
       websocketUrl = `${baseUrl}/session`;
-      sessionStatus = await readBidiSessionStatus(websocketUrl, timeoutMs);
+      const bidiProof = await runBidiScriptProof(websocketUrl, timeoutMs);
+      sessionStatus = bidiProof.sessionStatus;
+      scriptProof = bidiProof.scriptProof;
       const validationError = validateBidiSessionStatus(sessionStatus);
       if (validationError) blockers.push(validationError);
+      const scriptProofError = validateBridgeProbeScriptProof(scriptProof);
+      if (scriptProofError) blockers.push(scriptProofError);
     }
   } catch (error) {
     blockers.push(error instanceof Error ? error.message : String(error));
@@ -226,6 +244,7 @@ export async function runBridgeProbe(options: BridgeProbeOptions = {}): Promise<
     websocketUrl,
     processPid: child?.pid ?? null,
     sessionStatus,
+    scriptProof,
     warnings: ["Probe used a disposable headless Zen profile and did not touch the discovered live profile."],
     blockers,
     logTail: tailLines(log, 20),
@@ -324,6 +343,28 @@ export function validateBidiSessionStatus(value: unknown): string | null {
   return null;
 }
 
+export function validateBridgeProbeScriptProof(value: unknown): string | null {
+  if (!isRecord(value)) return "WebDriver BiDi script proof was not returned";
+  if (typeof value.sessionId !== "string" || value.sessionId.length === 0) return "WebDriver BiDi script proof had no session id";
+  if (typeof value.contentContextCount !== "number" || !Number.isInteger(value.contentContextCount) || value.contentContextCount < 1) return "WebDriver BiDi script proof found no content contexts";
+  if (typeof value.chromeContextCount !== "number" || !Number.isInteger(value.chromeContextCount) || value.chromeContextCount < 1) return "WebDriver BiDi script proof found no chrome contexts";
+  if (typeof value.contentContext !== "string" || value.contentContext.length === 0) return "WebDriver BiDi script proof had no content context id";
+  if (typeof value.chromeContext !== "string" || value.chromeContext.length === 0) return "WebDriver BiDi script proof had no chrome context id";
+  if (remoteStringValue(value.contentEvaluation, "href") !== "about:blank") {
+    return "WebDriver BiDi content script proof did not execute in the disposable content context";
+  }
+  if (remoteStringValue(value.chromeEvaluation, "href") !== "chrome://browser/content/browser.xhtml") {
+    return "WebDriver BiDi chrome script proof did not execute in the Zen browser chrome context";
+  }
+  if (remoteBooleanValue(value.chromeEvaluation, "hasZenWorkspaces") !== true) {
+    return "WebDriver BiDi chrome script proof did not detect gZenWorkspaces";
+  }
+  if (remoteStringValue(value.chromeEvaluation, "zenWorkspacesType") !== "object") {
+    return "WebDriver BiDi chrome script proof did not verify gZenWorkspaces as an object";
+  }
+  return null;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -363,34 +404,155 @@ async function waitForBidiBaseUrl(readLog: () => string, timeoutMs: number): Pro
   return bidiBaseUrlFromLog(readLog());
 }
 
-async function readBidiSessionStatus(websocketUrl: string, timeoutMs: number): Promise<unknown> {
+async function runBidiScriptProof(
+  websocketUrl: string,
+  timeoutMs: number
+): Promise<{ sessionStatus: unknown; scriptProof: BridgeProbeScriptProof }> {
   const WebSocketConstructor = globalThis.WebSocket;
   if (!WebSocketConstructor) throw new Error("This Node runtime does not provide a WebSocket client");
 
   return new Promise((resolve, reject) => {
     const ws = new WebSocketConstructor(websocketUrl);
+    let nextId = 1;
+    const pending = new Map<number, { method: string; resolve: (value: Record<string, unknown>) => void; reject: (error: Error) => void }>();
+    let settled = false;
     const timer = setTimeout(() => {
+      settled = true;
       ws.close();
-      reject(new Error("Timed out waiting for WebDriver BiDi session.status"));
+      reject(new Error("Timed out waiting for WebDriver BiDi script proof"));
     }, timeoutMs);
 
-    ws.addEventListener("open", () => {
-      ws.send(JSON.stringify({ id: 1, method: "session.status", params: {} }));
-    });
-    ws.addEventListener("message", (event) => {
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       ws.close();
+      reject(error);
+    };
+    const finish = (value: { sessionStatus: unknown; scriptProof: BridgeProbeScriptProof }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      ws.close();
+      resolve(value);
+    };
+    const send = (method: string, params: Record<string, unknown> = {}) => {
+      const id = nextId++;
+      ws.send(JSON.stringify({ id, method, params }));
+      return new Promise<Record<string, unknown>>((resolveCommand, rejectCommand) => {
+        pending.set(id, { method, resolve: resolveCommand, reject: rejectCommand });
+      });
+    };
+
+    ws.addEventListener("open", async () => {
       try {
-        resolve(JSON.parse(String(event.data)));
-      } catch {
-        reject(new Error("WebDriver BiDi returned non-JSON session.status response"));
+        const sessionStatus = await send("session.status");
+        const session = await send("session.new", { capabilities: { alwaysMatch: { webSocketUrl: true } } });
+        const sessionId = sessionIdFromSessionNew(session.result);
+        const contentTree = await send("browsingContext.getTree");
+        const chromeTree = await send("browsingContext.getTree", { "moz:scope": "chrome" });
+        const contentContext = firstContextId(contentTree.result, "content");
+        const chromeContext = firstContextId(chromeTree.result, "chrome");
+        const contentEvaluation = await send("script.evaluate", {
+          expression: "(() => ({ href: location.href, title: document.title }))()",
+          awaitPromise: false,
+          target: { context: contentContext },
+          resultOwnership: "none"
+        });
+        const chromeEvaluation = await send("script.evaluate", {
+          expression: "(() => ({ href: location.href, title: document.title, hasZenWorkspaces: typeof gZenWorkspaces !== 'undefined', zenWorkspacesType: typeof gZenWorkspaces }))()",
+          awaitPromise: false,
+          target: { context: chromeContext },
+          resultOwnership: "none"
+        });
+
+        try {
+          await send("session.end");
+        } catch {
+          // The process is disposable and will be terminated by the caller.
+        }
+
+        finish({
+          sessionStatus,
+          scriptProof: {
+            sessionId,
+            contentContextCount: contextCount(contentTree.result),
+            chromeContextCount: contextCount(chromeTree.result),
+            contentContext,
+            chromeContext,
+            contentEvaluation: contentEvaluation.result,
+            chromeEvaluation: chromeEvaluation.result,
+            chromeUrl: remoteStringValue(chromeEvaluation.result, "href"),
+            zenWorkspacesDetected: remoteBooleanValue(chromeEvaluation.result, "hasZenWorkspaces") === true
+          }
+        });
+      } catch (error) {
+        fail(error instanceof Error ? error : new Error(String(error)));
       }
     });
+    ws.addEventListener("message", (event) => {
+      let message: unknown;
+      try {
+        message = JSON.parse(String(event.data));
+      } catch {
+        fail(new Error("WebDriver BiDi returned non-JSON response"));
+        return;
+      }
+      if (!isRecord(message)) return;
+      if (message.type === "event") return;
+      if (typeof message.id !== "number") return;
+      const command = pending.get(message.id);
+      if (!command) return;
+      pending.delete(message.id);
+      if (message.type === "success") command.resolve(message);
+      else command.reject(new Error(`${command.method}: ${String(message.error ?? "error")}: ${String(message.message ?? "unknown error")}`));
+    });
     ws.addEventListener("error", () => {
-      clearTimeout(timer);
-      reject(new Error("WebDriver BiDi WebSocket connection failed"));
+      fail(new Error("WebDriver BiDi WebSocket connection failed"));
     });
   });
+}
+
+function sessionIdFromSessionNew(value: unknown): string {
+  if (!isRecord(value) || typeof value.sessionId !== "string" || value.sessionId.length === 0) {
+    throw new Error("WebDriver BiDi session.new did not return a session id");
+  }
+  return value.sessionId;
+}
+
+function contextCount(value: unknown): number {
+  if (!isRecord(value) || !Array.isArray(value.contexts)) return 0;
+  return value.contexts.length;
+}
+
+function firstContextId(value: unknown, label: string): string {
+  if (!isRecord(value) || !Array.isArray(value.contexts)) {
+    throw new Error(`WebDriver BiDi ${label} context tree was missing contexts`);
+  }
+  const context = value.contexts[0];
+  if (!isRecord(context) || typeof context.context !== "string" || context.context.length === 0) {
+    throw new Error(`WebDriver BiDi ${label} context tree had no usable context id`);
+  }
+  return context.context;
+}
+
+function remoteStringValue(value: unknown, key: string): string | null {
+  const entry = remoteObjectEntry(value, key);
+  return entry && entry.type === "string" && typeof entry.value === "string" ? entry.value : null;
+}
+
+function remoteBooleanValue(value: unknown, key: string): boolean | null {
+  const entry = remoteObjectEntry(value, key);
+  return entry && entry.type === "boolean" && typeof entry.value === "boolean" ? entry.value : null;
+}
+
+function remoteObjectEntry(value: unknown, key: string): Record<string, unknown> | null {
+  if (!isRecord(value) || value.type !== "success" || !isRecord(value.result) || !Array.isArray(value.result.value)) return null;
+  for (const item of value.result.value) {
+    if (!Array.isArray(item) || item.length !== 2) continue;
+    if (item[0] === key && isRecord(item[1])) return item[1];
+  }
+  return null;
 }
 
 async function stopChild(child: ChildProcess): Promise<boolean> {

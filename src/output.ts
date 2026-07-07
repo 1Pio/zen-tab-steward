@@ -135,7 +135,7 @@ export function formatBridge(bridge: BridgeInspection, mode: "status" | "doctor"
 export function formatBridgeProbe(receipt: BridgeProbeReceipt, suggestedNextCommands: string[]): string {
   const lines = [
     "Zen live bridge probe",
-    `Status: ${receipt.ok ? "verified transport" : "failed"}`,
+    `Status: ${receipt.ok ? "verified disposable bridge proof" : "failed"}`,
     `App: ${receipt.appPath}`,
     `Disposable profile: ${receipt.profilePath}`,
     `Port: ${receipt.port}`,
@@ -145,8 +145,8 @@ export function formatBridgeProbe(receipt: BridgeProbeReceipt, suggestedNextComm
     `Duration: ${receipt.durationMs}ms`,
     "",
     "Boundary:",
-    "  This proves only a disposable WebDriver BiDi transport handshake.",
-    "  It does not attach to the live profile and does not enable live tab sorting."
+    "  This proves only disposable WebDriver BiDi transport, script execution, and Zen chrome object reachability.",
+    "  It does not attach to the live profile, mutate tabs, or enable live tab sorting."
   ];
 
   if (receipt.blockers.length > 0) {
@@ -161,7 +161,19 @@ export function formatBridgeProbe(receipt: BridgeProbeReceipt, suggestedNextComm
     lines.push("", "Session status:", `  ${JSON.stringify(receipt.sessionStatus)}`);
   }
 
-  if (receipt.logTail.length > 0) {
+  if (receipt.scriptProof !== null) {
+    lines.push(
+      "",
+      "Script proof:",
+      `  session: ${receipt.scriptProof.sessionId}`,
+      `  content contexts: ${receipt.scriptProof.contentContextCount}`,
+      `  chrome contexts: ${receipt.scriptProof.chromeContextCount}`,
+      `  chrome URL: ${receipt.scriptProof.chromeUrl ?? "(unknown)"}`,
+      `  gZenWorkspaces: ${receipt.scriptProof.zenWorkspacesDetected ? "detected" : "not detected"}`
+    );
+  }
+
+  if (!receipt.ok && receipt.logTail.length > 0) {
     lines.push("", "Log tail:", ...receipt.logTail.map((line) => `  ${line}`));
   }
 

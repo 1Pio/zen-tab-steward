@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bidiBaseUrlFromLog, inspectBridge, runBridgeProbe, summarizeBridgeProcess, validateBidiSessionStatus } from "../dist/bridge.js";
+import { bidiBaseUrlFromLog, inspectBridge, runBridgeProbe, summarizeBridgeProcess, validateBidiSessionStatus, validateBridgeProbeScriptProof } from "../dist/bridge.js";
 import { parseZenProcesses } from "../dist/processes.js";
 
 const profilePath = "/Users/main/Library/Application Support/zen/Profiles/4le6r9n3.Default (release)";
@@ -97,6 +97,30 @@ test("validates WebDriver BiDi session.status success shape", () => {
   assert.match(validateBidiSessionStatus({ type: "success", id: 1, result: { ready: false, message: "busy" } }), /not ready/);
 });
 
+test("validates disposable script proof shape and Zen chrome reachability", () => {
+  const proof = {
+    sessionId: "session-1",
+    contentContextCount: 1,
+    chromeContextCount: 1,
+    contentContext: "content-1",
+    chromeContext: "chrome-1",
+    contentEvaluation: remoteObject({ href: "about:blank" }),
+    chromeEvaluation: remoteObject({
+      href: "chrome://browser/content/browser.xhtml",
+      hasZenWorkspaces: true,
+      zenWorkspacesType: "object"
+    }),
+    chromeUrl: "chrome://browser/content/browser.xhtml",
+    zenWorkspacesDetected: true
+  };
+
+  assert.equal(validateBridgeProbeScriptProof(proof), null);
+  assert.match(validateBridgeProbeScriptProof({ ...proof, contentEvaluation: remoteObject({ href: "chrome://browser/content/browser.xhtml" }) }), /content script proof/);
+  assert.match(validateBridgeProbeScriptProof({ ...proof, chromeEvaluation: remoteObject({ href: "about:blank", hasZenWorkspaces: true }) }), /chrome context/);
+  assert.match(validateBridgeProbeScriptProof({ ...proof, chromeEvaluation: remoteObject({ href: "chrome://browser/content/browser.xhtml", hasZenWorkspaces: false, zenWorkspacesType: "object" }) }), /gZenWorkspaces/);
+  assert.match(validateBridgeProbeScriptProof({ ...proof, chromeEvaluation: remoteObject({ href: "chrome://browser/content/browser.xhtml", hasZenWorkspaces: true, zenWorkspacesType: "function" }) }), /as an object/);
+});
+
 test("bridge probe reports spawn failures as blockers and cleans up temp profile", async () => {
   const receipt = await runBridgeProbe({ appPath: "/definitely/not/zen", timeoutMs: 1000 });
 
@@ -129,4 +153,17 @@ function context(overrides) {
 
 function processArgs() {
   return `/Applications/Zen.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container -profile ${profilePath} --remote-debugging-port 9222 --remote-allow-system-access`;
+}
+
+function remoteObject(entries) {
+  return {
+    type: "success",
+    result: {
+      type: "object",
+      value: Object.entries(entries).map(([key, value]) => [
+        key,
+        typeof value === "boolean" ? { type: "boolean", value } : { type: "string", value }
+      ])
+    }
+  };
 }
