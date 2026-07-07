@@ -46,6 +46,7 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
   const backupJson = JSON.parse(backup.stdout);
   assert.equal(backupJson.ok, true);
   assert.equal(backupJson.data.manifest.files.length, 3);
+  const preSortBackupId = backupJson.data.manifest.id;
 
   const backupList = await execFileAsync("node", ["dist/cli.js", "backup", "list", "--json"], { env });
   const backupListJson = JSON.parse(backupList.stdout);
@@ -120,6 +121,14 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
   const appliedSession = await readJsonLz4(join(fixture.profilePath, "zen-sessions.jsonlz4"));
   assert.equal(appliedSession.tabs[2].zenWorkspace, "w3");
 
+  const restoreApplied = await execFileAsync("node", ["dist/cli.js", "backup", "restore", preSortBackupId, "--json"], { env });
+  const restoreAppliedJson = JSON.parse(restoreApplied.stdout);
+  assert.equal(restoreAppliedJson.ok, true);
+  assert.equal(restoreAppliedJson.data.receipt.restoredBackupId, preSortBackupId);
+  assert.ok(restoreAppliedJson.data.receipt.safetyBackupId);
+  const restoredSession = await readJsonLz4(join(fixture.profilePath, "zen-sessions.jsonlz4"));
+  assert.equal(restoredSession.tabs[2].zenWorkspace, "w1");
+
   const sortWithUnknownFlag = spawnSync("node", ["dist/cli.js", "sort", "Space", "--typo"], {
     env,
     encoding: "utf8"
@@ -145,7 +154,7 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
     env,
     encoding: "utf8"
   });
-  assert.equal(restore.status, 2);
+  assert.equal(restore.status, 1);
   assert.equal(JSON.parse(restore.stdout).ok, false);
 
   const configPath = await execFileAsync("node", ["dist/cli.js", "config", "path"], { env });

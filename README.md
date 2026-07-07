@@ -54,6 +54,8 @@ node dist/cli.js status
 
 Each backup includes timestamped `.bak` files and a timestamped `manifest.json` with file sizes, SHA-256 hashes, profile path, Zen running state, command, and `zts` version.
 
+`zts backup restore <backup-id>` restores a saved backup only when Zen is closed. Restore preflights every backup target and hash before any profile write, creates a fresh safety backup of the current profile first, writes each restored file through a temp file and rename, verifies restored hashes, and writes a restore receipt.
+
 `zts sort [workspace] --preview` produces a safe read-only preview. It uses deterministic domain rules where a matching destination workspace exists, skips pinned tabs and essentials by default, and treats grouped/foldered tabs as protected so they are not split. Every tab from the source workspace is classified as move, skip, review, or blocked.
 
 Preview and dry-run commands exit successfully because they do not write. Plain `zts sort [workspace]` and `zts sort [workspace] --apply` attempt to apply eligible planned moves using the selected backend. Today, only the offline session backend can apply, and only when Zen is closed and `zen-sessions.jsonlz4` is the selected session source. If Zen is running, apply refuses and shows the same plan plus blockers.
@@ -102,11 +104,12 @@ The current implementation has read, backup, preview, and offline session apply 
 - It reads Zen profile metadata and session files.
 - It parses `mozLz40\0` JSONLZ4 session files.
 - It copies files for backups.
-- It refuses restore paths.
+- It restores backups only when Zen is closed.
 - It refuses sort apply while Zen is running.
 - It refuses live backend apply because no safe live bridge exists yet.
 - It creates a fresh backup before offline session mutation.
 - It writes an apply receipt under the state directory after offline apply.
+- It creates a fresh safety backup and restore receipt before/after offline restore.
 - It preserves unknown Zen session fields by mutating only planned tab workspace ids.
 - It does not mutate files inside the active Zen profile while Zen is running.
 

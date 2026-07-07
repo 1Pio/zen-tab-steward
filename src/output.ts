@@ -1,4 +1,4 @@
-import { BackupManifest } from "./backup.js";
+import { BackupManifest, RestoreReceipt } from "./backup.js";
 import { ProfileContext } from "./profile.js";
 import { SessionSummary, TabSummary } from "./session.js";
 import { VERSION } from "./version.js";
@@ -124,6 +124,19 @@ export function formatBackup(manifest: BackupManifest): string {
 export function formatBackupList(manifests: BackupManifest[]): string {
   if (manifests.length === 0) return "No backups found";
   return ["Backups", ...manifests.map((manifest) => `${manifest.id}  ${manifest.files.length} files  ${manifest.profileId}`)].join("\n");
+}
+
+export function formatRestore(receipt: RestoreReceipt): string {
+  return [
+    "Backup restored",
+    `id: ${receipt.id}`,
+    `restored backup: ${receipt.restoredBackupId}`,
+    `safety backup: ${receipt.safetyBackupId}`,
+    `profile: ${receipt.profilePath}`,
+    `files: ${receipt.files.length}`,
+    `receipt: ${receipt.receiptPath}`,
+    ...receipt.files.map((file) => `  - ${file.source} (${file.size} bytes, verified)`)
+  ].join("\n");
 }
 
 export function formatSortPreview(plan: SortPlan, applyBlockers: string[], suggestedNextCommands: string[], applyReceipt?: ApplyReceipt): string {

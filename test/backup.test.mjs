@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createBackup, listBackups } from "../dist/backup.js";
+import { createBackup, listBackups, restoreBackup } from "../dist/backup.js";
 
 test("creates timestamped bak files plus a manifest without mutating source files", async () => {
   const temp = await mkdtemp(join(tmpdir(), "zts-backup-"));
@@ -46,4 +46,146 @@ test("creates timestamped bak files plus a manifest without mutating source file
   const listed = await listBackups("Profile A");
   assert.equal(listed.length, 1);
   assert.equal(listed[0].id, manifest.id);
+});
+
+test("restores a backup only when Zen is closed and writes a safety backup receipt", async () => {
+  const temp = await mkdtemp(join(tmpdir(), "zts-restore-"));
+  const oldStateDir = process.env.ZTS_STATE_DIR;
+  process.env.ZTS_STATE_DIR = join(temp, "state");
+
+  try {
+    const profilePath = join(temp, "profile");
+    await mkdir(join(profilePath, "sessionstore-backups"), { recursive: true });
+    const sessionPath = join(profilePath, "zen-sessions.jsonlz4");
+    const previousPath = join(profilePath, "sessionstore-backups", "previous.jsonlz4");
+    await writeFile(sessionPath, "original-session");
+    await writeFile(previousPath, "original-previous");
+
+    const context = {
+      appSupportDir: temp,
+      running: false,
+      runningProcesses: [],
+      profile: {
+        id: "Profile B",
+        name: "Profile B",
+        path: profilePath,
+        isDefault: true,
+        fromInstallDefault: true
+      },
+      sessionFile: {
+        kind: "zen-sessions",
+        path: sessionPath,
+        exists: true,
+        size: 16,
+        modifiedMs: 1
+      }
+    };
+
+    const manifest = await createBackup(context, "zts backup");
+    await writeFile(sessionPath, "changed-session");
+    await writeFile(previousPath, "changed-previous");
+
+    const receipt = await restoreBackup(context, manifest.id, `zts backup restore ${manifest.id}`);
+
+    assert.equal(receipt.restoredBackupId, manifest.id);
+    assert.ok(receipt.safetyBackupId);
+    assert.equal(receipt.files.length, 2);
+    assert.ok(receipt.files.every((file) => file.verified));
+    assert.equal(await readFile(sessionPath, "utf8"), "original-session");
+    assert.equal(await readFile(previousPath, "utf8"), "original-previous");
+    assert.equal((await listBackups("Profile B")).length, 2);
+  } finally {
+    if (oldStateDir === undefined) delete process.env.ZTS_STATE_DIR;
+    else process.env.ZTS_STATE_DIR = oldStateDir;
+  }
+});
+
+test("restore refuses while Zen is running", async () => {
+  const temp = await mkdtemp(join(tmpdir(), "zts-restore-running-"));
+  const oldStateDir = process.env.ZTS_STATE_DIR;
+  process.env.ZTS_STATE_DIR = join(temp, "state");
+
+  try {
+    const profilePath = join(temp, "profile");
+    await mkdir(profilePath, { recursive: true });
+    const sessionPath = join(profilePath, "zen-sessions.jsonlz4");
+    await writeFile(sessionPath, "session");
+    const context = {
+      appSupportDir: temp,
+      running: true,
+      runningProcesses: [],
+      profile: {
+        id: "Profile C",
+        name: "Profile C",
+        path: profilePath,
+        isDefault: true,
+        fromInstallDefault: true
+      },
+      sessionFile: {
+        kind: "zen-sessions",
+        path: sessionPath,
+        exists: true,
+        size: 7,
+        modifiedMs: 1
+      }
+    };
+
+    await assert.rejects(() => restoreBackup(context, "anything", "zts backup restore anything"), /Zen is running/);
+  } finally {
+    if (oldStateDir === undefined) delete process.env.ZTS_STATE_DIR;
+    else process.env.ZTS_STATE_DIR = oldStateDir;
+  }
+});
+
+test("restore preflights all backup files before mutating any profile file", async () => {
+  const temp = await mkdtemp(join(tmpdir(), "zts-restore-preflight-"));
+  const oldStateDir = process.env.ZTS_STATE_DIR;
+  process.env.ZTS_STATE_DIR = join(temp, "state");
+
+  try {
+    const profilePath = join(temp, "profile");
+    await mkdir(join(profilePath, "sessionstore-backups"), { recursive: true });
+    const sessionPath = join(profilePath, "zen-sessions.jsonlz4");
+    const previousPath = join(profilePath, "sessionstore-backups", "previous.jsonlz4");
+    await writeFile(sessionPath, "original-session");
+    await writeFile(previousPath, "original-previous");
+    const context = {
+      appSupportDir: temp,
+      running: false,
+      runningProcesses: [],
+      profile: {
+        id: "Profile D",
+        name: "Profile D",
+        path: profilePath,
+        isDefault: true,
+        fromInstallDefault: true
+      },
+      sessionFile: {
+        kind: "zen-sessions",
+        path: sessionPath,
+        exists: true,
+        size: 16,
+        modifiedMs: 1
+      }
+    };
+
+    const manifest = await createBackup(context, "zts backup");
+    const previousBackup = manifest.files.find((file) => file.source === previousPath);
+    assert.ok(previousBackup);
+    await writeFile(sessionPath, "changed-session");
+    await writeFile(previousPath, "changed-previous");
+    await writeFile(previousBackup.backup, "corrupt-previous");
+
+    await assert.rejects(
+      () => restoreBackup(context, manifest.id, `zts backup restore ${manifest.id}`),
+      /Backup (size|hash) mismatch/
+    );
+
+    assert.equal(await readFile(sessionPath, "utf8"), "changed-session");
+    assert.equal(await readFile(previousPath, "utf8"), "changed-previous");
+    assert.equal((await listBackups("Profile D")).length, 1);
+  } finally {
+    if (oldStateDir === undefined) delete process.env.ZTS_STATE_DIR;
+    else process.env.ZTS_STATE_DIR = oldStateDir;
+  }
 });

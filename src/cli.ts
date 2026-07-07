@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import { applySortPlanOffline, offlineApplyBlockers } from "./apply.js";
-import { createBackup, listBackups } from "./backup.js";
+import { createBackup, listBackups, restoreBackup } from "./backup.js";
 import { addDomainRuleInContents, getConfigValue, loadConfig, saveConfigContents, setConfigValueInContents, ZtsConfig } from "./config.js";
-import { envelope, formatBackup, formatBackupList, formatSortPreview, formatStatus, formatTabs, formatWorkspaces, printJson } from "./output.js";
+import { envelope, formatBackup, formatBackupList, formatRestore, formatSortPreview, formatStatus, formatTabs, formatWorkspaces, printJson } from "./output.js";
 import { discoverProfileContext } from "./profile.js";
 import { listTabs, loadSession, loadSessionSummary, summarizeSession, withWorkspacePolicy } from "./session.js";
 import { classifyDomainForWorkspace, planSortPreview, SortInputs } from "./sort.js";
@@ -165,7 +165,7 @@ program
 
 program
   .command("backup")
-  .description("Create, list, or refuse restore of read-only backups")
+  .description("Create, list, or restore backups")
   .argument("[action]", "optional action: list or restore")
   .argument("[backup-id]", "backup id for restore")
   .option("--json", "print stable JSON output")
@@ -186,16 +186,24 @@ program
     if (action === "restore") {
       await runCommand("backup restore", options, async () => {
         const context = await discoverProfileContext();
-        const blockers = context.running
-          ? ["Restore is refused because Zen is running", "Offline restore is not implemented in this tranche"]
-          : ["Offline restore is not implemented in this tranche"];
-        const suggestedNextCommands = ["zts backup list", "zts status"];
-        if (options.json) {
-          printJson(envelope("backup restore", { backupId, profile: context.profile }, { ok: false, blockers, suggestedNextCommands }));
-        } else {
-          process.stderr.write(`Restore refused for ${backupId ?? "(missing backup id)"}\n${blockers.map((b) => `- ${b}`).join("\n")}\n`);
+        if (context.running) {
+          const blockers = ["Restore is refused because Zen is running"];
+          const suggestedNextCommands = ["zts backup list", "zts status"];
+          if (options.json) {
+            printJson(envelope("backup restore", { backupId, profile: context.profile }, { ok: false, blockers, suggestedNextCommands }));
+          } else {
+            process.stderr.write(`Restore refused for ${backupId ?? "(missing backup id)"}\n${blockers.map((b) => `- ${b}`).join("\n")}\n`);
+          }
+          process.exitCode = 2;
+          return;
         }
-        process.exitCode = 2;
+
+        const receipt = await restoreBackup(context, backupId, `zts backup restore ${backupId ?? ""}`.trim());
+        if (options.json) {
+          printJson(envelope("backup restore", { profile: context.profile, receipt }));
+        } else {
+          process.stdout.write(`${formatRestore(receipt)}\n`);
+        }
       });
       return;
     }
