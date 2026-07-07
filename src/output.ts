@@ -146,7 +146,7 @@ export function formatBridgeProbe(receipt: BridgeProbeReceipt, suggestedNextComm
     "",
     "Boundary:",
     "  This proves only disposable WebDriver BiDi transport, script execution, and Zen chrome object reachability.",
-    "  It does not attach to the live profile, mutate tabs, or enable live tab sorting."
+    "  It mutates only the disposable temp profile; it does not attach to the live profile, mutate live tabs, or enable live tab sorting."
   ];
 
   if (receipt.blockers.length > 0) {
@@ -171,6 +171,13 @@ export function formatBridgeProbe(receipt: BridgeProbeReceipt, suggestedNextComm
       `  chrome URL: ${receipt.scriptProof.chromeUrl ?? "(unknown)"}`,
       `  gZenWorkspaces: ${receipt.scriptProof.zenWorkspacesDetected ? "detected" : "not detected"}`
     );
+    if (receipt.scriptProof.workspaceOperation) {
+      lines.push(
+        `  temp-profile workspace operation: moved disposable tab`,
+        `  move: ${receipt.scriptProof.workspaceOperation.beforeWorkspaceId} -> ${receipt.scriptProof.workspaceOperation.afterWorkspaceId}`,
+        `  source contains moved tab: ${receipt.scriptProof.workspaceOperation.sourceContainsTab ? "yes" : "no"}`
+      );
+    }
   }
 
   if (!receipt.ok && receipt.logTail.length > 0) {

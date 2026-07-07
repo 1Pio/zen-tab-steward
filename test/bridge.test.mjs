@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bidiBaseUrlFromLog, inspectBridge, runBridgeProbe, summarizeBridgeProcess, validateBidiSessionStatus, validateBridgeProbeScriptProof } from "../dist/bridge.js";
+import { bidiBaseUrlFromLog, inspectBridge, runBridgeProbe, summarizeBridgeProcess, validateBidiSessionStatus, validateBridgeProbeScriptProof, validateBridgeProbeWorkspaceOperation } from "../dist/bridge.js";
 import { parseZenProcesses } from "../dist/processes.js";
 
 const profilePath = "/Users/main/Library/Application Support/zen/Profiles/4le6r9n3.Default (release)";
@@ -110,6 +110,7 @@ test("validates disposable script proof shape and Zen chrome reachability", () =
       hasZenWorkspaces: true,
       zenWorkspacesType: "object"
     }),
+    workspaceOperation: workspaceOperation(),
     chromeUrl: "chrome://browser/content/browser.xhtml",
     zenWorkspacesDetected: true
   };
@@ -119,6 +120,14 @@ test("validates disposable script proof shape and Zen chrome reachability", () =
   assert.match(validateBridgeProbeScriptProof({ ...proof, chromeEvaluation: remoteObject({ href: "about:blank", hasZenWorkspaces: true }) }), /chrome context/);
   assert.match(validateBridgeProbeScriptProof({ ...proof, chromeEvaluation: remoteObject({ href: "chrome://browser/content/browser.xhtml", hasZenWorkspaces: false, zenWorkspacesType: "object" }) }), /gZenWorkspaces/);
   assert.match(validateBridgeProbeScriptProof({ ...proof, chromeEvaluation: remoteObject({ href: "chrome://browser/content/browser.xhtml", hasZenWorkspaces: true, zenWorkspacesType: "function" }) }), /as an object/);
+});
+
+test("validates disposable workspace operation proof", () => {
+  assert.equal(validateBridgeProbeWorkspaceOperation(workspaceOperation()), null);
+  assert.match(validateBridgeProbeWorkspaceOperation({ ...workspaceOperation(), targetWorkspaceId: "source" }), /same source and target/);
+  assert.match(validateBridgeProbeWorkspaceOperation({ ...workspaceOperation(), afterWorkspaceId: "target" }), /did not move/);
+  assert.match(validateBridgeProbeWorkspaceOperation({ ...workspaceOperation(), tabPinned: true }), /pinned/);
+  assert.match(validateBridgeProbeWorkspaceOperation({ ...workspaceOperation(), tabEssential: true }), /essential/);
 });
 
 test("bridge probe reports spawn failures as blockers and cleans up temp profile", async () => {
@@ -165,5 +174,21 @@ function remoteObject(entries) {
         typeof value === "boolean" ? { type: "boolean", value } : { type: "string", value }
       ])
     }
+  };
+}
+
+function workspaceOperation() {
+  return {
+    initialWorkspaceCount: 1,
+    finalWorkspaceCount: 2,
+    sourceWorkspaceId: "source",
+    targetWorkspaceId: "target",
+    beforeWorkspaceId: "target",
+    afterWorkspaceId: "source",
+    moved: true,
+    sourceContainsTab: true,
+    targetContainsTab: false,
+    tabPinned: false,
+    tabEssential: false
   };
 }

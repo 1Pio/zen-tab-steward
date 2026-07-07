@@ -62,7 +62,7 @@ Each backup includes timestamped `.bak` files and a timestamped `manifest.json` 
 
 `zts bridge status` and `zts bridge doctor` inspect the live-backend boundary without changing Zen state. They report whether the current Zen browser process has any candidate privileged remote-control launch flags, list the current blockers, and still report live apply as unavailable until a safe browser-chrome execution client exists.
 
-`zts bridge probe` launches a disposable headless Zen instance with a temporary profile, checks local WebDriver BiDi, creates a session, executes harmless script in a content context, executes harmless script in Zen browser chrome, verifies `gZenWorkspaces` is reachable, then terminates the process and removes the temporary profile. It is still a proof only: it does not attach to the live profile and does not move tabs.
+`zts bridge probe` launches a disposable headless Zen instance with a temporary profile, checks local WebDriver BiDi, creates a session, executes harmless script in a content context, executes harmless script in Zen browser chrome, verifies `gZenWorkspaces` is reachable, performs one disposable temp-profile workspace tab move through Zen internals, then terminates the process and removes the temporary profile. It is still a proof only: it does not attach to the live profile and does not move live tabs.
 
 `zts sort [workspace] --preview` produces a safe read-only preview. It uses deterministic domain rules where a matching destination workspace exists, skips pinned tabs and essentials by default, and represents grouped/foldered structures as single review entities so they are not split. Every sortable entity from the source workspace is classified as move, skip, review, or blocked.
 
@@ -128,7 +128,7 @@ The current implementation has read, backup, preview, and offline session apply 
 - It refuses sort apply while Zen is running.
 - It refuses live backend apply because no safe live bridge exists yet.
 - It can inspect live-backend launch evidence with `zts bridge status` and `zts bridge doctor`, but those commands are read-only and do not enable live apply.
-- It can run a disposable `zts bridge probe` against a temporary headless profile to verify WebDriver BiDi transport, script execution, and Zen chrome object reachability without touching live tabs.
+- It can run a disposable `zts bridge probe` against a temporary headless profile to verify WebDriver BiDi transport, script execution, Zen chrome object reachability, and one temp-profile workspace tab move without touching live tabs.
 - It creates a fresh backup before offline session mutation.
 - It writes an apply receipt under the state directory after offline apply.
 - It can list and re-verify apply receipts without writing Zen state.

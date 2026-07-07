@@ -78,8 +78,23 @@ export interface BridgeProbeScriptProof {
   chromeContext: string;
   contentEvaluation: unknown;
   chromeEvaluation: unknown;
+  workspaceOperation: BridgeProbeWorkspaceOperationProof | null;
   chromeUrl: string | null;
   zenWorkspacesDetected: boolean;
+}
+
+export interface BridgeProbeWorkspaceOperationProof {
+  initialWorkspaceCount: number;
+  finalWorkspaceCount: number;
+  sourceWorkspaceId: string;
+  targetWorkspaceId: string;
+  beforeWorkspaceId: string;
+  afterWorkspaceId: string;
+  moved: boolean;
+  sourceContainsTab: boolean;
+  targetContainsTab: boolean;
+  tabPinned: boolean;
+  tabEssential: boolean;
 }
 
 export interface BidiSessionStatusSuccess {
@@ -127,6 +142,7 @@ export function inspectBridge(context: ProfileContext): BridgeInspection {
       "--remote-allow-origins <origins>"
     ],
     candidateInternalApis: [
+      "gZenWorkspaces.moveTabToWorkspace(...)",
       "gZenWorkspaces.changeWorkspaceWithID(...)",
       "gZenWorkspaces.saveWorkspace(...)",
       "ZenWindowSync.moveTabsToSyncedWorkspace(...)"
@@ -362,6 +378,25 @@ export function validateBridgeProbeScriptProof(value: unknown): string | null {
   if (remoteStringValue(value.chromeEvaluation, "zenWorkspacesType") !== "object") {
     return "WebDriver BiDi chrome script proof did not verify gZenWorkspaces as an object";
   }
+  const operationError = validateBridgeProbeWorkspaceOperation(value.workspaceOperation);
+  if (operationError) return operationError;
+  return null;
+}
+
+export function validateBridgeProbeWorkspaceOperation(value: unknown): string | null {
+  if (!isRecord(value)) return "WebDriver BiDi workspace operation proof was not returned";
+  if (typeof value.initialWorkspaceCount !== "number" || value.initialWorkspaceCount < 1) return "WebDriver BiDi workspace operation proof had no initial workspaces";
+  if (typeof value.finalWorkspaceCount !== "number" || value.finalWorkspaceCount < value.initialWorkspaceCount + 1) return "WebDriver BiDi workspace operation proof did not create a disposable workspace";
+  if (typeof value.sourceWorkspaceId !== "string" || value.sourceWorkspaceId.length === 0) return "WebDriver BiDi workspace operation proof had no source workspace id";
+  if (typeof value.targetWorkspaceId !== "string" || value.targetWorkspaceId.length === 0) return "WebDriver BiDi workspace operation proof had no target workspace id";
+  if (value.sourceWorkspaceId === value.targetWorkspaceId) return "WebDriver BiDi workspace operation proof used the same source and target workspace";
+  if (value.beforeWorkspaceId !== value.targetWorkspaceId) return "WebDriver BiDi workspace operation proof did not start the disposable tab in the target workspace";
+  if (value.afterWorkspaceId !== value.sourceWorkspaceId) return "WebDriver BiDi workspace operation proof did not move the disposable tab to the source workspace";
+  if (value.moved !== true) return "WebDriver BiDi workspace operation proof did not report a successful move";
+  if (value.sourceContainsTab !== true) return "WebDriver BiDi workspace operation proof did not verify the source container contains the moved tab";
+  if (value.targetContainsTab !== false) return "WebDriver BiDi workspace operation proof did not verify the target container released the moved tab";
+  if (value.tabPinned !== false) return "WebDriver BiDi workspace operation proof unexpectedly used a pinned tab";
+  if (value.tabEssential !== false) return "WebDriver BiDi workspace operation proof unexpectedly used an essential tab";
   return null;
 }
 
@@ -465,6 +500,12 @@ async function runBidiScriptProof(
           target: { context: chromeContext },
           resultOwnership: "none"
         });
+        const workspaceOperationEvaluation = await send("script.evaluate", {
+          expression: disposableWorkspaceOperationScript(),
+          awaitPromise: true,
+          target: { context: chromeContext },
+          resultOwnership: "none"
+        });
 
         try {
           await send("session.end");
@@ -482,6 +523,7 @@ async function runBidiScriptProof(
             chromeContext,
             contentEvaluation: contentEvaluation.result,
             chromeEvaluation: chromeEvaluation.result,
+            workspaceOperation: workspaceOperationFromEvaluation(workspaceOperationEvaluation.result),
             chromeUrl: remoteStringValue(chromeEvaluation.result, "href"),
             zenWorkspacesDetected: remoteBooleanValue(chromeEvaluation.result, "hasZenWorkspaces") === true
           }
@@ -536,9 +578,75 @@ function firstContextId(value: unknown, label: string): string {
   return context.context;
 }
 
+function disposableWorkspaceOperationScript(): string {
+  return `(() => {
+    const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+    return (async () => {
+      await window.gZenWorkspaces.promiseInitialized;
+      const initial = gZenWorkspaces.getWorkspaces().map(workspace => ({ uuid: workspace.uuid, name: workspace.name }));
+      const source = gZenWorkspaces.getWorkspaceFromId(gZenWorkspaces.activeWorkspace) || initial[0];
+      if (!source?.uuid) throw new Error("No source workspace");
+      const target = await gZenWorkspaces.createAndSaveWorkspace("ZTS Probe Target", undefined, false, 0);
+      await sleep(250);
+      if (!target?.uuid) throw new Error("No target workspace created");
+      const principal = Services.scriptSecurityManager.getSystemPrincipal();
+      let tab = null;
+      try {
+        tab = gBrowser.addTab("about:blank", { triggeringPrincipal: principal });
+        await sleep(250);
+        const beforeWorkspace = tab.getAttribute("zen-workspace-id");
+        const moved = gZenWorkspaces.moveTabToWorkspace(tab, source.uuid);
+        await sleep(250);
+        const afterWorkspace = tab.getAttribute("zen-workspace-id");
+        const sourceContains = !!gZenWorkspaces.workspaceElement(source.uuid)?.tabsContainer?.contains(tab);
+        const targetContains = !!gZenWorkspaces.workspaceElement(target.uuid)?.tabsContainer?.contains(tab);
+        return {
+          initialWorkspaceCount: initial.length,
+          finalWorkspaceCount: gZenWorkspaces.getWorkspaces().length,
+          sourceWorkspaceId: source.uuid,
+          targetWorkspaceId: target.uuid,
+          beforeWorkspaceId: beforeWorkspace,
+          afterWorkspaceId: afterWorkspace,
+          moved,
+          sourceContainsTab: sourceContains,
+          targetContainsTab: targetContains,
+          tabPinned: tab.pinned,
+          tabEssential: tab.hasAttribute("zen-essential")
+        };
+      } finally {
+        if (tab && !tab.closing) {
+          gBrowser.removeTab(tab, { skipPermitUnload: true, animate: false });
+        }
+      }
+    })();
+  })()`;
+}
+
+function workspaceOperationFromEvaluation(value: unknown): BridgeProbeWorkspaceOperationProof | null {
+  if (!isRecord(value) || value.type !== "success") return null;
+  return {
+    initialWorkspaceCount: remoteNumberValue(value, "initialWorkspaceCount") ?? 0,
+    finalWorkspaceCount: remoteNumberValue(value, "finalWorkspaceCount") ?? 0,
+    sourceWorkspaceId: remoteStringValue(value, "sourceWorkspaceId") ?? "",
+    targetWorkspaceId: remoteStringValue(value, "targetWorkspaceId") ?? "",
+    beforeWorkspaceId: remoteStringValue(value, "beforeWorkspaceId") ?? "",
+    afterWorkspaceId: remoteStringValue(value, "afterWorkspaceId") ?? "",
+    moved: remoteBooleanValue(value, "moved") === true,
+    sourceContainsTab: remoteBooleanValue(value, "sourceContainsTab") === true,
+    targetContainsTab: remoteBooleanValue(value, "targetContainsTab") === true,
+    tabPinned: remoteBooleanValue(value, "tabPinned") === true,
+    tabEssential: remoteBooleanValue(value, "tabEssential") === true
+  };
+}
+
 function remoteStringValue(value: unknown, key: string): string | null {
   const entry = remoteObjectEntry(value, key);
   return entry && entry.type === "string" && typeof entry.value === "string" ? entry.value : null;
+}
+
+function remoteNumberValue(value: unknown, key: string): number | null {
+  const entry = remoteObjectEntry(value, key);
+  return entry && entry.type === "number" && typeof entry.value === "number" ? entry.value : null;
 }
 
 function remoteBooleanValue(value: unknown, key: string): boolean | null {

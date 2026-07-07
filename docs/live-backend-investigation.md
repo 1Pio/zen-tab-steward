@@ -6,7 +6,7 @@ Date: 2026-07-07
 
 `zts bridge status` and `zts bridge doctor` now make this boundary explicit in the CLI. They are read-only inspection commands; they do not start Zen, attach to a debugger, open sockets, write profile files, install a service, install a mod, or enable live apply.
 
-`zts bridge probe` is a separate disposable bridge proof. It starts a headless Zen process with a temporary profile, local remote debugging flags, and `--remote-allow-system-access`, verifies WebDriver BiDi `session.status`, creates a session, executes harmless script in a content context, executes harmless script in Zen browser chrome, verifies `gZenWorkspaces` is reachable, then terminates the process and removes the temporary profile. It does not attach to the live profile or move tabs.
+`zts bridge probe` is a separate disposable bridge proof. It starts a headless Zen process with a temporary profile, local remote debugging flags, and `--remote-allow-system-access`, verifies WebDriver BiDi `session.status`, creates a session, executes harmless script in a content context, executes harmless script in Zen browser chrome, verifies `gZenWorkspaces` is reachable, performs one temp-profile workspace tab move through Zen internals, then terminates the process and removes the temporary profile. It does not attach to the live profile or move live tabs.
 
 ## Local Evidence
 
@@ -76,11 +76,21 @@ browsingContext.getTree {"moz:scope":"chrome"} -> chrome://browser/content/brows
 script.evaluate in that chrome context -> typeof gZenWorkspaces === "object"
 ```
 
+A disposable workspace operation through Zen internals also worked:
+
+```text
+gZenWorkspaces.createAndSaveWorkspace("ZTS Probe Target", ...)
+gBrowser.addTab("about:blank", ...)
+gZenWorkspaces.moveTabToWorkspace(tab, sourceWorkspaceId)
+```
+
+The probe validates that the disposable tab started in the target workspace, ended in the source workspace, moved via Zen's own method, was present in the source workspace container after the move, and was not pinned or essential.
+
 ## Current Blocker
 
 No safe live-profile tab movement backend has been proven.
 
-Until code execution and one no-surprises workspace operation are proven against the intended live Zen profile/window, `zts` must not claim live sorting support and must not attempt UI automation, extension setup, Zen mod installation, daemon/autostart setup, or active session-file writes.
+Until the same kind of operation is proven against the intended live Zen profile/window with explicit attachment gates, `zts` must not claim live sorting support and must not attempt UI automation, extension setup, Zen mod installation, daemon/autostart setup, or active session-file writes.
 
 `zts bridge doctor` records the current blockers:
 
