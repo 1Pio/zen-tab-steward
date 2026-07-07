@@ -1,4 +1,4 @@
-import { RawTab, RawZenSession, SessionSummary, WorkspaceSummary } from "./session.js";
+import { RawFolder, RawGroup, RawTab, RawZenSession, SessionSummary, WorkspaceSummary } from "./session.js";
 
 export interface SortInputs {
   preview: boolean;
@@ -21,10 +21,14 @@ export type PlanAction = "move" | "skip" | "review" | "blocked";
 export interface EntityPlan {
   entityId: string;
   tabIndex: number;
-  entityType: "tab";
+  tabIndices: number[];
+  childTabCount: number;
+  entityType: "tab" | "folder" | "group";
   title: string;
   url: string;
+  urls: string[];
   domain: string;
+  domains: string[];
   sourceWorkspaceId: string;
   sourceWorkspaceName: string;
   destinationWorkspaceId: string | null;
@@ -74,13 +78,34 @@ export function planSortPreview(
   const workspaceByName = workspaceLookup(summary.workspaces);
   const domainRules = effectiveDomainRules(inputs.domainRules);
   const tabs = Array.isArray(session.tabs) ? session.tabs : [];
+  const folders = Array.isArray(session.folders) ? session.folders : [];
+  const groups = Array.isArray(session.groups) ? session.groups : [];
   const plannedActions: EntityPlan[] = [];
   const skippedActions: EntityPlan[] = [];
   const reviewActions: EntityPlan[] = [];
   const blockedActions: EntityPlan[] = [];
+  const emittedStructuredEntities = new Set<string>();
 
   tabs.forEach((tab, index) => {
     if (tab.zenWorkspace !== sourceWorkspace.id) return;
+    const structuredKey = structuredEntityKey(tab);
+    if (structuredKey) {
+      if (!emittedStructuredEntities.has(structuredKey)) {
+        emittedStructuredEntities.add(structuredKey);
+        const structuredEntity = describeStructuredEntity(tabs, folders, groups, structuredKey, sourceWorkspace, index);
+        classifyStructuredEntity(
+          structuredEntity,
+          sourceWorkspace,
+          workspaceByName,
+          domainRules,
+          inputs,
+          skippedActions,
+          reviewActions,
+          blockedActions
+        );
+      }
+      return;
+    }
     const entity = describeTab(tab, index, sourceWorkspace);
     if (!sourceWorkspace.sortableFrom) {
       const sourceBlockedReason = sourceWorkspace.protectedStatus === "from" || sourceWorkspace.protectedStatus === "from_to"
@@ -216,19 +241,215 @@ export function planSortPreview(
 function describeTab(tab: RawTab, index: number, sourceWorkspace: WorkspaceSummary): Omit<EntityPlan, "action" | "reason" | "confidence" | "explanation"> {
   const entry = selectedEntry(tab);
   const url = entry?.url ?? "about:blank";
+  const domain = domainForUrl(url);
   return {
     entityId: String(tab.zenSyncId ?? tab.zenGlanceId ?? `${sourceWorkspace.id}:${index}`),
     tabIndex: index,
+    tabIndices: [index],
+    childTabCount: 1,
     entityType: "tab",
     title: entry?.title ?? url,
     url,
-    domain: domainForUrl(url),
+    urls: [url],
+    domain,
+    domains: domain ? [domain] : [],
     sourceWorkspaceId: sourceWorkspace.id,
     sourceWorkspaceName: sourceWorkspace.name,
     destinationWorkspaceId: null,
     destinationWorkspaceName: null,
     protectionReasons: tabProtectionReasons(tab)
   };
+}
+
+function classifyStructuredEntity(
+  entity: Omit<EntityPlan, "action" | "reason" | "confidence" | "explanation">,
+  sourceWorkspace: WorkspaceSummary,
+  destinationByName: Map<string, WorkspaceSummary>,
+  domainRules: Record<string, string[]>,
+  inputs: SortInputs,
+  skippedActions: EntityPlan[],
+  reviewActions: EntityPlan[],
+  blockedActions: EntityPlan[]
+): void {
+  if (!sourceWorkspace.sortableFrom) {
+    const sourceBlockedReason = sourceWorkspace.protectedStatus === "from" || sourceWorkspace.protectedStatus === "from_to"
+      ? "source_workspace_protected"
+      : "source_workspace_not_allowed";
+    blockedActions.push({
+      ...entity,
+      action: "blocked",
+      reason: sourceBlockedReason,
+      confidence: 1,
+      explanation: sourceBlockedReason === "source_workspace_protected"
+        ? `Source workspace ${sourceWorkspace.name} is protected from sorting`
+        : `Source workspace ${sourceWorkspace.name} is not allowed by the active source policy`
+    });
+    return;
+  }
+
+  if (inputs.except.some((pattern) => entityMatchesPattern(entity, pattern))) {
+    skippedActions.push({
+      ...entity,
+      action: "skip",
+      reason: "excluded_by_filter",
+      confidence: 1,
+      explanation: "Structured entity contains a tab excluded by the active filter"
+    });
+    return;
+  }
+
+  if (inputs.only.length > 0 && !entity.urls.every((url) => inputs.only.some((pattern) => matchesPattern(pattern, domainForUrl(url), url)))) {
+    reviewActions.push({
+      ...entity,
+      action: "review",
+      reason: "outside_only_filter",
+      confidence: 1,
+      explanation: "Structured entity contains tabs outside the active only filter"
+    });
+    return;
+  }
+
+  if ((inputs.protectedDomains ?? []).some((pattern) => entityMatchesPattern(entity, pattern))) {
+    blockedActions.push({
+      ...entity,
+      action: "blocked",
+      reason: "domain_protected",
+      confidence: 1,
+      explanation: "Structured entity contains a protected domain"
+    });
+    return;
+  }
+
+  const destination = classifyStructuredDestination(entity.domains, destinationByName, domainRules);
+  if (!destination) {
+    reviewActions.push({
+      ...entity,
+      action: "review",
+      reason: "structured_entity_review",
+      confidence: 0,
+      explanation: `${entityLabel(entity)} has ${entity.childTabCount} tabs and needs review before any grouped/foldered move is enabled`
+    });
+    return;
+  }
+  const destinationBlocker = destinationBlockedReason(destination.workspace, inputs);
+  if (destinationBlocker) {
+    blockedActions.push({
+      ...entity,
+      action: "blocked",
+      reason: destinationBlocker,
+      destinationWorkspaceId: destination.workspace.id,
+      destinationWorkspaceName: destination.workspace.name,
+      confidence: destination.confidence,
+      explanation: destinationBlocker === "destination_workspace_protected"
+        ? `Destination workspace ${destination.workspace.name} is protected from sorting`
+        : `Destination workspace ${destination.workspace.name} is excluded by the active sort policy`
+    });
+    return;
+  }
+
+  reviewActions.push({
+    ...entity,
+    action: "review",
+    reason: "structured_entity_review",
+    destinationWorkspaceId: destination.workspace.id,
+    destinationWorkspaceName: destination.workspace.name,
+    confidence: destination.confidence,
+    explanation: `${entityLabel(entity)} has ${entity.childTabCount} tabs and appears to match ${destination.workspace.name}, but grouped/foldered apply is not enabled yet`
+  });
+}
+
+function describeStructuredEntity(
+  tabs: RawTab[],
+  folders: RawFolder[],
+  groups: RawGroup[],
+  key: string,
+  sourceWorkspace: WorkspaceSummary,
+  firstIndex: number
+): Omit<EntityPlan, "action" | "reason" | "confidence" | "explanation"> {
+  const [type, id] = key.split(":", 2) as ["folder" | "group", string];
+  const members = tabs
+    .map((tab, index) => ({ tab, index }))
+    .filter(({ tab }) => tab.zenWorkspace === sourceWorkspace.id && structuredEntityKey(tab) === key);
+  const memberSummaries = members.map(({ tab, index }) => ({ ...tabSummaryFields(tab), index }));
+  const domains = Array.from(new Set(memberSummaries.map((member) => member.domain).filter(Boolean))).sort();
+  const urls = Array.from(new Set(memberSummaries.map((member) => member.url)));
+  const representative = memberSummaries[0] ?? {
+    title: `${type} ${id}`,
+    url: "about:blank",
+    domain: "",
+    index: firstIndex
+  };
+  const folder = type === "folder" ? folders.find((item) => item.id === id) : undefined;
+  const group = type === "group" ? groups.find((item) => item.id === id) : undefined;
+  const displayName = folder?.name ?? group?.name ?? `${type} ${id}`;
+  const protectionReasons = structuredProtectionReasons(members.map(({ tab }) => tab), type);
+
+  return {
+    entityId: `${type}:${id}`,
+    tabIndex: representative.index,
+    tabIndices: members.map((member) => member.index),
+    childTabCount: members.length,
+    entityType: type,
+    title: displayName,
+    url: representative.url,
+    urls,
+    domain: representative.domain,
+    domains,
+    sourceWorkspaceId: sourceWorkspace.id,
+    sourceWorkspaceName: sourceWorkspace.name,
+    destinationWorkspaceId: null,
+    destinationWorkspaceName: null,
+    protectionReasons
+  };
+}
+
+function structuredEntityKey(tab: RawTab): string | null {
+  if (typeof tab.zenLiveFolderItemId === "string" && tab.zenLiveFolderItemId) return `folder:${tab.zenLiveFolderItemId}`;
+  if (typeof tab.groupId === "string" && tab.groupId) return `group:${tab.groupId}`;
+  return null;
+}
+
+function tabSummaryFields(tab: RawTab): { title: string; url: string; domain: string } {
+  const entry = selectedEntry(tab);
+  const url = entry?.url ?? "about:blank";
+  return {
+    title: entry?.title ?? url,
+    url,
+    domain: domainForUrl(url)
+  };
+}
+
+function structuredProtectionReasons(tabs: RawTab[], type: "folder" | "group"): string[] {
+  const reasons = new Set<string>([type === "folder" ? "foldered" : "grouped"]);
+  for (const tab of tabs) {
+    for (const reason of tabProtectionReasons(tab)) reasons.add(reason);
+  }
+  return Array.from(reasons);
+}
+
+function classifyStructuredDestination(
+  domains: string[],
+  destinationByName: Map<string, WorkspaceSummary>,
+  domainRules: Record<string, string[]>
+): { workspace: WorkspaceSummary; confidence: number } | null {
+  if (domains.length === 0) return null;
+  const matches = domains.map((domain) => classifyByDomain(domain, destinationByName, domainRules));
+  if (matches.some((match) => !match)) return null;
+  const classifiedMatches = matches as NonNullable<ReturnType<typeof classifyByDomain>>[];
+  if (classifiedMatches.length === 0) return null;
+  const firstWorkspaceId = classifiedMatches[0].workspace.id;
+  if (!classifiedMatches.every((match) => match.workspace.id === firstWorkspaceId)) return null;
+  return { workspace: classifiedMatches[0].workspace, confidence: Math.min(...classifiedMatches.map((match) => match.confidence)) };
+}
+
+function entityMatchesPattern(entity: Pick<EntityPlan, "domains" | "url" | "urls">, pattern: string): boolean {
+  return entity.domains.some((domain) => matchesPattern(pattern, domain, `https://${domain}/`))
+    || entity.urls.some((url) => matchesPattern(pattern, domainForUrl(url), url))
+    || matchesPattern(pattern, domainForUrl(entity.url), entity.url);
+}
+
+function entityLabel(entity: Pick<EntityPlan, "entityType">): string {
+  return entity.entityType === "folder" ? "Folder" : "Group";
 }
 
 function selectedEntry(tab: RawTab) {

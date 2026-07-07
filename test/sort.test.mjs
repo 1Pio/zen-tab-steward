@@ -49,8 +49,8 @@ test("plans deterministic domain-rule moves and protection skips without applyin
   const plan = planSortPreview(session, summary, summary.workspaces[0], inputs);
 
   assert.equal(plan.moveCount, 2);
-  assert.equal(plan.skipCount, 3);
-  assert.equal(plan.reviewCount, 1);
+  assert.equal(plan.skipCount, 2);
+  assert.equal(plan.reviewCount, 2);
   assert.equal(plan.blockedCount, 0);
   assert.deepEqual(
     plan.plannedActions.map((action) => action.destinationWorkspaceName),
@@ -58,9 +58,14 @@ test("plans deterministic domain-rule moves and protection skips without applyin
   );
   assert.deepEqual(
     plan.skippedActions.map((action) => action.reason),
-    ["pinned_protected", "essential_protected", "grouped_or_foldered_protected"]
+    ["pinned_protected", "essential_protected"]
   );
-  assert.equal(plan.reviewActions[0].reason, "no_deterministic_rule");
+  assert.deepEqual(
+    plan.reviewActions.map((action) => action.reason),
+    ["structured_entity_review", "no_deterministic_rule"]
+  );
+  assert.equal(plan.reviewActions[0].entityType, "group");
+  assert.equal(plan.reviewActions[0].childTabCount, 1);
 });
 
 test("blocks protected domains and protected destination workspaces", () => {
@@ -245,4 +250,88 @@ test("uses configured domain rules as deterministic destinations", () => {
   assert.equal(plan.moveCount, 1);
   assert.equal(plan.plannedActions[0].destinationWorkspaceName, "Research");
   assert.equal(plan.plannedActions[0].explanation, "Domain docs.example.com matched docs.example.com");
+});
+
+test("represents foldered tabs as one structured review entity", () => {
+  const session = {
+    spaces: [
+      { uuid: "w1", name: "Space" },
+      { uuid: "w2", name: "Portfolio" }
+    ],
+    tabs: [
+      { zenWorkspace: "w1", zenLiveFolderItemId: "f1", entries: [{ url: "https://framer.com/projects/site", title: "Framer" }] },
+      { zenWorkspace: "w1", zenLiveFolderItemId: "f1", entries: [{ url: "https://framer.university/course", title: "Course" }] }
+    ],
+    folders: [{ id: "f1", name: "Framer Folder", workspaceId: "w1" }],
+    groups: []
+  };
+  const summary = summarizeSession(session, source);
+  const plan = planSortPreview(session, summary, summary.workspaces[0], inputs);
+
+  assert.equal(plan.moveCount, 0);
+  assert.equal(plan.skipCount, 0);
+  assert.equal(plan.reviewCount, 1);
+  assert.equal(plan.reviewActions[0].entityType, "folder");
+  assert.equal(plan.reviewActions[0].title, "Framer Folder");
+  assert.equal(plan.reviewActions[0].childTabCount, 2);
+  assert.deepEqual(plan.reviewActions[0].tabIndices, [0, 1]);
+  assert.deepEqual(plan.reviewActions[0].domains, ["framer.com", "framer.university"]);
+  assert.deepEqual(plan.reviewActions[0].urls, ["https://framer.com/projects/site", "https://framer.university/course"]);
+  assert.equal(plan.reviewActions[0].destinationWorkspaceName, "Portfolio");
+  assert.match(plan.reviewActions[0].explanation, /grouped\/foldered apply is not enabled/);
+});
+
+test("applies filters and destination policy to structured entities conservatively", () => {
+  const session = {
+    spaces: [
+      { uuid: "w1", name: "Space" },
+      { uuid: "w2", name: "Portfolio" }
+    ],
+    tabs: [
+      { zenWorkspace: "w1", zenLiveFolderItemId: "f1", entries: [{ url: "https://framer.com/projects/site", title: "Framer" }] },
+      { zenWorkspace: "w1", zenLiveFolderItemId: "f1", entries: [{ url: "https://framer.university/course", title: "Course" }] }
+    ],
+    folders: [{ id: "f1", name: "Framer Folder", workspaceId: "w1" }],
+    groups: []
+  };
+  const summary = summarizeSession(session, source);
+  const excludedPlan = planSortPreview(session, summary, summary.workspaces[0], {
+    ...inputs,
+    except: ["framer.university"]
+  });
+  const destinationDeniedPlan = planSortPreview(session, summary, summary.workspaces[0], {
+    ...inputs,
+    notTo: ["Portfolio"]
+  });
+
+  assert.equal(excludedPlan.skipCount, 1);
+  assert.equal(excludedPlan.skippedActions[0].entityType, "folder");
+  assert.equal(excludedPlan.skippedActions[0].reason, "excluded_by_filter");
+  assert.equal(destinationDeniedPlan.blockedCount, 1);
+  assert.equal(destinationDeniedPlan.blockedActions[0].entityType, "folder");
+  assert.equal(destinationDeniedPlan.blockedActions[0].reason, "destination_not_allowed");
+  assert.equal(destinationDeniedPlan.blockedActions[0].destinationWorkspaceName, "Portfolio");
+});
+
+test("does not suggest destinations for mixed or partially unclassified structured entities", () => {
+  const session = {
+    spaces: [
+      { uuid: "w1", name: "Space" },
+      { uuid: "w2", name: "Portfolio" }
+    ],
+    tabs: [
+      { zenWorkspace: "w1", zenLiveFolderItemId: "f1", entries: [{ url: "https://framer.com/projects/site", title: "Framer" }] },
+      { zenWorkspace: "w1", zenLiveFolderItemId: "f1", entries: [{ url: "https://example.com/unknown", title: "Unknown" }] }
+    ],
+    folders: [{ id: "f1", name: "Mixed Folder", workspaceId: "w1" }],
+    groups: []
+  };
+  const summary = summarizeSession(session, source);
+  const plan = planSortPreview(session, summary, summary.workspaces[0], inputs);
+
+  assert.equal(plan.reviewCount, 1);
+  assert.equal(plan.reviewActions[0].entityType, "folder");
+  assert.equal(plan.reviewActions[0].destinationWorkspaceId, null);
+  assert.equal(plan.reviewActions[0].destinationWorkspaceName, null);
+  assert.equal(plan.reviewActions[0].confidence, 0);
 });

@@ -185,7 +185,7 @@ export function formatSortPreview(plan: SortPlan, applyBlockers: string[], sugge
     "",
     `Move ${plan.moveCount} entities`,
     `Skip ${plan.skipCount} protected or filtered`,
-    `Review ${plan.reviewCount} low-confidence`,
+    `Review ${plan.reviewCount} needs attention`,
     `Blocked ${plan.blockedCount} unsafe`,
     ""
   ];
@@ -233,7 +233,7 @@ export function formatSortDryRun(plan: SortPlan, applyBlockers: string[], sugges
     "",
     `Move ${plan.moveCount} entities`,
     `Skip ${plan.skipCount} protected or filtered`,
-    `Review ${plan.reviewCount} low-confidence`,
+    `Review ${plan.reviewCount} needs attention`,
     `Blocked ${plan.blockedCount} unsafe`,
     ""
   ];
@@ -270,7 +270,9 @@ function appendActionSection(lines: string[], heading: string, actions: EntityPl
     const destination = action.destinationWorkspaceName ? ` -> ${action.destinationWorkspaceName}` : "";
     lines.push(
       `  - [${action.action}] ${action.title}${destination}`,
+      `    entity: ${action.entityType}${action.childTabCount > 1 ? ` (${action.childTabCount} tabs)` : ""}`,
       `    url: ${action.url}`,
+      ...(action.domains.length > 1 ? [`    domains: ${action.domains.join(", ")}`] : []),
       `    reason: ${action.reason}`,
       `    confidence: ${action.confidence}`,
       `    explanation: ${action.explanation}`

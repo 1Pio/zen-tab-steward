@@ -62,7 +62,8 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
   assert.equal(sortJson.ok, true);
   assert.equal(sortJson.data.applied, false);
   assert.equal(sortJson.data.plan.moveCount, 1);
-  assert.equal(sortJson.data.plan.skipCount, 2);
+  assert.equal(sortJson.data.plan.skipCount, 1);
+  assert.equal(sortJson.data.plan.reviewActions.some((action) => action.entityType === "group" && action.reason === "structured_entity_review"), true);
 
   const sortDryRunHuman = spawnSync("node", ["dist/cli.js", "sort", "Space", "--dry-run"], {
     env,

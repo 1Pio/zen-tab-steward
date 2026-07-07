@@ -56,7 +56,7 @@ Each backup includes timestamped `.bak` files and a timestamped `manifest.json` 
 
 `zts backup restore <backup-id>` restores a saved backup only when Zen is closed. Restore preflights every backup target and hash before any profile write, creates a fresh safety backup of the current profile first, writes each restored file through a temp file and rename, verifies restored hashes, and writes a restore receipt.
 
-`zts sort [workspace] --preview` produces a safe read-only preview. It uses deterministic domain rules where a matching destination workspace exists, skips pinned tabs and essentials by default, and treats grouped/foldered tabs as protected so they are not split. Every tab from the source workspace is classified as move, skip, review, or blocked.
+`zts sort [workspace] --preview` produces a safe read-only preview. It uses deterministic domain rules where a matching destination workspace exists, skips pinned tabs and essentials by default, and represents grouped/foldered structures as single review entities so they are not split. Every sortable entity from the source workspace is classified as move, skip, review, or blocked.
 
 Preview and dry-run commands exit successfully because they do not write. Preview is glance-oriented; dry-run prints the full action list with reasons and explanations. Use `--limit <count>` to cap planned move actions for a controlled proof; eligible overflow actions are kept in review with reason `over_move_limit`. Plain `zts sort [workspace]` and `zts sort [workspace] --apply` attempt to apply eligible planned moves using the selected backend. Today, only the offline session backend can apply, and only when Zen is closed and `zen-sessions.jsonlz4` is the selected session source. If Zen is running, apply refuses and shows the same plan plus blockers.
 
@@ -117,9 +117,10 @@ The current implementation has read, backup, preview, and offline session apply 
 - It can list and re-verify apply receipts without writing Zen state.
 - It creates a fresh safety backup and restore receipt before/after offline restore.
 - It preserves unknown Zen session fields by mutating only planned tab workspace ids.
+- It surfaces grouped/foldered tabs as aggregate review entities but does not apply grouped/foldered moves yet.
 - It does not mutate files inside the active Zen profile while Zen is running.
 
-Pinned tabs and essentials are counted explicitly using Zen's observed `pinned` and `zenEssential` fields. Folder and group records are counted so later sorting can protect them as unsplittable entities.
+Pinned tabs and essentials are counted explicitly using Zen's observed `pinned` and `zenEssential` fields. Folder and group records are counted and represented conservatively so later sorting can protect them as unsplittable entities.
 
 See [docs/live-backend-investigation.md](docs/live-backend-investigation.md) for the current live-backend evidence and blocker receipt.
 
