@@ -31,6 +31,24 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
   assert.equal(statusJson.data.session.workspaceCount, 3);
   assert.equal(statusJson.data.session.tabCount, 4);
 
+  const bridge = await execFileAsync("node", ["dist/cli.js", "bridge", "status", "--json"], { env });
+  const bridgeJson = JSON.parse(bridge.stdout);
+  assert.equal(bridgeJson.ok, true);
+  assert.equal(bridgeJson.data.bridge.liveBackend.status, "unavailable");
+  assert.match(bridgeJson.blockers.join("\n"), /not implemented/);
+
+  const bridgeDoctor = await execFileAsync("node", ["dist/cli.js", "bridge", "doctor"], { env });
+  assert.match(bridgeDoctor.stdout, /Zen live bridge doctor/);
+  assert.match(bridgeDoctor.stdout, /Live backend: unavailable/);
+  assert.match(bridgeDoctor.stdout, /Required launch evidence/);
+
+  const unknownBridge = spawnSync("node", ["dist/cli.js", "bridge", "start", "--json"], {
+    env,
+    encoding: "utf8"
+  });
+  assert.equal(unknownBridge.status, 1);
+  assert.match(JSON.parse(unknownBridge.stdout).blockers.join("\n"), /unknown bridge action/);
+
   const workspaces = await execFileAsync("node", ["dist/cli.js", "workspaces"], { env });
   assert.match(workspaces.stdout, /Space/);
   assert.match(workspaces.stdout, /Stash/);

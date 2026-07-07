@@ -21,6 +21,7 @@ zts status
 zts workspaces
 zts tabs
 zts backup
+zts bridge status
 zts review
 zts config path
 zts rules
@@ -59,6 +60,8 @@ Each backup includes timestamped `.bak` files and a timestamped `manifest.json` 
 
 `zts backup prune --before <iso-date>` and `zts backup prune --older-than <duration>` remove old zts-owned backup manifests and `.bak` files from the backup state directory. Use `--dry-run` to preview the exact backups and files that would be removed.
 
+`zts bridge status` and `zts bridge doctor` inspect the live-backend boundary without changing Zen state. They report whether the current Zen browser process has any candidate privileged remote-control launch flags, list the current blockers, and still report live apply as unavailable until a safe browser-chrome execution client exists.
+
 `zts sort [workspace] --preview` produces a safe read-only preview. It uses deterministic domain rules where a matching destination workspace exists, skips pinned tabs and essentials by default, and represents grouped/foldered structures as single review entities so they are not split. Every sortable entity from the source workspace is classified as move, skip, review, or blocked.
 
 Preview and dry-run commands exit successfully because they do not write. Preview is glance-oriented; dry-run prints the full action list with reasons and explanations. Use `--limit <count>` to cap planned move actions for a controlled proof; eligible overflow actions are kept in review with reason `over_move_limit`. Plain `zts sort [workspace]` and `zts sort [workspace] --apply` attempt to apply eligible planned moves using the selected backend. Today, only the offline session backend can apply, and only when Zen is closed and `zen-sessions.jsonlz4` is the selected session source. If Zen is running, apply refuses and shows the same plan plus blockers.
@@ -96,6 +99,8 @@ zts tabs Space --json
 zts backup --json
 zts backup list --json
 zts backup prune --dry-run --older-than 30d --json
+zts bridge status --json
+zts bridge doctor --json
 zts apply list --json
 zts apply verify <receipt-id> --json
 zts sort Space --preview --json
@@ -119,6 +124,7 @@ The current implementation has read, backup, preview, and offline session apply 
 - It restores backups only when Zen is closed.
 - It refuses sort apply while Zen is running.
 - It refuses live backend apply because no safe live bridge exists yet.
+- It can inspect live-backend launch evidence with `zts bridge status` and `zts bridge doctor`, but those commands are read-only and do not enable live apply.
 - It creates a fresh backup before offline session mutation.
 - It writes an apply receipt under the state directory after offline apply.
 - It can list and re-verify apply receipts without writing Zen state.

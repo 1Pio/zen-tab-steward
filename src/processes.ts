@@ -42,8 +42,10 @@ function extractProfilePath(args: string): string | undefined {
   const marker = " -profile ";
   const index = args.indexOf(marker);
   if (index === -1) return undefined;
-  const value = args.slice(index + marker.length).trim();
-  const mozillaIndex = value.indexOf(" org.mozilla.");
-  if (mozillaIndex !== -1) return value.slice(0, mozillaIndex);
+  let value = args.slice(index + marker.length).trim();
+  for (const terminator of [" org.mozilla.", " --"]) {
+    const terminatorIndex = value.indexOf(terminator);
+    if (terminatorIndex !== -1) value = value.slice(0, terminatorIndex).trim();
+  }
   return value;
 }

@@ -6,6 +6,7 @@ import { configPath } from "./paths.js";
 import { backupRootForProfile } from "./backup.js";
 import { EntityPlan, SortPlan } from "./sort.js";
 import { ApplyReceipt, ApplyVerificationReport } from "./apply.js";
+import { BridgeInspection } from "./bridge.js";
 
 export interface CommandEnvelope<T> {
   version: string;
@@ -37,10 +38,10 @@ export function printJson(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
-export function formatStatus(context: ProfileContext, summary: SessionSummary): string {
+export function formatStatus(context: ProfileContext, summary: SessionSummary, bridge: BridgeInspection): string {
   const blockers = context.running
-    ? ["Offline apply: blocked because Zen is running", "Live bridge: unavailable"]
-    : ["Live bridge: unavailable"];
+    ? ["Offline apply: blocked because Zen is running", ...bridge.blockers.map((blocker) => `Live bridge: ${blocker}`)]
+    : bridge.blockers.map((blocker) => `Live bridge: ${blocker}`);
 
   return [
     "Zen Tab Steward status",
@@ -58,6 +59,7 @@ export function formatStatus(context: ProfileContext, summary: SessionSummary): 
     `Config: ${configPath()}`,
     `Backups: ${backupRootForProfile(context.profile.id)}`,
     `Safe sort apply: ${context.running ? "unavailable while Zen is running" : "available through offline session backend"}`,
+    `Live bridge: ${bridge.liveBackend.status} (${bridge.liveBackend.reason})`,
     "Safety posture: active session writes are refused; offline session writes require Zen closed and a fresh backup",
     "",
     "Blockers:",
@@ -65,9 +67,69 @@ export function formatStatus(context: ProfileContext, summary: SessionSummary): 
     "",
     "Next:",
     "  zts workspaces",
+    "  zts bridge status",
     "  zts backup",
     "  zts sort --preview"
   ].join("\n");
+}
+
+export function formatBridge(bridge: BridgeInspection, mode: "status" | "doctor"): string {
+  const lines = [
+    mode === "doctor" ? "Zen live bridge doctor" : "Zen live bridge status",
+    `Live backend: ${bridge.liveBackend.status}`,
+    `Apply supported: ${bridge.liveBackend.applySupported ? "yes" : "no"}`,
+    `Reason: ${bridge.liveBackend.reason}`,
+    `Profile path: ${bridge.profilePath}`,
+    `Zen: ${bridge.zenRunning ? "running" : "not running"}`,
+    `Candidate transport: ${bridge.candidateTransportDetected ? "detected" : "not detected"}`,
+    `Privileged transport: ${bridge.candidatePrivilegedTransportDetected ? "detected" : "not detected"}`,
+    "",
+    "Blockers:",
+    ...bridge.blockers.map((blocker) => `  - ${blocker}`)
+  ];
+
+  if (bridge.warnings.length > 0) {
+    lines.push("", "Warnings:", ...bridge.warnings.map((warning) => `  - ${warning}`));
+  }
+
+  if (mode === "doctor") {
+    lines.push(
+      "",
+      "Checks:",
+      ...bridge.checks.map((check) => `  - [${check.status}] ${check.label}: ${check.detail}`),
+      "",
+      "Required launch evidence:",
+      ...bridge.requiredLaunchFlags.map((flag) => `  - ${flag}`),
+      "",
+      "Candidate internal APIs:",
+      ...bridge.candidateInternalApis.map((api) => `  - ${api}`),
+      "",
+      "Processes:"
+    );
+
+    if (bridge.processes.length === 0) {
+      lines.push("  - none");
+    } else {
+      for (const process of bridge.processes) {
+        const flags = Object.entries(process.flags)
+          .filter(([, enabled]) => enabled)
+          .map(([name]) => name)
+          .join(", ") || "no bridge flags";
+        lines.push(
+          `  - pid ${process.pid} ${process.role}`,
+          `    profile: ${process.profilePath ?? "(none)"}`,
+          `    profile matched: ${process.profileMatched ? "yes" : "no"}`,
+          `    flags: ${flags}`
+        );
+      }
+    }
+  }
+
+  if (bridge.suggestedNextCommands.length > 0) {
+    lines.push("", "Next:", ...bridge.suggestedNextCommands.map((command) => `  ${command}`));
+  }
+
+  return lines.join("\n");
 }
 
 export function formatWorkspaces(summary: SessionSummary): string {

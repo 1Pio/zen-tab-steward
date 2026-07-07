@@ -27,3 +27,16 @@ test("detects the main Zen process and extracts profile path with spaces", () =>
     }
   ]);
 });
+
+test("extracts profile path before later launch flags", () => {
+  const profilePath = "/Users/main/Library/Application Support/zen/Profiles/4le6r9n3.Default (release)";
+  const output = `101 /Applications/Zen.app/Contents/MacOS/zen -profile ${profilePath} --remote-debugging-port=9222 --remote-allow-system-access --remote-allow-hosts localhost --remote-allow-origins http://127.0.0.1:9222`;
+
+  assert.deepEqual(parseZenProcesses(output), [
+    {
+      pid: 101,
+      args: output.slice("101 ".length),
+      profilePath
+    }
+  ]);
+});

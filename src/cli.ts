@@ -2,8 +2,9 @@
 import { Command } from "commander";
 import { applySortPlanOffline, listApplyReceipts, offlineApplyBlockers, verifyApplyReceipt } from "./apply.js";
 import { createBackup, listBackups, pruneBackups, restoreBackup } from "./backup.js";
+import { inspectBridge } from "./bridge.js";
 import { addDomainRuleInContents, getConfigValue, loadConfig, saveConfigContents, setConfigValueInContents, ZtsConfig } from "./config.js";
-import { envelope, formatApplyReceiptList, formatApplyVerification, formatBackup, formatBackupList, formatBackupPrune, formatRestore, formatReview, formatSortDryRun, formatSortPreview, formatStatus, formatTabs, formatWorkspaces, printJson } from "./output.js";
+import { envelope, formatApplyReceiptList, formatApplyVerification, formatBackup, formatBackupList, formatBackupPrune, formatBridge, formatRestore, formatReview, formatSortDryRun, formatSortPreview, formatStatus, formatTabs, formatWorkspaces, printJson } from "./output.js";
 import { discoverProfileContext } from "./profile.js";
 import { listTabs, loadSession, loadSessionSummary, summarizeSession, withWorkspacePolicy } from "./session.js";
 import { classifyDomainForWorkspace, planSortPreview, SortInputs } from "./sort.js";
@@ -31,14 +32,50 @@ program
       const context = await discoverProfileContext();
       const loadedConfig = await loadConfig();
       const summary = withWorkspacePolicy(await loadSessionSummary(context.sessionFile), loadedConfig.config);
-      const data = { profile: context.profile, zenRunning: context.running, session: summary };
+      const bridge = inspectBridge(context);
+      const data = { profile: context.profile, zenRunning: context.running, session: summary, bridge };
 
       if (options.json) {
-        printJson(envelope("status", data, statusEnvelopeOptions(context.running)));
+        printJson(envelope("status", data, statusEnvelopeOptions(context.running, bridge.blockers)));
       } else {
-        process.stdout.write(`${formatStatus(context, summary)}\n`);
+        process.stdout.write(`${formatStatus(context, summary, bridge)}\n`);
       }
     });
+  });
+
+program
+  .command("bridge")
+  .description("Inspect the live Zen bridge boundary without changing Zen state")
+  .argument("[action]", "status or doctor")
+  .option("--json", "print stable JSON output")
+  .action(async (action: string | undefined, options: JsonOption) => {
+    const selectedAction = action ?? "status";
+
+    if (selectedAction === "status" || selectedAction === "doctor") {
+      await runCommand(`bridge ${selectedAction}`, options, async () => {
+        const context = await discoverProfileContext();
+        const bridge = inspectBridge(context);
+        const data = { profile: context.profile, zenRunning: context.running, bridge };
+        if (options.json) {
+          printJson(envelope(`bridge ${selectedAction}`, data, {
+            warnings: bridge.warnings,
+            blockers: bridge.blockers,
+            suggestedNextCommands: bridge.suggestedNextCommands
+          }));
+        } else {
+          process.stdout.write(`${formatBridge(bridge, selectedAction)}\n`);
+        }
+      });
+      return;
+    }
+
+    const message = `unknown bridge action '${selectedAction}'`;
+    if (options.json) {
+      printJson(envelope("bridge", { action: selectedAction }, { ok: false, blockers: [message], suggestedNextCommands: ["zts bridge status", "zts bridge doctor"] }));
+    } else {
+      process.stderr.write(`zts: ${message}\n`);
+    }
+    process.exitCode = 1;
   });
 
 program
@@ -542,14 +579,14 @@ async function runCommand(command: string, options: JsonOption, action: () => Pr
   }
 }
 
-function statusEnvelopeOptions(zenRunning: boolean) {
+function statusEnvelopeOptions(zenRunning: boolean, bridgeBlockers: string[]) {
   const blockers = zenRunning
-    ? ["Offline apply is blocked because Zen is running", "Live bridge is unavailable"]
-    : ["Live bridge is unavailable"];
+    ? ["Offline apply is blocked because Zen is running", ...bridgeBlockers]
+    : bridgeBlockers;
   return {
     warnings: ["Active session writes are refused; offline session writes require Zen closed and a fresh backup"],
     blockers,
-    suggestedNextCommands: zenRunning ? ["zts workspaces", "zts backup", "zts sort --preview"] : ["zts workspaces", "zts sort --preview", "zts sort --backend session"]
+    suggestedNextCommands: zenRunning ? ["zts workspaces", "zts bridge status", "zts backup", "zts sort --preview"] : ["zts workspaces", "zts bridge status", "zts sort --backend session"]
   };
 }
 
