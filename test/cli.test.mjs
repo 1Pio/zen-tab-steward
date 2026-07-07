@@ -128,7 +128,8 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
   assert.equal(sort.status, 0);
   const sortJson = JSON.parse(sort.stdout);
   assert.equal(sortJson.ok, true);
-  assert.equal(sortJson.data.applied, false);
+  assert.equal(sortJson.data.mode, "dry-run");
+  assert.equal(sortJson.data.apply.receipt, null);
   assert.equal(sortJson.data.plan.moveCount, 1);
   assert.equal(sortJson.data.plan.skipCount, 1);
   assert.equal(sortJson.data.plan.reviewActions.some((action) => action.entityType === "group" && action.reason === "structured_entity_review"), true);
@@ -138,7 +139,7 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
     encoding: "utf8"
   });
   assert.equal(sortDryRunHuman.status, 0);
-  assert.match(sortDryRunHuman.stdout, /Sort dry run: Space/);
+  assert.match(sortDryRunHuman.stdout, /Sort dry run · Space/);
   assert.match(sortDryRunHuman.stdout, /Moves:/);
   assert.match(sortDryRunHuman.stdout, /reason: domain_rule/);
   assert.match(sortDryRunHuman.stdout, /Skipped:/);
@@ -151,8 +152,8 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
   assert.equal(reviewJson.data.reviewActions[0].reason, "structured_entity_review");
 
   const reviewHuman = await execFileAsync("node", ["dist/cli.js", "review", "Space"], { env });
-  assert.match(reviewHuman.stdout, /Sort review: Space/);
-  assert.match(reviewHuman.stdout, /entity: group/);
+  assert.match(reviewHuman.stdout, /Sort review · Space/);
+  assert.match(reviewHuman.stdout, /group/);
 
   const sortWithKnownFlags = spawnSync(
     "node",
@@ -218,26 +219,26 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
   assert.equal(limitedSortJson.data.plan.moveCount, 0);
   assert.equal(limitedSortJson.data.plan.reviewActions.some((action) => action.reason === "over_move_limit"), true);
 
-  const liveSortClosed = spawnSync("node", ["dist/cli.js", "sort", "Space", "--backend", "live", "--json"], {
+  const liveSortClosed = spawnSync("node", ["dist/cli.js", "sort", "Space", "--apply", "--yes", "--backend", "live", "--json"], {
     env,
     encoding: "utf8"
   });
   assert.equal(liveSortClosed.status, 2);
   const liveSortClosedJson = JSON.parse(liveSortClosed.stdout);
   assert.equal(liveSortClosedJson.ok, false);
-  assert.equal(liveSortClosedJson.data.applied, false);
+  assert.equal(liveSortClosedJson.data.apply.receipt, null);
   assert.match(liveSortClosedJson.blockers.join("\n"), /requires Zen to be running/);
 
-  const plainSort = spawnSync("node", ["dist/cli.js", "sort", "Space", "--json"], {
+  const plainSort = spawnSync("node", ["dist/cli.js", "sort", "Space", "--apply", "--yes", "--json"], {
     env,
     encoding: "utf8"
   });
   assert.equal(plainSort.status, 0);
   const plainSortJson = JSON.parse(plainSort.stdout);
   assert.equal(plainSortJson.ok, true);
-  assert.equal(plainSortJson.data.applied, true);
-  assert.equal(plainSortJson.data.applyReceipt.moveCount, 1);
-  const applyReceiptId = plainSortJson.data.applyReceipt.id;
+  assert.equal(plainSortJson.data.mode, "apply");
+  assert.equal(plainSortJson.data.apply.receipt.moveCount, 1);
+  const applyReceiptId = plainSortJson.data.apply.receipt.id;
   const appliedSession = await readJsonLz4(join(fixture.profilePath, "zen-sessions.jsonlz4"));
   assert.equal(appliedSession.tabs[2].zenWorkspace, "w3");
 

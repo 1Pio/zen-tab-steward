@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 import { Command } from "commander";
-import { applySortPlanLive, applySortPlanOffline, listApplyReceipts, offlineApplyBlockers, resolveApplyBackend, sortApplyBlockers, verifyApplyReceipt } from "./apply.js";
+import { applySortPlanLive, applySortPlanOffline, listApplyReceipts, resolveApplyBackend, sortApplyBlockers, verifyApplyReceipt, ApplyReceipt } from "./apply.js";
 import { createBackup, listBackups, pruneBackups, restoreBackup } from "./backup.js";
 import { inspectBridge, inspectLiveAttachment, runBridgeLiveMoveProof, runBridgeLiveReadProof, runBridgeProbe } from "./bridge.js";
 import { addDomainRuleInContents, getConfigValue, loadConfig, saveConfigContents, setConfigValueInContents, ZtsConfig } from "./config.js";
-import { envelope, formatApplyReceiptList, formatApplyVerification, formatBackup, formatBackupList, formatBackupPrune, formatBridge, formatBridgeLiveAttachment, formatBridgeLiveMove, formatBridgeLiveRead, formatBridgeProbe, formatRestore, formatReview, formatSortDryRun, formatSortPreview, formatStatus, formatTabs, formatWorkspaces, printJson } from "./output.js";
+import { envelope, formatApplyReceiptList, formatApplyVerification, formatBackup, formatBackupList, formatBackupPrune, formatBridge, formatBridgeLiveAttachment, formatBridgeLiveMove, formatBridgeLiveRead, formatBridgeProbe, formatRestore, formatReview, formatApplyResult, formatSortDryRun, formatSortPreview, formatStatus, formatTabs, formatWorkspaces, printJson, SortRenderContext } from "./output.js";
 import { discoverProfileContext } from "./profile.js";
 import { listTabs, loadSession, loadSessionSummary, summarizeSession, withWorkspacePolicy } from "./session.js";
-import { classifyDomainForWorkspace, planSortPreview, SortInputs } from "./sort.js";
+import { classifyDomainForWorkspace, planSortPreview, SortInputs, SortPlan } from "./sort.js";
 import { VERSION } from "./version.js";
 
 interface JsonOption {
@@ -504,19 +504,20 @@ program
 
 program
   .command("sort")
-  .description("Plan or apply Zen tab sorting")
-  .argument("[source-workspace]", "source workspace name or id")
-  .option("--preview", "show a glanceable preview without writing")
-  .option("--dry-run", "show an operational dry run without writing")
-  .option("--apply", "apply planned safe moves with the selected backend")
-  .option("--min-confidence <number>", "minimum confidence required for future apply")
-  .option("--include-pinned", "include pinned tabs in future sort planning")
-  .option("--include-essentials", "include essentials in future sort planning")
+  .description("Plan or apply Zen tab sorting. Defaults to a glanceable preview; pass --apply to write, --dry-run for the full operational plan.")
+  .argument("[source-workspace]", "source workspace name or id (defaults to configured inbox)")
+  .option("--preview", "show a glanceable preview without writing (default)")
+  .option("--dry-run", "show the full operational plan without writing")
+  .option("--apply", "apply all safe moves at once (respects pinned/essential protection, confidence, and --only/--except/--to/--not-to/--limit)")
+  .option("--yes", "skip the interactive confirmation when applying (for scripts/agents)")
+  .option("--min-confidence <number>", "minimum confidence required for a move")
+  .option("--include-pinned", "allow pinned tabs to be sorted")
+  .option("--include-essentials", "allow essentials to be sorted")
   .option("--to <workspaces>", "comma-separated destination workspace allowlist")
   .option("--not-to <workspaces>", "comma-separated destination workspace denylist")
-  .option("--only <patterns>", "comma-separated source URL/domain patterns")
+  .option("--only <patterns>", "comma-separated source URL/domain patterns to include")
   .option("--except <patterns>", "comma-separated exclusion URL/domain patterns")
-  .option("--limit <count>", "maximum number of move actions to plan or apply")
+  .option("--limit <count>", "cap the number of moves planned or applied")
   .option("--backend <backend>", "backend preference: auto, live, or session")
   .option("--json", "print stable JSON output")
   .action(async (sourceWorkspace: string | undefined, options: JsonOption & SortOptions) => {
@@ -551,40 +552,76 @@ program
         return;
       }
       const plan = planSortPreview(session, summary, source, inputs);
-      const previewRequested = Boolean(options.preview || options.dryRun);
-      let applyBlockers = previewRequested ? offlineApplyBlockers(context, inputs.backend) : sortApplyBlockers(context, inputs.backend);
-      const applyRequested = !previewRequested;
-      let applyReceipt = undefined;
+
+      const dryRunRequested = Boolean(options.dryRun) && !Boolean(options.apply);
+      const applyRequested = Boolean(options.apply);
+      const previewRequested = !applyRequested && !dryRunRequested;
+
+      let applyBlockers: string[] = [];
+      let applyReceipt: ApplyReceipt | undefined;
       let resolvedBackend: "session" | "live" = resolveApplyBackend(context, inputs.backend);
-      if (applyRequested && applyBlockers.length === 0) {
-        resolvedBackend = resolveApplyBackend(context, inputs.backend);
-        if (resolvedBackend === "live") {
-          const liveCheck = await inspectLiveAttachment(context, { connect: true });
-          if (!liveCheck.attachable) {
-            applyBlockers = liveCheck.blockers;
+      let applyReady = false;
+
+      if (previewRequested || dryRunRequested) {
+        applyBlockers = sortApplyBlockers(context, inputs.backend);
+        applyReady = applyBlockers.length === 0 && plan.moveCount > 0;
+      } else {
+        applyBlockers = plan.moveCount === 0 ? [] : sortApplyBlockers(context, inputs.backend);
+        if (applyBlockers.length === 0 && plan.moveCount > 0) {
+          const confirmed = await confirmApply(options, plan, resolvedBackend);
+          if (!confirmed) {
+            applyBlockers = ["Apply cancelled by user"];
           } else {
-            applyReceipt = await applySortPlanLive(context, plan, sortCommandForReceipt(sourceWorkspace, options));
+            resolvedBackend = resolveApplyBackend(context, inputs.backend);
+            if (resolvedBackend === "live") {
+              const liveCheck = await inspectLiveAttachment(context, { connect: true });
+              if (!liveCheck.attachable) {
+                applyBlockers = liveCheck.blockers;
+              } else {
+                applyReceipt = await applySortPlanLive(context, plan, sortCommandForReceipt(sourceWorkspace, options));
+              }
+            } else {
+              applyReceipt = await applySortPlanOffline(context, session, plan, sortCommandForReceipt(sourceWorkspace, options));
+            }
+            if (applyReceipt && !applyReceipt.verification.ok) applyBlockers = applyReceipt.verification.blockers ?? ["Apply verification failed"];
           }
-        } else {
-          applyReceipt = await applySortPlanOffline(context, session, plan, sortCommandForReceipt(sourceWorkspace, options));
         }
-        if (applyReceipt && !applyReceipt.verification.ok) applyBlockers = applyReceipt.verification.blockers ?? ["Apply verification failed"];
       }
-      const suggestedNextCommands = applyBlockers.length > 0
-        ? ["zts sort --preview", "zts status", resolvedBackend === "live" ? "zts bridge live-check --connect --json" : "zts backup"]
-        : ["zts status", "zts backup"];
-      const ok = previewRequested || applyBlockers.length === 0;
+      applyReady = applyReady || (applyBlockers.length === 0 && Boolean(applyReceipt?.verification.ok));
+
+      const suggestedNextCommands = suggestedSortCommands({
+        applyRequested, applyReady, plan, applyBlockers, resolvedBackend, source, dryRunRequested
+      });
+      const ok = previewRequested || dryRunRequested || applyBlockers.length === 0;
+
+      const renderContext: SortRenderContext = {
+        plan,
+        session: {
+          tabCount: summary.tabCount,
+          pinnedCount: summary.pinnedCount,
+          essentialCount: summary.essentialCount,
+          folderGroupCount: summary.folderGroupCount
+        },
+        applyBackend: applyReady || applyRequested ? resolvedBackend : null,
+        applyReady,
+        applyBlockers,
+        suggestedNextCommands,
+        applyReceipt
+      };
 
       const data = {
         profile: context.profile,
         zenRunning: context.running,
         sourceWorkspace: source,
         inputs,
+        mode: previewRequested ? "preview" : dryRunRequested ? "dry-run" : "apply",
         plan,
-        previewOnly: previewRequested,
-        applied: Boolean(applyReceipt?.verification.ok),
-        applyReceiptWritten: Boolean(applyReceipt),
-        applyReceipt: applyReceipt ?? null,
+        apply: {
+          ready: applyReady,
+          backend: applyReady || applyRequested ? resolvedBackend : null,
+          receiptWritten: Boolean(applyReceipt),
+          receipt: applyReceipt ?? null
+        },
         plannedActions: plan.plannedActions,
         skippedActions: plan.skippedActions,
         reviewActions: plan.reviewActions,
@@ -602,7 +639,10 @@ program
         printJson(envelope("sort", data, { ok, blockers: applyBlockers, suggestedNextCommands }));
         process.exitCode = ok ? 0 : 2;
       } else {
-        process.stdout.write(`${options.dryRun ? formatSortDryRun(plan, applyBlockers, suggestedNextCommands) : formatSortPreview(plan, applyBlockers, suggestedNextCommands, applyReceipt)}\n`);
+        const formatter = applyRequested
+          ? (applyReceipt ? formatApplyResult : formatSortPreview)
+          : dryRunRequested ? formatSortDryRun : formatSortPreview;
+        process.stdout.write(`${formatter(renderContext)}`);
         process.exitCode = ok ? 0 : 2;
       }
     });
@@ -612,6 +652,7 @@ interface SortOptions {
   preview?: boolean;
   dryRun?: boolean;
   apply?: boolean;
+  yes?: boolean;
   minConfidence?: string;
   includePinned?: boolean;
   includeEssentials?: boolean;
@@ -642,10 +683,85 @@ function sortCommandForReceipt(sourceWorkspace: string | undefined, options: Sor
   const parts = ["zts", "sort"];
   if (sourceWorkspace) parts.push(sourceWorkspace);
   if (options.apply) parts.push("--apply");
+  if (options.yes) parts.push("--yes");
   if (options.backend) parts.push("--backend", options.backend);
   if (options.minConfidence) parts.push("--min-confidence", options.minConfidence);
+  if (options.includePinned) parts.push("--include-pinned");
+  if (options.includeEssentials) parts.push("--include-essentials");
+  if (options.to) parts.push("--to", options.to);
+  if (options.notTo) parts.push("--not-to", options.notTo);
+  if (options.only) parts.push("--only", options.only);
+  if (options.except) parts.push("--except", options.except);
   if (options.limit) parts.push("--limit", options.limit);
   return parts.join(" ");
+}
+
+interface ConfirmContext {
+  options: SortOptions;
+  plan: SortPlan;
+  resolvedBackend: "session" | "live";
+}
+
+async function confirmApply(options: SortOptions, plan: SortPlan, resolvedBackend: "session" | "live"): Promise<boolean> {
+  if (options.yes) return true;
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return true;
+  const destinations = plan.destinationSummaries
+    .map((d) => `${d.workspaceName} (${d.tabCount})`)
+    .join(", ");
+  process.stdout.write(
+    `\nAbout to apply ${plan.moveCount} move${plan.moveCount === 1 ? "" : "s"} via ${resolvedBackend} backend.\n` +
+    `Destinations: ${destinations || "(none)"}\n` +
+    `A backup is written first. Confirm? [y/N] `
+  );
+  process.stdin.setEncoding("utf8");
+  const reply = await new Promise<string>((resolve) => {
+    const onData = (chunk: Buffer | string): void => {
+      process.stdin.removeListener("data", onData);
+      process.stdin.pause();
+      resolve(String(chunk).trim().toLowerCase());
+    };
+    process.stdin.once("data", onData);
+  });
+  return reply === "y" || reply === "yes";
+}
+
+interface SortCommandContext {
+  applyRequested: boolean;
+  applyReady: boolean;
+  plan: SortPlan;
+  applyBlockers: string[];
+  resolvedBackend: "session" | "live";
+  source: { name: string };
+  dryRunRequested: boolean;
+}
+
+function suggestedSortCommands(ctx: SortCommandContext): string[] {
+  const ws = ctx.source.name;
+  const commands: string[] = [];
+  if (ctx.applyRequested) {
+    if (ctx.applyBlockers.length > 0) {
+      commands.push(`zts sort ${ws} --preview`, "zts status");
+    } else {
+      commands.push("zts apply list", "zts status");
+    }
+    return commands;
+  }
+  if (ctx.applyReady) {
+    if (ctx.plan.moveCount > 3) {
+      commands.push(`zts sort ${ws} --apply --limit 3`, `zts sort ${ws} --apply`, `zts sort ${ws} --dry-run`);
+    } else {
+      commands.push(`zts sort ${ws} --apply`, `zts sort ${ws} --dry-run`);
+    }
+    return commands;
+  }
+  if (ctx.plan.reviewCount > 0) {
+    commands.push(`zts sort ${ws} --dry-run`, `zts rules add domain <domain> <workspace>`);
+  }
+  if (ctx.plan.moveCount === 0 && ctx.plan.reviewCount === 0) {
+    commands.push("zts workspaces", "zts status");
+  }
+  commands.push("zts backup");
+  return commands;
 }
 
 function backupPruneCommand(options: BackupOptions): string {

@@ -445,125 +445,191 @@ export function formatApplyVerification(report: ApplyVerificationReport): string
   return lines.join("\n");
 }
 
-export function formatSortPreview(plan: SortPlan, applyBlockers: string[], suggestedNextCommands: string[], applyReceipt?: ApplyReceipt): string {
-  const lines = [
-    `Sort preview: ${plan.sourceWorkspace.name}`,
-    "",
-    `Move ${plan.moveCount} entities`,
-    `Skip ${plan.skipCount} protected or filtered`,
-    `Review ${plan.reviewCount} needs attention`,
-    `Blocked ${plan.blockedCount} unsafe`,
-    ""
-  ];
+const CONFIDENCE_SAMPLE_TITLES = 2;
+const PREVIEW_DOMAINS_SHOWN = 5;
+const PREVIEW_REVIEW_SHOWN = 8;
 
-  for (const destination of plan.destinationSummaries) {
-    lines.push(
-      destination.workspaceName,
-      `  ${destination.tabCount} tabs`,
-      `  ${destination.domains.slice(0, 8).join(", ") || "no domains"}`,
-      ""
-    );
-  }
-
-  if (applyReceipt) {
-    const planned = applyReceipt.plannedMoveCount ?? applyReceipt.moves.length;
-    const attempted = applyReceipt.attemptedMoveCount ?? applyReceipt.moveCount;
-    const succeeded = applyReceipt.succeededMoveCount ?? applyReceipt.moveCount;
-    const failed = applyReceipt.failedMoveCount ?? 0;
-    lines.push(
-      applyReceipt.verification.ok ? "Applied:" : "Apply incomplete:",
-      `  backend: ${applyReceipt.backend}`,
-      `  moves: ${succeeded}/${planned} succeeded`,
-      `  attempted: ${attempted}`,
-      `  failed: ${failed}`,
-      `  backup: ${applyReceipt.backupId ?? "not needed"}`,
-      `  receipt: ${applyReceipt.receiptPath}`
-    );
-    if (!applyReceipt.verification.ok && applyBlockers.length > 0) {
-      lines.push("Blockers:", ...applyBlockers.map((blocker) => `  - ${blocker}`));
-    }
-  } else if (applyBlockers.length > 0) {
-    lines.push(
-      "Apply refused:",
-      ...applyBlockers.map((blocker) => `  - ${blocker}`)
-    );
-  } else {
-    lines.push("Apply available with selected backend");
-  }
-
-  if (suggestedNextCommands.length > 0) {
-    lines.push(
-      "",
-      "Next:",
-      ...suggestedNextCommands.map((command) => `  ${command}`)
-    );
-  }
-
-  return lines.join("\n");
+export interface SortRenderContext {
+  plan: SortPlan;
+  session: {
+    tabCount: number;
+    pinnedCount: number;
+    essentialCount: number;
+    folderGroupCount: number;
+  };
+  applyBackend: "session" | "live" | null;
+  applyReady: boolean;
+  applyBlockers: string[];
+  suggestedNextCommands: string[];
+  applyReceipt?: ApplyReceipt;
 }
 
-export function formatSortDryRun(plan: SortPlan, applyBlockers: string[], suggestedNextCommands: string[]): string {
-  const lines = [
-    `Sort dry run: ${plan.sourceWorkspace.name}`,
-    "",
-    `Move ${plan.moveCount} entities`,
-    `Skip ${plan.skipCount} protected or filtered`,
-    `Review ${plan.reviewCount} needs attention`,
-    `Blocked ${plan.blockedCount} unsafe`,
-    ""
-  ];
+export function formatSortPreview(ctx: SortRenderContext): string {
+  const { plan, session } = ctx;
+  const lines: string[] = [];
+  const sourceHeader = session.tabCount > 0
+    ? `${session.tabCount} tabs · ${session.pinnedCount} pinned · ${session.essentialCount} essential · ${session.folderGroupCount} grouped`
+    : "empty workspace";
+  lines.push(`Sort preview · ${plan.sourceWorkspace.name}`, sourceHeader, "");
 
-  appendActionSection(lines, "Moves", plan.plannedActions);
+  if (plan.moveCount > 0) {
+    const moveGroups = groupPlannedMovesByDestination(plan);
+    const totalDestinations = moveGroups.length;
+    lines.push(`Will move ${plan.moveCount} ${plural(plan.moveCount, "tab", "tabs")} to ${totalDestinations} ${plural(totalDestinations, "workspace", "workspaces")}`, "");
+    for (const group of moveGroups) {
+      lines.push(
+        `  ${group.workspaceName.padEnd(PREVIEW_NAME_PAD)} ${group.tabCount} ${plural(group.tabCount, "tab", "tabs")}  ${confidenceLabel(group.confidenceMin)}`,
+        `  ${formatDomainChips(group.domains)}`,
+        ...group.sampleTitles.map((title) => `    · ${truncate(title, 72)}`),
+        ...(group.remaining > 0 ? [`    +${group.remaining} more`] : []),
+        ""
+      );
+    }
+  } else {
+    lines.push("Nothing matches a deterministic destination rule yet.", "Add rules with `zts rules add domain <domain> <workspace>`.", "");
+  }
+
+  appendProtectedSummary(lines, plan);
+  appendReviewSummary(lines, plan, "preview");
+  appendBlockedSummary(lines, plan);
+  appendApplyPosture(lines, ctx);
+  appendNext(lines, ctx.suggestedNextCommands);
+  return lines.join("\n").trimEnd() + "\n";
+}
+
+export function formatSortDryRun(ctx: SortRenderContext): string {
+  const { plan, session } = ctx;
+  const lines: string[] = [];
+  lines.push(
+    `Sort dry run · ${plan.sourceWorkspace.name}`,
+    `${session.tabCount} tabs · ${plan.moveCount} move · ${plan.skipCount} skip · ${plan.reviewCount} review · ${plan.blockedCount} blocked`,
+    ""
+  );
+  appendMoveSection(lines, plan.plannedActions);
   appendActionSection(lines, "Skipped", plan.skippedActions);
   appendActionSection(lines, "Review", plan.reviewActions);
   appendActionSection(lines, "Blocked", plan.blockedActions);
+  appendApplyPosture(lines, ctx);
+  appendNext(lines, ctx.suggestedNextCommands);
+  return lines.join("\n").trimEnd() + "\n";
+}
 
-  if (applyBlockers.length > 0) {
-    lines.push(
-      "Apply refused:",
-      ...applyBlockers.map((blocker) => `  - ${blocker}`)
-    );
-  } else {
-    lines.push("Apply available with selected backend");
+export function formatApplyResult(ctx: SortRenderContext): string {
+  const { plan, applyReceipt } = ctx;
+  const lines: string[] = [];
+  if (!applyReceipt) {
+    return formatSortPreview(ctx);
   }
-
-  if (suggestedNextCommands.length > 0) {
-    lines.push(
-      "",
-      "Next:",
-      ...suggestedNextCommands.map((command) => `  ${command}`)
-    );
+  const planned = applyReceipt.plannedMoveCount ?? applyReceipt.moves.length;
+  const succeeded = applyReceipt.succeededMoveCount ?? applyReceipt.moveCount;
+  const failed = applyReceipt.failedMoveCount ?? 0;
+  const ok = applyReceipt.verification.ok;
+  lines.push(
+    ok ? `Applied · ${plan.sourceWorkspace.name}` : `Apply incomplete · ${plan.sourceWorkspace.name}`,
+    `backend: ${applyReceipt.backend}`,
+    `moves: ${succeeded}/${planned} succeeded${failed > 0 ? ` · ${failed} failed` : ""}`,
+    `backup: ${applyReceipt.backupId ?? "not needed"}`,
+    `receipt: ${applyReceipt.receiptPath}`,
+    ""
+  );
+  if (applyReceipt.moves.length > 0) {
+    lines.push("Moved:");
+    for (const move of applyReceipt.moves) {
+      lines.push(`  · ${truncate(move.title, 64)}`, `    ${move.fromWorkspaceName} -> ${move.toWorkspaceName}  ${truncate(move.url, 70)}`);
+    }
+    lines.push("");
   }
-
-  return lines.join("\n");
+  if (!ok && ctx.applyBlockers.length > 0) {
+    lines.push("Blockers:", ...ctx.applyBlockers.map((blocker) => `  - ${blocker}`), "");
+  }
+  appendNext(lines, ctx.suggestedNextCommands);
+  return lines.join("\n").trimEnd() + "\n";
 }
 
 export function formatReview(plan: SortPlan, suggestedNextCommands: string[]): string {
   const lines = [
-    `Sort review: ${plan.sourceWorkspace.name}`,
+    `Sort review · ${plan.sourceWorkspace.name}`,
     "",
-    `Review ${plan.reviewCount} needs attention`,
-    `Move ${plan.moveCount} ready`,
-    `Skip ${plan.skipCount} protected or filtered`,
-    `Blocked ${plan.blockedCount} unsafe`,
+    `Review ${plan.reviewCount} needs attention · ${plan.moveCount} ready to move · ${plan.skipCount} protected · ${plan.blockedCount} blocked`,
     ""
   ];
 
   if (plan.reviewActions.length === 0) {
-    lines.push("No review items found");
+    lines.push("No review items found.", "");
   } else {
-    appendActionSection(lines, "Review", plan.reviewActions);
+    appendReviewDetail(lines, plan.reviewActions);
   }
 
-  if (suggestedNextCommands.length > 0) {
-    lines.push(
-      "",
-      "Next:",
-      ...suggestedNextCommands.map((command) => `  ${command}`)
-    );
-  }
+  appendNext(lines, suggestedNextCommands);
+  return lines.join("\n").trimEnd() + "\n";
+}
 
-  return lines.join("\n").trimEnd();
+interface PlannedMoveGroup {
+  workspaceName: string;
+  tabCount: number;
+  domains: string[];
+  confidenceMin: number;
+  sampleTitles: string[];
+  remaining: number;
+}
+
+const PREVIEW_NAME_PAD = 24;
+
+function groupPlannedMovesByDestination(plan: SortPlan): PlannedMoveGroup[] {
+  const byWorkspace = new Map<string, PlannedMoveGroup>();
+  for (const action of plan.plannedActions) {
+    const key = action.destinationWorkspaceId ?? "(unknown)";
+    const existing = byWorkspace.get(key) ?? {
+      workspaceName: action.destinationWorkspaceName ?? "(unknown)",
+      tabCount: 0,
+      domains: [],
+      confidenceMin: action.confidence,
+      sampleTitles: [],
+      remaining: 0
+    };
+    existing.tabCount += action.childTabCount;
+    existing.confidenceMin = Math.min(existing.confidenceMin, action.confidence);
+    for (const domain of action.domains) {
+      if (domain && !existing.domains.includes(domain)) existing.domains.push(domain);
+    }
+    if (existing.sampleTitles.length < CONFIDENCE_SAMPLE_TITLES) {
+      existing.sampleTitles.push(action.title);
+    } else {
+      existing.remaining += 1;
+    }
+    byWorkspace.set(key, existing);
+  }
+  return Array.from(byWorkspace.values()).map((group) => ({
+    ...group,
+    domains: group.domains.sort(),
+    remaining: group.tabCount - group.sampleTitles.length
+  }));
+}
+
+function appendMoveSection(lines: string[], actions: EntityPlan[]): void {
+  if (actions.length === 0) return;
+  lines.push("Moves:");
+  const byDestination = new Map<string, EntityPlan[]>();
+  for (const action of actions) {
+    const key = action.destinationWorkspaceId ?? "(unknown)";
+    const list = byDestination.get(key) ?? [];
+    list.push(action);
+    byDestination.set(key, list);
+  }
+  for (const [key, list] of byDestination) {
+    const destination = list[0]?.destinationWorkspaceName ?? key;
+    lines.push(`  -> ${destination}:`);
+    for (const action of list) {
+      lines.push(
+        `     · ${truncate(action.title, 68)}  [${action.entityType}${action.childTabCount > 1 ? ` ${action.childTabCount} tabs` : ""}]`,
+        `       url: ${action.url}`,
+        `       reason: ${action.reason}`,
+        `       confidence: ${action.confidence}`,
+        `       explanation: ${action.explanation}`
+      );
+    }
+  }
+  lines.push("");
 }
 
 function appendActionSection(lines: string[], heading: string, actions: EntityPlan[]): void {
@@ -572,7 +638,7 @@ function appendActionSection(lines: string[], heading: string, actions: EntityPl
   for (const action of actions) {
     const destination = action.destinationWorkspaceName ? ` -> ${action.destinationWorkspaceName}` : "";
     lines.push(
-      `  - [${action.action}] ${action.title}${destination}`,
+      `  - [${action.action}] ${truncate(action.title, 68)}${destination}`,
       `    entity: ${action.entityType}${action.childTabCount > 1 ? ` (${action.childTabCount} tabs)` : ""}`,
       `    url: ${action.url}`,
       ...(action.domains.length > 1 ? [`    domains: ${action.domains.join(", ")}`] : []),
@@ -582,4 +648,124 @@ function appendActionSection(lines: string[], heading: string, actions: EntityPl
     );
   }
   lines.push("");
+}
+
+function appendReviewDetail(lines: string[], actions: EntityPlan[]): void {
+  lines.push("Review:");
+  for (const action of actions) {
+    const entity = action.entityType === "tab" ? "tab" : `${action.entityType} (${action.childTabCount} tabs)`;
+    const destination = action.destinationWorkspaceName ? ` -> ${action.destinationWorkspaceName}?` : " -> no rule";
+    const confidence = action.confidence > 0 ? ` conf ${action.confidence}` : "";
+    lines.push(`  · ${truncate(action.title, 56)}  [${entity}]${destination}${confidence}`);
+  }
+  lines.push("");
+}
+
+function appendProtectedSummary(lines: string[], plan: SortPlan): void {
+  if (plan.skipCount === 0) return;
+  const byReason = new Map<string, number>();
+  for (const action of plan.skippedActions) {
+    byReason.set(action.reason, (byReason.get(action.reason) ?? 0) + 1);
+  }
+  const chips = Array.from(byReason.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([reason, count]) => `${count} ${humanSkipReason(reason)}`);
+  lines.push(`Protected · ${plan.skipCount}`, `  ${chips.join(" · ")}`, "");
+}
+
+function appendReviewSummary(lines: string[], plan: SortPlan, _mode: "preview"): void {
+  if (plan.reviewCount === 0) return;
+  lines.push(`Needs review · ${plan.reviewCount}`);
+  const shown = plan.reviewActions.slice(0, PREVIEW_REVIEW_SHOWN);
+  for (const action of shown) {
+    const entity = action.entityType === "tab" ? "tab" : `${action.entityType} ${action.childTabCount} tabs`;
+    const destination = action.destinationWorkspaceName ? `-> ${action.destinationWorkspaceName}?` : "-> no rule";
+    const confidence = action.confidence > 0 ? ` conf ${action.confidence}` : "";
+    lines.push(`  · ${truncate(action.title, 54)}  [${entity}] ${destination}${confidence}`);
+  }
+  const remaining = plan.reviewCount - shown.length;
+  if (remaining > 0) {
+    lines.push(`  +${remaining} more  —  zts sort ${plan.sourceWorkspace.name} --dry-run`);
+  }
+  lines.push("");
+}
+
+function appendBlockedSummary(lines: string[], plan: SortPlan): void {
+  if (plan.blockedCount === 0) return;
+  const byReason = new Map<string, number>();
+  for (const action of plan.blockedActions) {
+    byReason.set(action.reason, (byReason.get(action.reason) ?? 0) + 1);
+  }
+  const chips = Array.from(byReason.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([reason, count]) => `${count} ${humanBlockReason(reason)}`);
+  lines.push(`Blocked · ${plan.blockedCount}`, `  ${chips.join(" · ")}`, "");
+}
+
+function appendApplyPosture(lines: string[], ctx: SortRenderContext): void {
+  if (ctx.applyReceipt) {
+    return;
+  }
+  if (ctx.applyReady) {
+    const backend = ctx.applyBackend ?? "auto";
+    lines.push(`Apply ready · ${backend} backend. A backup is written before any change.`, "");
+    return;
+  }
+  if (ctx.applyBlockers.length > 0) {
+    lines.push("Apply not ready:");
+    for (const blocker of ctx.applyBlockers) lines.push(`  - ${blocker}`);
+    lines.push("");
+  }
+}
+
+function appendNext(lines: string[], suggestedNextCommands: string[]): void {
+  if (suggestedNextCommands.length === 0) return;
+  lines.push("Next:");
+  for (const command of suggestedNextCommands) lines.push(`  ${command}`);
+  lines.push("");
+}
+
+function confidenceLabel(confidence: number): string {
+  if (confidence >= 0.85) return `conf ${confidence.toFixed(2)} high`;
+  if (confidence >= 0.6) return `conf ${confidence.toFixed(2)} med`;
+  return `conf ${confidence.toFixed(2)} low`;
+}
+
+function formatDomainChips(domains: string[]): string {
+  const visible = domains.slice(0, PREVIEW_DOMAINS_SHOWN);
+  const more = domains.length - visible.length;
+  const text = visible.length > 0 ? visible.join(" · ") : "no domains";
+  return more > 0 ? `${text} · +${more}` : text;
+}
+
+function humanSkipReason(reason: string): string {
+  switch (reason) {
+    case "essential_protected": return "essential";
+    case "pinned_protected": return "pinned";
+    case "grouped_or_foldered_protected": return "grouped";
+    case "excluded_by_filter": return "excluded";
+    case "outside_only_filter": return "outside --only";
+    case "already_in_destination": return "already home";
+    default: return reason;
+  }
+}
+
+function humanBlockReason(reason: string): string {
+  switch (reason) {
+    case "domain_protected": return "protected domain";
+    case "source_workspace_protected": return "source protected";
+    case "source_workspace_not_allowed": return "source not allowed";
+    case "destination_workspace_protected": return "destination protected";
+    case "destination_not_allowed": return "destination not allowed";
+    default: return reason;
+  }
+}
+
+function truncate(value: string, max: number): string {
+  if (value.length <= max) return value;
+  return `${value.slice(0, max - 1)}…`;
+}
+
+function plural(count: number, singular: string, pluralForm: string): string {
+  return count === 1 ? singular : pluralForm;
 }
