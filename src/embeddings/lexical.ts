@@ -230,6 +230,7 @@ export async function embedTabsLexical(
   return inputs.map((input) => ({
     entityId: input.entityId,
     hash: lexicalHash(input),
+    domain: input.domain,
     sparse: buildTabLexicalVector(input, weights, corpus).terms
   }));
 }

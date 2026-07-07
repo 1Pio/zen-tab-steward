@@ -32,6 +32,7 @@ export interface VectorRecord {
 export interface TabEmbedding {
   entityId: string;
   hash: string;
+  domain?: string;
   sparse?: VectorRecord;
   dense?: number[];
 }
