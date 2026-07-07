@@ -76,6 +76,30 @@ export interface BridgeLiveEndpoint {
   websocketUrl: string;
 }
 
+export interface BridgeLiveReadReceipt {
+  ok: boolean;
+  startedAt: string;
+  durationMs: number;
+  profilePath: string;
+  websocketUrl: string | null;
+  attachment: BridgeLiveAttachmentInspection;
+  sessionStatus: unknown | null;
+  readProof: BridgeLiveReadProof | null;
+  warnings: string[];
+  blockers: string[];
+}
+
+export interface BridgeLiveReadProof {
+  sessionId: string;
+  chromeContextCount: number;
+  chromeContext: string;
+  chromeEvaluation: unknown;
+  chromeUrl: string | null;
+  zenWorkspacesDetected: boolean;
+  workspaceCount: number;
+  activeWorkspaceId: string | null;
+}
+
 export interface BridgeProbeReceipt {
   ok: boolean;
   startedAt: string;
@@ -136,6 +160,10 @@ export interface BridgeProbeOptions {
 
 export interface BridgeLiveAttachmentOptions {
   connect?: boolean;
+  timeoutMs?: number;
+}
+
+export interface BridgeLiveReadOptions {
   timeoutMs?: number;
 }
 
@@ -337,8 +365,51 @@ export async function inspectLiveAttachment(
     warnings,
     blockers,
     suggestedNextCommands: attachable
-      ? ["zts bridge live-check --connect --json", "zts bridge probe", "zts sort --preview"]
+      ? ["zts bridge live-read --json", "zts bridge probe", "zts sort --preview"]
       : ["zts bridge doctor", "zts bridge probe", "zts sort --preview"]
+  };
+}
+
+export async function runBridgeLiveReadProof(
+  context: ProfileContext,
+  options: BridgeLiveReadOptions = {}
+): Promise<BridgeLiveReadReceipt> {
+  const startedAt = new Date();
+  const startedMs = Date.now();
+  const timeoutMs = options.timeoutMs ?? 5000;
+  const attachment = await inspectLiveAttachment(context, { connect: true, timeoutMs });
+  const blockers = [...attachment.blockers];
+  const websocketUrl = attachment.endpoint?.websocketUrl ?? null;
+  let sessionStatus: unknown | null = attachment.sessionStatus;
+  let readProof: BridgeLiveReadProof | null = null;
+
+  if (blockers.length === 0 && websocketUrl) {
+    try {
+      const liveProof = await runBidiLiveReadProof(websocketUrl, timeoutMs);
+      sessionStatus = liveProof.sessionStatus;
+      readProof = liveProof.readProof;
+      const statusError = validateBidiSessionStatus(sessionStatus);
+      if (statusError) blockers.push(statusError);
+      const proofError = validateBridgeLiveReadProof(readProof);
+      if (proofError) blockers.push(proofError);
+    } catch (error) {
+      blockers.push(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  return {
+    ok: blockers.length === 0,
+    startedAt: startedAt.toISOString(),
+    durationMs: Date.now() - startedMs,
+    profilePath: context.profile.path,
+    websocketUrl,
+    attachment,
+    sessionStatus,
+    readProof,
+    warnings: [
+      "Live read proof is read-only. It does not move tabs, write Zen state, or enable live sort apply."
+    ],
+    blockers
   };
 }
 
@@ -619,6 +690,29 @@ export function validateBridgeProbeScriptProof(value: unknown): string | null {
   return null;
 }
 
+export function validateBridgeLiveReadProof(value: unknown): string | null {
+  if (!isRecord(value)) return "WebDriver BiDi live read proof was not returned";
+  if (typeof value.sessionId !== "string" || value.sessionId.length === 0) return "WebDriver BiDi live read proof had no session id";
+  if (typeof value.chromeContextCount !== "number" || !Number.isInteger(value.chromeContextCount) || value.chromeContextCount < 1) return "WebDriver BiDi live read proof found no chrome contexts";
+  if (typeof value.chromeContext !== "string" || value.chromeContext.length === 0) return "WebDriver BiDi live read proof had no chrome context id";
+  if (remoteStringValue(value.chromeEvaluation, "href") !== "chrome://browser/content/browser.xhtml") {
+    return "WebDriver BiDi live read proof did not execute in the Zen browser chrome context";
+  }
+  if (remoteBooleanValue(value.chromeEvaluation, "hasZenWorkspaces") !== true) {
+    return "WebDriver BiDi live read proof did not detect gZenWorkspaces";
+  }
+  if (remoteStringValue(value.chromeEvaluation, "zenWorkspacesType") !== "object") {
+    return "WebDriver BiDi live read proof did not verify gZenWorkspaces as an object";
+  }
+  const workspaceCount = remoteNumberValue(value.chromeEvaluation, "workspaceCount");
+  if (workspaceCount === null || !Number.isInteger(workspaceCount) || workspaceCount < 1) {
+    return "WebDriver BiDi live read proof did not read a positive workspace count";
+  }
+  const activeWorkspaceId = remoteStringValue(value.chromeEvaluation, "activeWorkspaceId");
+  if (!activeWorkspaceId) return "WebDriver BiDi live read proof did not read an active workspace id";
+  return null;
+}
+
 export function validateBridgeProbeWorkspaceOperation(value: unknown): string | null {
   if (!isRecord(value)) return "WebDriver BiDi workspace operation proof was not returned";
   if (typeof value.initialWorkspaceCount !== "number" || value.initialWorkspaceCount < 1) return "WebDriver BiDi workspace operation proof had no initial workspaces";
@@ -823,6 +917,126 @@ async function runBidiScriptProof(
       fail(new Error("WebDriver BiDi WebSocket connection failed"));
     });
   });
+}
+
+async function runBidiLiveReadProof(
+  websocketUrl: string,
+  timeoutMs: number
+): Promise<{ sessionStatus: unknown; readProof: BridgeLiveReadProof }> {
+  const WebSocketConstructor = globalThis.WebSocket;
+  if (!WebSocketConstructor) throw new Error("This Node runtime does not provide a WebSocket client");
+
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocketConstructor(websocketUrl);
+    let nextId = 1;
+    const pending = new Map<number, { method: string; resolve: (value: Record<string, unknown>) => void; reject: (error: Error) => void }>();
+    let settled = false;
+    const timer = setTimeout(() => {
+      settled = true;
+      ws.close();
+      reject(new Error("Timed out waiting for WebDriver BiDi live read proof"));
+    }, timeoutMs);
+
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      ws.close();
+      reject(error);
+    };
+    const finish = (value: { sessionStatus: unknown; readProof: BridgeLiveReadProof }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      ws.close();
+      resolve(value);
+    };
+    const send = (method: string, params: Record<string, unknown> = {}) => {
+      const id = nextId++;
+      ws.send(JSON.stringify({ id, method, params }));
+      return new Promise<Record<string, unknown>>((resolveCommand, rejectCommand) => {
+        pending.set(id, { method, resolve: resolveCommand, reject: rejectCommand });
+      });
+    };
+
+    ws.addEventListener("open", async () => {
+      try {
+        const sessionStatus = await send("session.status");
+        const session = await send("session.new", { capabilities: { alwaysMatch: { webSocketUrl: true } } });
+        const sessionId = sessionIdFromSessionNew(session.result);
+        const chromeTree = await send("browsingContext.getTree", { "moz:scope": "chrome" });
+        const chromeContext = firstContextId(chromeTree.result, "chrome");
+        const chromeEvaluation = await send("script.evaluate", {
+          expression: liveReadProofScript(),
+          awaitPromise: false,
+          target: { context: chromeContext },
+          resultOwnership: "none"
+        });
+
+        try {
+          await send("session.end");
+        } catch {
+          // The proof is read-only; failed session cleanup is reported by the remote if it matters.
+        }
+
+        finish({
+          sessionStatus,
+          readProof: {
+            sessionId,
+            chromeContextCount: contextCount(chromeTree.result),
+            chromeContext,
+            chromeEvaluation: chromeEvaluation.result,
+            chromeUrl: remoteStringValue(chromeEvaluation.result, "href"),
+            zenWorkspacesDetected: remoteBooleanValue(chromeEvaluation.result, "hasZenWorkspaces") === true,
+            workspaceCount: remoteNumberValue(chromeEvaluation.result, "workspaceCount") ?? 0,
+            activeWorkspaceId: remoteStringValue(chromeEvaluation.result, "activeWorkspaceId")
+          }
+        });
+      } catch (error) {
+        fail(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+    ws.addEventListener("message", (event) => {
+      let message: unknown;
+      try {
+        message = JSON.parse(String(event.data));
+      } catch {
+        fail(new Error("WebDriver BiDi returned non-JSON response"));
+        return;
+      }
+      if (!isRecord(message)) return;
+      if (message.type === "event") return;
+      if (typeof message.id !== "number") return;
+      const command = pending.get(message.id);
+      if (!command) return;
+      pending.delete(message.id);
+      if (message.type === "success") command.resolve(message);
+      else command.reject(new Error(`${command.method}: ${String(message.error ?? "error")}: ${String(message.message ?? "unknown error")}`));
+    });
+    ws.addEventListener("error", () => {
+      fail(new Error("WebDriver BiDi WebSocket connection failed"));
+    });
+  });
+}
+
+function liveReadProofScript(): string {
+  return `(() => {
+    const hasZenWorkspaces = typeof gZenWorkspaces !== "undefined";
+    const workspaces = hasZenWorkspaces && typeof gZenWorkspaces.getWorkspaces === "function"
+      ? gZenWorkspaces.getWorkspaces()
+      : [];
+    const activeWorkspaceId = hasZenWorkspaces && typeof gZenWorkspaces.activeWorkspace === "string"
+      ? gZenWorkspaces.activeWorkspace
+      : "";
+    return {
+      href: location.href,
+      title: document.title,
+      hasZenWorkspaces,
+      zenWorkspacesType: typeof gZenWorkspaces,
+      workspaceCount: Array.isArray(workspaces) ? workspaces.length : 0,
+      activeWorkspaceId
+    };
+  })()`;
 }
 
 function sessionIdFromSessionNew(value: unknown): string {

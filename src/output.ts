@@ -6,7 +6,7 @@ import { configPath } from "./paths.js";
 import { backupRootForProfile } from "./backup.js";
 import { EntityPlan, SortPlan } from "./sort.js";
 import { ApplyReceipt, ApplyVerificationReport } from "./apply.js";
-import { BridgeInspection, BridgeLiveAttachmentInspection, BridgeProbeReceipt } from "./bridge.js";
+import { BridgeInspection, BridgeLiveAttachmentInspection, BridgeLiveReadReceipt, BridgeProbeReceipt } from "./bridge.js";
 
 export interface CommandEnvelope<T> {
   version: string;
@@ -224,6 +224,51 @@ export function formatBridgeLiveAttachment(liveCheck: BridgeLiveAttachmentInspec
 
   if (liveCheck.suggestedNextCommands.length > 0) {
     lines.push("", "Next:", ...liveCheck.suggestedNextCommands.map((command) => `  ${command}`));
+  }
+
+  return lines.join("\n");
+}
+
+export function formatBridgeLiveRead(receipt: BridgeLiveReadReceipt, suggestedNextCommands: string[]): string {
+  const lines = [
+    "Zen live read proof",
+    `Status: ${receipt.ok ? "verified read-only live chrome proof" : "refused"}`,
+    `Profile path: ${receipt.profilePath}`,
+    `WebSocket: ${receipt.websocketUrl ?? "(not available)"}`,
+    `Duration: ${receipt.durationMs}ms`,
+    "",
+    "Boundary:",
+    "  This proves only read-only WebDriver BiDi browser-chrome access for the live profile.",
+    "  It does not move tabs, write Zen state, or enable live sort apply."
+  ];
+
+  if (receipt.blockers.length > 0) {
+    lines.push("", "Blockers:", ...receipt.blockers.map((blocker) => `  - ${blocker}`));
+  }
+
+  if (receipt.warnings.length > 0) {
+    lines.push("", "Warnings:", ...receipt.warnings.map((warning) => `  - ${warning}`));
+  }
+
+  if (receipt.sessionStatus !== null) {
+    lines.push("", "Session status:", `  ${JSON.stringify(receipt.sessionStatus)}`);
+  }
+
+  if (receipt.readProof !== null) {
+    lines.push(
+      "",
+      "Read proof:",
+      `  session: ${receipt.readProof.sessionId}`,
+      `  chrome contexts: ${receipt.readProof.chromeContextCount}`,
+      `  chrome URL: ${receipt.readProof.chromeUrl ?? "(unknown)"}`,
+      `  gZenWorkspaces: ${receipt.readProof.zenWorkspacesDetected ? "detected" : "not detected"}`,
+      `  workspace count: ${receipt.readProof.workspaceCount}`,
+      `  active workspace: ${receipt.readProof.activeWorkspaceId ?? "(unknown)"}`
+    );
+  }
+
+  if (suggestedNextCommands.length > 0) {
+    lines.push("", "Next:", ...suggestedNextCommands.map((command) => `  ${command}`));
   }
 
   return lines.join("\n");

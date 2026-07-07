@@ -17,6 +17,16 @@ Date: 2026-07-07
 
 Without `--connect`, a clean preflight is still not enough to report attachable, because the server file can be stale. With `--connect`, it also opens the local WebSocket and runs only WebDriver BiDi `session.status`; only that connected check can produce an attachable receipt. It does not create a BiDi session, execute chrome script, move tabs, write profile files, or enable live sort apply.
 
+`zts bridge live-read` goes one read-only step further after the attachment gate passes. It creates a WebDriver BiDi session, queries the browser chrome context, and evaluates a read-only expression that reports:
+
+- `location.href` for the chrome context,
+- whether `gZenWorkspaces` exists,
+- `typeof gZenWorkspaces`,
+- `gZenWorkspaces.activeWorkspace`,
+- `gZenWorkspaces.getWorkspaces().length`.
+
+It does not call any workspace mutation method, open tabs, move tabs, write profile files, install extensions/mods/services, or enable live sort apply.
+
 `zts bridge probe` is a separate disposable bridge proof. It starts a headless Zen process with a temporary profile, local remote debugging flags, and `--remote-allow-system-access`, verifies WebDriver BiDi `session.status`, creates a session, executes harmless script in a content context, executes harmless script in Zen browser chrome, verifies `gZenWorkspaces` is reachable, performs one temp-profile workspace tab move through Zen internals, then terminates the process and removes the temporary profile. It does not attach to the live profile or move live tabs.
 
 ## Local Evidence

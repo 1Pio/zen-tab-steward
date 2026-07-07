@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { bidiBaseUrlFromLog, inspectBridge, inspectLiveAttachment, runBridgeProbe, summarizeBridgeProcess, validateBidiSessionStatus, validateBridgeProbeScriptProof, validateBridgeProbeWorkspaceOperation } from "../dist/bridge.js";
+import { bidiBaseUrlFromLog, inspectBridge, inspectLiveAttachment, runBridgeLiveReadProof, runBridgeProbe, summarizeBridgeProcess, validateBidiSessionStatus, validateBridgeLiveReadProof, validateBridgeProbeScriptProof, validateBridgeProbeWorkspaceOperation } from "../dist/bridge.js";
 import { parseZenProcesses } from "../dist/processes.js";
 
 const profilePath = "/Users/main/Library/Application Support/zen/Profiles/4le6r9n3.Default (release)";
@@ -196,6 +196,47 @@ test("live attachment check refuses malformed BiDi server files", async () => {
   }
 });
 
+test("live read proof refuses before the attachment gate passes", async () => {
+  const temp = await mkdtemp(join(tmpdir(), "zts-live-read-refuse-"));
+  try {
+    const receipt = await runBridgeLiveReadProof(context({
+      profilePath: temp,
+      running: true,
+      runningProcesses: [privilegedBrowserProcess(temp)]
+    }), { timeoutMs: 1000 });
+
+    assert.equal(receipt.ok, false);
+    assert.equal(receipt.readProof, null);
+    assert.match(receipt.blockers.join("\n"), /WebDriverBiDiServer\.json does not exist/);
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("live read proof validates connected browser-chrome state without mutation", async () => {
+  const temp = await mkdtemp(join(tmpdir(), "zts-live-read-pass-"));
+  const originalWebSocket = globalThis.WebSocket;
+  try {
+    await writeFile(join(temp, "WebDriverBiDiServer.json"), JSON.stringify({ ws_host: "127.0.0.1", ws_port: 9222 }));
+    globalThis.WebSocket = FakeWebSocket;
+    const receipt = await runBridgeLiveReadProof(context({
+      profilePath: temp,
+      running: true,
+      runningProcesses: [privilegedBrowserProcess(temp)]
+    }), { timeoutMs: 1000 });
+
+    assert.equal(receipt.ok, true);
+    assert.deepEqual(receipt.blockers, []);
+    assert.equal(receipt.readProof.chromeUrl, "chrome://browser/content/browser.xhtml");
+    assert.equal(receipt.readProof.zenWorkspacesDetected, true);
+    assert.equal(receipt.readProof.workspaceCount, 3);
+    assert.equal(receipt.readProof.activeWorkspaceId, "workspace-1");
+  } finally {
+    globalThis.WebSocket = originalWebSocket;
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
 test("extracts the last WebDriver BiDi listener from probe logs", () => {
   const log = [
     "*** You are running in headless mode.",
@@ -238,6 +279,31 @@ test("validates disposable script proof shape and Zen chrome reachability", () =
   assert.match(validateBridgeProbeScriptProof({ ...proof, chromeEvaluation: remoteObject({ href: "about:blank", hasZenWorkspaces: true }) }), /chrome context/);
   assert.match(validateBridgeProbeScriptProof({ ...proof, chromeEvaluation: remoteObject({ href: "chrome://browser/content/browser.xhtml", hasZenWorkspaces: false, zenWorkspacesType: "object" }) }), /gZenWorkspaces/);
   assert.match(validateBridgeProbeScriptProof({ ...proof, chromeEvaluation: remoteObject({ href: "chrome://browser/content/browser.xhtml", hasZenWorkspaces: true, zenWorkspacesType: "function" }) }), /as an object/);
+});
+
+test("validates live read proof shape and Zen chrome reachability", () => {
+  const proof = {
+    sessionId: "session-1",
+    chromeContextCount: 1,
+    chromeContext: "chrome-1",
+    chromeEvaluation: remoteObject({
+      href: "chrome://browser/content/browser.xhtml",
+      hasZenWorkspaces: true,
+      zenWorkspacesType: "object",
+      workspaceCount: 3,
+      activeWorkspaceId: "workspace-1"
+    }),
+    chromeUrl: "chrome://browser/content/browser.xhtml",
+    zenWorkspacesDetected: true,
+    workspaceCount: 3,
+    activeWorkspaceId: "workspace-1"
+  };
+
+  assert.equal(validateBridgeLiveReadProof(proof), null);
+  assert.match(validateBridgeLiveReadProof({ ...proof, chromeEvaluation: remoteObject({ href: "about:blank", hasZenWorkspaces: true, zenWorkspacesType: "object", workspaceCount: 3 }) }), /chrome context/);
+  assert.match(validateBridgeLiveReadProof({ ...proof, chromeEvaluation: remoteObject({ href: "chrome://browser/content/browser.xhtml", hasZenWorkspaces: false, zenWorkspacesType: "object", workspaceCount: 3 }) }), /gZenWorkspaces/);
+  assert.match(validateBridgeLiveReadProof({ ...proof, chromeEvaluation: remoteObject({ href: "chrome://browser/content/browser.xhtml", hasZenWorkspaces: true, zenWorkspacesType: "object", workspaceCount: 0 }) }), /positive workspace count/);
+  assert.match(validateBridgeLiveReadProof({ ...proof, chromeEvaluation: remoteObject({ href: "chrome://browser/content/browser.xhtml", hasZenWorkspaces: true, zenWorkspacesType: "object", workspaceCount: 3, activeWorkspaceId: "" }) }), /active workspace id/);
 });
 
 test("validates disposable workspace operation proof", () => {
@@ -302,9 +368,7 @@ class FakeWebSocket {
 
   send(payload) {
     const request = JSON.parse(payload);
-    setTimeout(() => this.emit("message", {
-      data: JSON.stringify({ type: "success", id: request.id, result: { ready: true, message: "" } })
-    }), 0);
+    setTimeout(() => this.emit("message", { data: JSON.stringify(fakeBidiResponse(request)) }), 0);
   }
 
   close() {}
@@ -312,6 +376,36 @@ class FakeWebSocket {
   emit(type, event) {
     for (const callback of this.listeners.get(type) ?? []) callback(event);
   }
+}
+
+function fakeBidiResponse(request) {
+  if (request.method === "session.status") {
+    return { type: "success", id: request.id, result: { ready: true, message: "" } };
+  }
+  if (request.method === "session.new") {
+    return { type: "success", id: request.id, result: { sessionId: "session-1" } };
+  }
+  if (request.method === "browsingContext.getTree") {
+    return { type: "success", id: request.id, result: { contexts: [{ context: "chrome-1" }] } };
+  }
+  if (request.method === "script.evaluate") {
+    return {
+      type: "success",
+      id: request.id,
+      result: remoteObject({
+        href: "chrome://browser/content/browser.xhtml",
+        title: "Zen Browser",
+        hasZenWorkspaces: true,
+        zenWorkspacesType: "object",
+        workspaceCount: 3,
+        activeWorkspaceId: "workspace-1"
+      })
+    };
+  }
+  if (request.method === "session.end") {
+    return { type: "success", id: request.id, result: {} };
+  }
+  return { type: "error", id: request.id, error: "unknown command", message: request.method };
 }
 
 function processArgs() {
@@ -325,7 +419,11 @@ function remoteObject(entries) {
       type: "object",
       value: Object.entries(entries).map(([key, value]) => [
         key,
-        typeof value === "boolean" ? { type: "boolean", value } : { type: "string", value }
+        typeof value === "boolean"
+          ? { type: "boolean", value }
+          : typeof value === "number"
+            ? { type: "number", value }
+            : { type: "string", value }
       ])
     }
   };
