@@ -2,7 +2,7 @@
 
 Zen Tab Steward is a user-owned CLI for inspecting, backing up, previewing, and carefully sorting Zen Browser tabs and workspaces. The command is `zts`.
 
-The implementation is deliberately conservative. It can discover the local Zen profile, parse `zen-sessions.jsonlz4`, report workspace/tab protection state, create backups, show a glanceable sort preview, and apply eligible tab moves through the offline session backend when Zen is closed. It also has a gated live backend that drives Zen's own internal workspace move via a local WebDriver BiDi bridge when Zen is running and attachable. It never writes active Zen session files, installs a service, starts a daemon, creates a browser extension, or sets up autostart.
+The implementation is deliberately conservative. It can discover the local Zen profile, parse `zen-sessions.jsonlz4`, report workspace/tab protection state, create backups, show a glanceable sort preview, route tabs via deterministic rules plus an optional local semantic-affinity fallback, and apply eligible tab moves through the offline session backend when Zen is closed. It also has a gated live backend that drives Zen's own internal workspace move via a local WebDriver BiDi bridge when Zen is running and attachable. It never writes active Zen session files, installs a service, starts a daemon, creates a browser extension, or sets up autostart.
 
 ## Install
 
@@ -123,6 +123,44 @@ zts rules test https://docs.example.com/page
 ```
 
 Routing rules are the single source of truth for deterministic destinations — `zts` ships no built-in domain assumptions, so it works for anyone's workflow.
+
+### Semantic sorting (rules-first, similarity fallback)
+
+Rules are exact but tedious for the long tail of tabs. Semantic sorting adds a workspace-affinity fallback: when a tab matches no deterministic rule, `zts` compares it against each destination workspace's profile (its name, its rule domains, and a sample of its existing tabs) and routes the tab if one workspace is clearly the best fit.
+
+Rules always win. Semantic only fills the gap, and it is gated by confidence and margin so uncertain matches fall through to review instead of becoming bad moves.
+
+```bash
+zts sort Space --semantic --preview   # one-shot semantic plan
+zts sort Space --semantic --apply     # apply confident semantic + rule moves
+zts index                             # build/refresh the local embeddings index
+zts embeddings status                 # show active provider and index state
+```
+
+Make it the default via config:
+
+```toml
+[semantic]
+enabled = true        # always use semantic as a fallback when sorting
+auto_index = true     # refresh the index on every sort
+min_confidence = 0.78 # auto-move only above this
+min_margin = 0.10     # and only when the top workspace beats the runner-up by this
+review_on_tie = true  # send close calls to review instead of moving
+```
+
+Field weights are configurable too (`[embeddings.weights]` title/url/domain/description).
+
+**Providers.** The default `built-in` provider is a zero-dependency, offline, field-aware lexical embedder (TF-IDF + char n-grams). It is genuinely strong for tab routing because domains, product names, and path tokens are highly discriminative. For true synonym-level matching, an opt-in local neural provider (`bge-small-en-v1.5` via Transformers.js) can be enabled:
+
+```bash
+npm install @huggingface/transformers   # in the zts install directory
+zts embeddings install bge-small        # downloads the model into the cache dir
+zts config set embeddings.provider hybrid
+```
+
+The neural provider is strictly opt-in. The default install and the default `zts sort` never download anything, and `zts sort --semantic` works with the built-in provider alone. If a neural provider is configured but not installed, `zts` refuses with the exact install steps rather than silently downgrading.
+
+Hybrid scoring combines the three signals (`0.45 lexical + 0.40 dense + 0.15 domain-affinity`); when dense is unavailable the dense weight is redistributed across the others so the built-in provider is fully useful on its own.
 
 ## JSON Output
 

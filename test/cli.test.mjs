@@ -335,6 +335,27 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
   const sortFromSet = await execFileAsync("node", ["dist/cli.js", "config", "set", "sort.from", "Space", "--json"], { env });
   assert.deepEqual(JSON.parse(sortFromSet.stdout).data.value, ["Space"]);
 
+  const embeddingsStatus = await execFileAsync("node", ["dist/cli.js", "embeddings", "status", "--json"], { env });
+  assert.equal(JSON.parse(embeddingsStatus.stdout).data.configuredProvider, "built-in");
+  assert.equal(JSON.parse(embeddingsStatus.stdout).data.denseAvailable, false);
+
+  const embeddingsInstallMissing = spawnSync("node", ["dist/cli.js", "embeddings", "install", "bge-small", "--json"], { env, encoding: "utf8" });
+  assert.equal(embeddingsInstallMissing.status, 2);
+  assert.match(JSON.parse(embeddingsInstallMissing.stdout).blockers.join("\n"), /not installed/i);
+
+  const indexBuild = await execFileAsync("node", ["dist/cli.js", "index", "--json"], { env });
+  assert.equal(JSON.parse(indexBuild.stdout).ok, true);
+  assert.equal(JSON.parse(indexBuild.stdout).data.report.workspaceCount, 3);
+  assert.ok(JSON.parse(indexBuild.stdout).data.report.total >= 3);
+
+  const semanticPreview = await execFileAsync("node", ["dist/cli.js", "sort", "Space", "--semantic", "--preview", "--json"], { env });
+  const semanticPreviewJson = JSON.parse(semanticPreview.stdout);
+  assert.equal(semanticPreviewJson.ok, true);
+  assert.equal(semanticPreviewJson.data.semantic.active, true);
+
+  const semanticHuman = spawnSync("node", ["dist/cli.js", "sort", "Space", "--semantic", "--preview"], { env, encoding: "utf8" });
+  assert.equal(semanticHuman.status, 0);
+
   await execFileAsync("node", ["dist/cli.js", "config", "set", "defaults.inbox", "Stash", "--json"], { env });
 
   const rulesAdd = await execFileAsync("node", ["dist/cli.js", "rules", "add", "domain", "docs.example.com", "Research", "--json"], { env });

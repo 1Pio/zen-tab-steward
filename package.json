@@ -14,7 +14,7 @@
   "scripts": {
     "build": "tsc",
     "test": "npm run build && node --test test/*.test.mjs",
-    "smoke": "npm run build && node dist/cli.js status && node dist/cli.js workspaces && node dist/cli.js bridge status --json > /dev/null && (node dist/cli.js bridge live-check --json > /dev/null || test $? -eq 2) && (node dist/cli.js bridge live-read --json > /dev/null || test $? -eq 2) && (node dist/cli.js bridge live-move-proof --json > /dev/null || test $? -eq 2) && node dist/cli.js review Space --json > /dev/null && node dist/cli.js apply list --json > /dev/null && node dist/cli.js sort Space --json > /dev/null && (node dist/cli.js sort Space --apply --yes --backend live --json > /dev/null || test $? -eq 2) && node dist/cli.js sort Space --preview"
+    "smoke": "npm run build && node dist/cli.js status && node dist/cli.js workspaces && node dist/cli.js bridge status --json > /dev/null && (node dist/cli.js bridge live-check --json > /dev/null || test $? -eq 2) && (node dist/cli.js bridge live-read --json > /dev/null || test $? -eq 2) && (node dist/cli.js bridge live-move-proof --json > /dev/null || test $? -eq 2) && node dist/cli.js review Space --json > /dev/null && node dist/cli.js apply list --json > /dev/null && node dist/cli.js embeddings status --json > /dev/null && node dist/cli.js index --json > /dev/null && node dist/cli.js sort Space --json > /dev/null && node dist/cli.js sort Space --semantic --preview --json > /dev/null && (node dist/cli.js sort Space --apply --yes --backend live --json > /dev/null || test $? -eq 2) && node dist/cli.js sort Space --preview"
   },
   "repository": {
     "type": "git",
