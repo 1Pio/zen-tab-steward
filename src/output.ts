@@ -1,4 +1,4 @@
-import { BackupManifest, RestoreReceipt } from "./backup.js";
+import { BackupManifest, BackupPruneReceipt, RestoreReceipt } from "./backup.js";
 import { ProfileContext } from "./profile.js";
 import { SessionSummary, TabSummary } from "./session.js";
 import { VERSION } from "./version.js";
@@ -137,6 +137,21 @@ export function formatRestore(receipt: RestoreReceipt): string {
     `receipt: ${receipt.receiptPath}`,
     ...receipt.files.map((file) => `  - ${file.source} (${file.size} bytes, verified)`)
   ].join("\n");
+}
+
+export function formatBackupPrune(receipt: BackupPruneReceipt): string {
+  const lines = [
+    receipt.dryRun ? "Backup prune dry run" : "Backups pruned",
+    `before: ${receipt.before}`,
+    `matched backups: ${receipt.prunedCount}`,
+    `retained backups: ${receipt.retainedCount}`,
+    `files: ${receipt.candidates.reduce((count, candidate) => count + candidate.files.length, 0)}`,
+    `receipt: ${receipt.receiptPath ?? "not written for dry run"}`
+  ];
+  for (const candidate of receipt.candidates) {
+    lines.push(`  - ${candidate.backupId} (${candidate.files.length} files)`);
+  }
+  return lines.join("\n");
 }
 
 export function formatApplyReceiptList(receipts: ApplyReceipt[]): string {

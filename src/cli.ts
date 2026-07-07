@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import { applySortPlanOffline, listApplyReceipts, offlineApplyBlockers, verifyApplyReceipt } from "./apply.js";
-import { createBackup, listBackups, restoreBackup } from "./backup.js";
+import { createBackup, listBackups, pruneBackups, restoreBackup } from "./backup.js";
 import { addDomainRuleInContents, getConfigValue, loadConfig, saveConfigContents, setConfigValueInContents, ZtsConfig } from "./config.js";
-import { envelope, formatApplyReceiptList, formatApplyVerification, formatBackup, formatBackupList, formatRestore, formatReview, formatSortDryRun, formatSortPreview, formatStatus, formatTabs, formatWorkspaces, printJson } from "./output.js";
+import { envelope, formatApplyReceiptList, formatApplyVerification, formatBackup, formatBackupList, formatBackupPrune, formatRestore, formatReview, formatSortDryRun, formatSortPreview, formatStatus, formatTabs, formatWorkspaces, printJson } from "./output.js";
 import { discoverProfileContext } from "./profile.js";
 import { listTabs, loadSession, loadSessionSummary, summarizeSession, withWorkspacePolicy } from "./session.js";
 import { classifyDomainForWorkspace, planSortPreview, SortInputs } from "./sort.js";
@@ -213,10 +213,13 @@ program
 program
   .command("backup")
   .description("Create, list, or restore backups")
-  .argument("[action]", "optional action: list or restore")
+  .argument("[action]", "optional action: list, restore, or prune")
   .argument("[backup-id]", "backup id for restore")
+  .option("--before <iso-date>", "prune backups created before an ISO date")
+  .option("--older-than <duration>", "prune backups older than a duration such as 30d, 12h, or 45m")
+  .option("--dry-run", "show prune candidates without deleting backup files")
   .option("--json", "print stable JSON output")
-  .action(async (action: string | undefined, backupId: string | undefined, options: JsonOption) => {
+  .action(async (action: string | undefined, backupId: string | undefined, options: JsonOption & BackupOptions) => {
     if (action === "list") {
       await runCommand("backup list", options, async () => {
         const context = await discoverProfileContext();
@@ -255,10 +258,24 @@ program
       return;
     }
 
+    if (action === "prune") {
+      await runCommand("backup prune", options, async () => {
+        const context = await discoverProfileContext();
+        const cutoff = pruneCutoff(options);
+        const receipt = await pruneBackups(context.profile.id, cutoff, Boolean(options.dryRun), backupPruneCommand(options));
+        if (options.json) {
+          printJson(envelope("backup prune", { profile: context.profile, receipt }));
+        } else {
+          process.stdout.write(`${formatBackupPrune(receipt)}\n`);
+        }
+      });
+      return;
+    }
+
     if (action) {
       const message = `unknown backup action '${action}'`;
       if (options.json) {
-        printJson(envelope("backup", { action }, { ok: false, blockers: [message], suggestedNextCommands: ["zts backup", "zts backup list"] }));
+        printJson(envelope("backup", { action }, { ok: false, blockers: [message], suggestedNextCommands: ["zts backup", "zts backup list", "zts backup prune --dry-run --older-than 30d"] }));
       } else {
         process.stderr.write(`zts: ${message}\n`);
       }
@@ -456,6 +473,12 @@ interface SortOptions {
   backend?: string;
 }
 
+interface BackupOptions {
+  before?: string;
+  olderThan?: string;
+  dryRun?: boolean;
+}
+
 function sortCommandForReceipt(sourceWorkspace: string | undefined, options: SortOptions): string {
   const parts = ["zts", "sort"];
   if (sourceWorkspace) parts.push(sourceWorkspace);
@@ -464,6 +487,43 @@ function sortCommandForReceipt(sourceWorkspace: string | undefined, options: Sor
   if (options.minConfidence) parts.push("--min-confidence", options.minConfidence);
   if (options.limit) parts.push("--limit", options.limit);
   return parts.join(" ");
+}
+
+function backupPruneCommand(options: BackupOptions): string {
+  const parts = ["zts", "backup", "prune"];
+  if (options.before) parts.push("--before", options.before);
+  if (options.olderThan) parts.push("--older-than", options.olderThan);
+  if (options.dryRun) parts.push("--dry-run");
+  return parts.join(" ");
+}
+
+function pruneCutoff(options: BackupOptions): Date {
+  if (options.before && options.olderThan) {
+    throw new Error("Use only one prune selector: --before or --older-than");
+  }
+  if (options.before) {
+    const before = new Date(options.before);
+    if (!Number.isFinite(before.getTime())) throw new Error("--before must be a valid ISO date");
+    return before;
+  }
+  if (options.olderThan) {
+    return new Date(Date.now() - parseDurationMs(options.olderThan));
+  }
+  throw new Error("Backup prune requires --before <iso-date> or --older-than <duration>");
+}
+
+function parseDurationMs(value: string): number {
+  const match = /^(\d+)(m|h|d)$/.exec(value.trim());
+  if (!match) throw new Error("--older-than must use a duration such as 30d, 12h, or 45m");
+  const amount = Number(match[1]);
+  if (amount <= 0) throw new Error("--older-than must be greater than zero");
+  const unit = match[2];
+  const multipliers: Record<string, number> = {
+    m: 60 * 1000,
+    h: 60 * 60 * 1000,
+    d: 24 * 60 * 60 * 1000
+  };
+  return amount * multipliers[unit];
 }
 
 program.parseAsync(process.argv);

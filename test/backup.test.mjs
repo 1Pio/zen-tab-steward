@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createBackup, listBackups, restoreBackup } from "../dist/backup.js";
+import { backupRootForProfile, createBackup, listBackups, pruneBackups, restoreBackup } from "../dist/backup.js";
 
 test("creates timestamped bak files plus a manifest without mutating source files", async () => {
   const temp = await mkdtemp(join(tmpdir(), "zts-backup-"));
@@ -131,6 +131,67 @@ test("restore refuses while Zen is running", async () => {
     };
 
     await assert.rejects(() => restoreBackup(context, "anything", "zts backup restore anything"), /Zen is running/);
+  } finally {
+    if (oldStateDir === undefined) delete process.env.ZTS_STATE_DIR;
+    else process.env.ZTS_STATE_DIR = oldStateDir;
+  }
+});
+
+test("prunes only backups older than the selected cutoff", async () => {
+  const temp = await mkdtemp(join(tmpdir(), "zts-prune-"));
+  const oldStateDir = process.env.ZTS_STATE_DIR;
+  process.env.ZTS_STATE_DIR = join(temp, "state");
+
+  try {
+    const profilePath = join(temp, "profile");
+    await mkdir(profilePath, { recursive: true });
+    const sessionPath = join(profilePath, "zen-sessions.jsonlz4");
+    await writeFile(sessionPath, "session");
+    const context = {
+      appSupportDir: temp,
+      running: false,
+      runningProcesses: [],
+      profile: {
+        id: "Profile Prune",
+        name: "Profile Prune",
+        path: profilePath,
+        isDefault: true,
+        fromInstallDefault: true
+      },
+      sessionFile: {
+        kind: "zen-sessions",
+        path: sessionPath,
+        exists: true,
+        size: 7,
+        modifiedMs: 1
+      }
+    };
+
+    const oldBackup = await createBackup(context, "zts backup old");
+    const freshBackup = await createBackup(context, "zts backup fresh");
+    const backupRoot = backupRootForProfile(context.profile.id);
+    const oldManifestPath = join(backupRoot, `${oldBackup.id}--manifest.json`);
+    const oldManifest = {
+      ...oldBackup,
+      createdAt: "2020-01-01T00:00:00.000Z"
+    };
+    await writeFile(oldManifestPath, `${JSON.stringify(oldManifest, null, 2)}\n`, "utf8");
+
+    const dryRun = await pruneBackups(context.profile.id, new Date("2021-01-01T00:00:00.000Z"), true, "zts backup prune --dry-run --before 2021-01-01T00:00:00.000Z");
+    assert.equal(dryRun.dryRun, true);
+    assert.equal(dryRun.prunedCount, 1);
+    assert.equal(dryRun.retainedCount, 1);
+    assert.equal((await listBackups(context.profile.id)).length, 2);
+
+    const receipt = await pruneBackups(context.profile.id, new Date("2021-01-01T00:00:00.000Z"), false, "zts backup prune --before 2021-01-01T00:00:00.000Z");
+    assert.equal(receipt.dryRun, false);
+    assert.equal(receipt.prunedCount, 1);
+    assert.ok(receipt.receiptPath);
+    await assert.rejects(() => readFile(oldManifestPath, "utf8"), /ENOENT/);
+    await assert.rejects(() => readFile(oldBackup.files[0].backup, "utf8"), /ENOENT/);
+    const remaining = await listBackups(context.profile.id);
+    assert.equal(remaining.length, 1);
+    assert.equal(remaining[0].id, freshBackup.id);
   } finally {
     if (oldStateDir === undefined) delete process.env.ZTS_STATE_DIR;
     else process.env.ZTS_STATE_DIR = oldStateDir;

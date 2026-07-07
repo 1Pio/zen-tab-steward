@@ -53,6 +53,19 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
   assert.equal(backupListJson.ok, true);
   assert.equal(backupListJson.data.backups.length, 1);
 
+  const backupPruneDryRun = await execFileAsync("node", ["dist/cli.js", "backup", "prune", "--dry-run", "--before", "2999-01-01T00:00:00.000Z", "--json"], { env });
+  const backupPruneDryRunJson = JSON.parse(backupPruneDryRun.stdout);
+  assert.equal(backupPruneDryRunJson.ok, true);
+  assert.equal(backupPruneDryRunJson.data.receipt.dryRun, true);
+  assert.equal(backupPruneDryRunJson.data.receipt.prunedCount, 1);
+
+  const backupPruneMissingSelector = spawnSync("node", ["dist/cli.js", "backup", "prune", "--json"], {
+    env,
+    encoding: "utf8"
+  });
+  assert.equal(backupPruneMissingSelector.status, 1);
+  assert.match(JSON.parse(backupPruneMissingSelector.stdout).blockers.join("\n"), /requires --before/);
+
   const sort = spawnSync("node", ["dist/cli.js", "sort", "Space", "--dry-run", "--json"], {
     env,
     encoding: "utf8"

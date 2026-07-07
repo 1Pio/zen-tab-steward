@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readdir, stat, copyFile, readFile, writeFile, rename } from "node:fs/promises";
+import { mkdir, readdir, stat, copyFile, readFile, writeFile, rename, rm } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { stateDir } from "./paths.js";
 import { ProfileContext } from "./profile.js";
@@ -42,6 +42,32 @@ export interface RestoreReceipt {
   ztsVersion: string;
   files: RestoreFileReceipt[];
   receiptPath: string;
+}
+
+export interface BackupPruneFile {
+  path: string;
+  size: number;
+  kind: "backup" | "manifest";
+}
+
+export interface BackupPruneCandidate {
+  backupId: string;
+  createdAt: string;
+  files: BackupPruneFile[];
+}
+
+export interface BackupPruneReceipt {
+  id: string;
+  createdAt: string;
+  profileId: string;
+  before: string;
+  dryRun: boolean;
+  command: string;
+  ztsVersion: string;
+  prunedCount: number;
+  retainedCount: number;
+  candidates: BackupPruneCandidate[];
+  receiptPath: string | null;
 }
 
 export function backupRootForProfile(profileId: string): string {
@@ -147,6 +173,60 @@ export async function restoreBackup(context: ProfileContext, backupId: string | 
   return receipt;
 }
 
+export async function pruneBackups(profileId: string, before: Date, dryRun: boolean, command: string): Promise<BackupPruneReceipt> {
+  if (!Number.isFinite(before.getTime())) throw new Error("Prune cutoff is not a valid date");
+
+  const backupRoot = backupRootForProfile(profileId);
+  const backups = await listBackups(profileId);
+  const candidates: BackupPruneCandidate[] = [];
+  const cutoff = before.getTime();
+
+  for (const backup of backups) {
+    const createdMs = Date.parse(backup.createdAt);
+    if (!Number.isFinite(createdMs) || createdMs >= cutoff) continue;
+    candidates.push({
+      backupId: backup.id,
+      createdAt: backup.createdAt,
+      files: await pruneFilesForManifest(backup, backupRoot)
+    });
+  }
+
+  if (!dryRun) {
+    for (const candidate of candidates) {
+      for (const file of candidate.files) {
+        await rm(file.path, { force: true });
+      }
+    }
+  }
+
+  const createdAt = new Date().toISOString();
+  const id = createdAt;
+  let receiptPath: string | null = null;
+  const receipt: BackupPruneReceipt = {
+    id,
+    createdAt,
+    profileId,
+    before: before.toISOString(),
+    dryRun,
+    command,
+    ztsVersion: VERSION,
+    prunedCount: candidates.length,
+    retainedCount: backups.length - candidates.length,
+    candidates,
+    receiptPath
+  };
+
+  if (!dryRun) {
+    const receiptRoot = join(stateDir(), "backup-prunes", sanitizePathSegment(profileId));
+    await mkdir(receiptRoot, { recursive: true });
+    receiptPath = join(receiptRoot, `${id}--backup-prune.json`);
+    receipt.receiptPath = receiptPath;
+    await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, "utf8");
+  }
+
+  return receipt;
+}
+
 async function preflightRestoreFiles(
   manifest: BackupManifest,
   expectedSources: Set<string>,
@@ -172,6 +252,31 @@ async function preflightRestoreFiles(
     }
   }
   return manifest.files;
+}
+
+async function pruneFilesForManifest(manifest: BackupManifest, backupRoot: string): Promise<BackupPruneFile[]> {
+  const files: BackupPruneFile[] = [];
+  for (const file of manifest.files) {
+    if (!isPathInside(file.backup, backupRoot)) {
+      throw new Error(`Backup ${manifest.id} contains an unexpected backup path: ${file.backup}`);
+    }
+    files.push({
+      path: file.backup,
+      size: await fileSizeOrZero(file.backup),
+      kind: "backup"
+    });
+  }
+
+  const manifestPath = join(backupRoot, `${manifest.id}--manifest.json`);
+  if (!isPathInside(manifestPath, backupRoot)) {
+    throw new Error(`Backup ${manifest.id} resolves to an unexpected manifest path: ${manifestPath}`);
+  }
+  files.push({
+    path: manifestPath,
+    size: await fileSizeOrZero(manifestPath),
+    kind: "manifest"
+  });
+  return files;
 }
 
 export async function listBackups(profileId: string): Promise<BackupManifest[]> {
@@ -225,6 +330,15 @@ async function exists(path: string): Promise<boolean> {
     return true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function fileSizeOrZero(path: string): Promise<number> {
+  try {
+    return (await stat(path)).size;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
     throw error;
   }
 }
