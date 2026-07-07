@@ -1,8 +1,8 @@
 # Zen Tab Steward
 
-Zen Tab Steward is a user-owned CLI for inspecting, backing up, planning, and carefully sorting Zen Browser tab and workspace state. The command is `zts`.
+Zen Tab Steward is a user-owned CLI for inspecting, backing up, previewing, and carefully sorting Zen Browser tabs and workspaces. The command is `zts`.
 
-The implementation is deliberately conservative. It can discover the local Zen profile, parse `zen-sessions.jsonlz4`, report workspace/tab protection state, create backups, show deterministic sort previews, and apply eligible tab moves through the offline session backend when Zen is closed. It also has a gated live backend that drives exact one-tab live move proofs from the sort plan when Zen is running and attachable. It does not write active Zen session files, install a service, start a daemon, create a browser extension, or set up autostart.
+The implementation is deliberately conservative. It can discover the local Zen profile, parse `zen-sessions.jsonlz4`, report workspace/tab protection state, create backups, show a glanceable sort preview, and apply eligible tab moves through the offline session backend when Zen is closed. It also has a gated live backend that drives Zen's own internal workspace move via a local WebDriver BiDi bridge when Zen is running and attachable. It never writes active Zen session files, installs a service, starts a daemon, creates a browser extension, or sets up autostart.
 
 ## Install
 
@@ -20,11 +20,9 @@ zts --version
 zts status
 zts workspaces
 zts tabs
+zts sort --preview
 zts backup
-zts bridge status
-zts bridge live-check
-zts bridge live-read
-zts bridge live-move-proof
+zts bridge doctor
 zts review
 zts config path
 zts rules
@@ -38,18 +36,11 @@ node dist/cli.js status
 
 ## Commands
 
-`zts status` reports:
+`zts status` reports the discovered profile path, whether Zen is running, the selected session source, workspace/tab/pinned/essential/folder/group counts, backend readiness, and the current sort posture in one scannable block.
 
-- discovered profile path
-- whether Zen is running
-- selected session file source
-- workspace, tab, pinned, essential, folder, and group counts
-- backup/config paths
-- current safety posture
+`zts workspaces` lists workspaces as a compact aligned table with pinned/grouped/essential counts and inbox/protected markers. Use `--json` for ids and full metadata.
 
-`zts workspaces` lists workspace names, ids, tab counts, pinned counts, essential counts, folder/group counts, protected status, default inbox status, sortable-from status, and sortable-to status.
-
-`zts tabs [workspace]` lists tabs with title, URL, domain, workspace, pinned, essential, grouped/foldered, hidden, and protection metadata.
+`zts tabs [workspace]` lists tabs as one scannable line per tab with `P`/`E`/`G`/`F` markers (pinned/essential/grouped/foldered). Use `--json` for full metadata.
 
 `zts backup` copies readable session-state files into:
 
@@ -61,25 +52,61 @@ Each backup includes timestamped `.bak` files and a timestamped `manifest.json` 
 
 `zts backup restore <backup-id>` restores a saved backup only when Zen is closed. Restore preflights every backup target and hash before any profile write, creates a fresh safety backup of the current profile first, writes each restored file through a temp file and rename, verifies restored hashes, and writes a restore receipt.
 
-`zts backup prune --before <iso-date>` and `zts backup prune --older-than <duration>` remove old zts-owned backup manifests and `.bak` files from the backup state directory. Use `--dry-run` to preview the exact backups and files that would be removed.
+`zts backup prune --before <iso-date>` and `zts backup backup prune --older-than <duration>` remove old zts-owned backup manifests and `.bak` files from the backup state directory. Use `--dry-run` to preview the exact backups and files that would be removed.
 
-`zts bridge status` and `zts bridge doctor` inspect the live-backend boundary without changing Zen state. They report whether the current Zen browser process has any candidate privileged remote-control launch flags, list the current blockers, and show that live apply remains gated until the stricter attachment check passes.
+### Sorting tabs
 
-`zts bridge live-check` is a stricter read-only attachment gate for the discovered live profile. It refuses unless Zen is running for the profile, a browser process explicitly matches the profile path, that browser process has candidate privileged remote-control launch flags, the profile has a local `WebDriverBiDiServer.json`, and that file points to a local-only WebDriver BiDi endpoint. It reports attachable only when `--connect` is used and WebDriver BiDi `session.status` succeeds. This command does not move tabs.
+`zts sort [source-workspace]` is the main command. It defaults to a **glanceable preview** — never a surprise write.
 
-`zts bridge live-read` requires the same live attachment gate, then creates a WebDriver BiDi session and runs a read-only browser-chrome script against the live profile to verify the Zen chrome context, `gZenWorkspaces`, active workspace id, and workspace count. It does not move tabs or write Zen state.
+```bash
+zts sort                 # preview the configured inbox workspace
+zts sort Space           # preview a named source workspace
+zts sort Space --dry-run # full operational plan (every action with reasons)
+zts sort Space --apply   # apply all safe moves (respects protection + confidence + filters)
+zts sort Space --apply --limit 3   # apply a small confident batch first
+zts sort Space --apply --yes       # skip the interactive confirmation (agents/scripts)
+```
 
-`zts bridge live-move-proof` is the first gated live movement proof. It refuses unless you pass `--confirm-live-move`, `--url <exact-tab-url>`, `--from-workspace <workspace-id>`, and `--to-workspace <workspace-id>`, and the live attachment gate passes. It moves at most one exact URL match from the exact source workspace to the exact destination workspace, and refuses pinned, essential, grouped, foldered, ambiguous, unmatched, or same-workspace moves. `zts sort --backend live` uses the same proof machinery for each planned move after creating a backup and writing a live apply receipt.
+The preview groups moves by destination with confidence, sample titles, a compact protected summary, and review items with suggested destinations — so you can genuinely see what will move where before committing.
 
-`zts bridge probe` launches a disposable headless Zen instance with a temporary profile, checks local WebDriver BiDi, creates a session, executes harmless script in a content context, executes harmless script in Zen browser chrome, verifies `gZenWorkspaces` is reachable, performs one disposable temp-profile workspace tab move through Zen internals, then terminates the process and removes the temporary profile. It is still a proof only: it does not attach to the live profile and does not move live tabs.
+`--apply` is the single write trigger. It applies every move that passes the safety rules: pinned and essential protection (unless `--include-pinned` / `--include-essentials`), the confidence threshold (`--min-confidence`), destination policy (`--to` / `--not-to`), and source filters (`--only` / `--except`). Combining `--apply` with those flags gives full granular control; `--apply` alone is "apply everything safe".
 
-`zts sort [workspace] --preview` produces a safe read-only preview. It uses deterministic domain rules where a matching destination workspace exists, skips pinned tabs and essentials by default, and represents grouped/foldered structures as single review entities so they are not split. Every sortable entity from the source workspace is classified as move, skip, review, or blocked.
+Filter flags work the same for preview, dry-run, and apply:
 
-Preview and dry-run commands exit successfully because they do not write. Preview is glance-oriented; dry-run prints the full action list with reasons and explanations. Use `--limit <count>` to cap planned move actions for a controlled proof; eligible overflow actions are kept in review with reason `over_move_limit`. Plain `zts sort [workspace]` and `zts sort [workspace] --apply` attempt to apply eligible planned moves using the selected backend. The session backend applies only when Zen is closed and `zen-sessions.jsonlz4` is the selected session source. The live backend applies only when Zen is running, the live attachment gate passes, and every planned tab move passes exact URL/workspace protection checks.
+```bash
+zts sort Space --only github.com,*.framer.com
+zts sort Space --except youtube.com,chatgpt.com
+zts sort Space --to Portfolio,Tool Development --not-to Stash
+zts sort Space --min-confidence 0.85
+zts sort Space --include-pinned
+```
 
-`zts review [workspace]` lists only the sort-plan items that need attention, including low-confidence items, move-limit overflow, and grouped/foldered aggregate entities. It is read-only and supports the same policy/filter flags as `zts sort`.
+On a TTY, `--apply` asks for a confirmation before writing; pass `--yes` to skip it (Raycast, agents, scripts). A timestamped backup is always created before any write, and an apply receipt is written under the state directory.
 
-`zts apply list` lists sort-apply receipts for the discovered profile. Session receipts are reverified against the current selected session file with `zts apply verify <receipt-id>`, which exits with status `2` if recorded moves no longer match. Live receipts are reverified through a read-only live bridge check when the live attachment gate passes; if the current Zen process is not attachable, verification refuses with the live-check blockers instead of reading stale session files.
+`zts review [workspace]` lists only the sort-plan items that need attention — low-confidence items, move-limit overflow, and grouped/foldered aggregate entities. It is read-only.
+
+`zts apply list` lists sort-apply receipts. `zts apply verify <receipt-id>` re-verifies recorded moves against the current session and exits with status `2` if they no longer match. Live receipts are reverified through a read-only live bridge check when the live attachment gate passes.
+
+### Backends
+
+`zts sort --backend auto` (default) picks the session backend when Zen is closed and the live backend when Zen is running. `--backend session` forces the offline session backend. `--backend live` forces the live backend.
+
+- **Session backend**: mutates `zen-sessions.jsonlz4` only when Zen is closed, after a fresh backup, and verifies every recorded move. Preserves all unknown session fields.
+- **Live backend**: drives Zen's own `gZenWorkspaces.moveTabToWorkspace(...)` through a local WebDriver BiDi bridge. Gated behind an explicit attachment check and per-tab safety checks. See the bridge section below.
+
+### The live bridge (optional, opt-in)
+
+The live backend needs Zen itself to accept a local remote-control connection. A normally-launched Zen does not expose one, so `zts sort --apply` falls back to "preview only" while Zen is running. This is an intentional safety boundary, not a bug.
+
+`zts bridge status` and `zts bridge doctor` inspect the boundary read-only and list the exact blockers. `zts bridge doctor` also prints the **opt-in launch hint** — the exact command to relaunch Zen with local remote debugging flags so the live backend can attach. It is local-only and security-sensitive; `zts` never relaunches Zen for you:
+
+```bash
+zts bridge doctor   # shows the opt-in launch command and current blockers
+```
+
+`zts bridge live-check [--connect]` is the stricter read-only attachment gate. `zts bridge live-read` and `zts bridge live-move-proof` prove read and one-tab-move access after the gate passes. `zts bridge probe` runs a disposable headless Zen proof that does not touch your live profile.
+
+### Config and rules
 
 `zts config` inspects and updates the user config at:
 
@@ -87,9 +114,7 @@ Preview and dry-run commands exit successfully because they do not write. Previe
 ~/.config/zen-tab-steward/config.toml
 ```
 
-Supported keys include `defaults.inbox`, `defaults.min_confidence`, `defaults.include_pinned`, `defaults.include_essentials`, `defaults.apply_backend`, `sort.from`, `sort.to`, `sort.not_to`, `sort.only`, `sort.except`, `protect.workspaces.from`, `protect.workspaces.to`, and `protect.domains.never_move`.
-
-`zts rules` manages deterministic domain routing rules:
+`zts rules` manages deterministic domain routing rules used by sorting:
 
 ```bash
 zts rules
@@ -97,7 +122,7 @@ zts rules add domain docs.example.com Research
 zts rules test https://docs.example.com/page
 ```
 
-Rules are stored in the config file and are used by `zts sort --preview`.
+Routing rules are the single source of truth for deterministic destinations — `zts` ships no built-in domain assumptions, so it works for anyone's workflow.
 
 ## JSON Output
 
@@ -119,16 +144,16 @@ zts bridge live-move-proof --json
 zts bridge probe --json
 zts apply list --json
 zts apply verify <receipt-id> --json
-zts sort Space --preview --json
+zts sort Space --json
 zts sort Space --dry-run --json
-zts sort Space --dry-run --limit 3 --json
+zts sort Space --apply --yes --json
 zts review Space --json
 zts sort Space --backend session --json
 zts config show --json
 zts rules test https://github.com/1Pio/zen-tab-steward --json
 ```
 
-JSON output is structured for future Raycast and agent use. It includes version, command, success state, warnings, blockers, suggested next commands, and command-specific data.
+The sort envelope reports `mode` (`preview`, `dry-run`, or `apply`) and an `apply` object with `ready`, `backend`, and `receipt`. JSON output is structured for future Raycast and agent use: version, command, success state, warnings, blockers, suggested next commands, and command-specific data.
 
 ## Safety Boundary
 
@@ -136,11 +161,13 @@ The current implementation has read, backup, preview, offline session apply, and
 
 - It reads Zen profile metadata and session files.
 - It parses `mozLz40\0` JSONLZ4 session files.
+- `zts sort` defaults to a read-only preview; writes happen only with `--apply`.
 - It copies files for backups.
 - It restores backups only when Zen is closed.
 - It refuses offline session apply while Zen is running.
 - It runs live apply only after the explicit live attachment gate and exact tab-safety checks pass.
-- It can inspect live-backend launch evidence with `zts bridge status` and `zts bridge doctor`, but those commands are read-only.
+- On a TTY, `--apply` asks for confirmation; `--yes` skips it for agents/scripts.
+- It can inspect live-backend launch evidence with `zts bridge status` and `zts bridge doctor` (read-only); `doctor` prints the opt-in relaunch command for users who want the live backend.
 - It can run `zts bridge live-check` as a read-only live-profile attachment gate; refusal is expected unless Zen was launched with the required remote-control flags and a local WebDriver BiDi server file exists.
 - It can run `zts bridge live-read` as a read-only live-profile browser-chrome proof after the attachment gate passes; it does not move tabs.
 - It can run `zts bridge live-move-proof` only with explicit confirmation and exact tab/workspace selectors; `zts sort --backend live` reuses that gated proof machinery.

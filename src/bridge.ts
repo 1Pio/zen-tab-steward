@@ -46,6 +46,7 @@ export interface BridgeInspection {
   candidatePrivilegedTransportDetected: boolean;
   requiredLaunchFlags: string[];
   candidateInternalApis: string[];
+  launchHint: string | null;
   processes: BridgeProcessSummary[];
   checks: BridgeCheck[];
   warnings: string[];
@@ -287,12 +288,27 @@ export function inspectBridge(context: ProfileContext): BridgeInspection {
       "gZenWorkspaces.saveWorkspace(...)",
       "ZenWindowSync.moveTabsToSyncedWorkspace(...)"
     ],
+    launchHint: bridgeLaunchHint(context, candidatePrivilegedTransportDetected),
     processes,
     checks: bridgeChecks(context.running, browserProcesses.length, candidateTransportDetected, candidatePrivilegedTransportDetected),
     warnings,
     blockers,
     suggestedNextCommands: ["zts bridge doctor", "zts sort --preview", "zts status"]
   };
+}
+
+function bridgeLaunchHint(context: ProfileContext, privilegedTransportDetected: boolean): string | null {
+  if (privilegedTransportDetected) return null;
+  const appPath = "/Applications/Zen.app/Contents/MacOS/zen";
+  return [
+    `# Quit Zen fully, then relaunch it with local remote debugging (opt-in, local-only, security-sensitive):`,
+    `${appPath} \\`,
+    `  --profile "${context.profile.path}" \\`,
+    `  --remote-debugging-port 9222 \\`,
+    `  --remote-allow-hosts 127.0.0.1,localhost \\`,
+    `  --remote-allow-origins '*' \\`,
+    `  --remote-allow-system-access`
+  ].join("\n");
 }
 
 export async function inspectLiveAttachment(

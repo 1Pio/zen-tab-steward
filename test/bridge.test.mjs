@@ -40,6 +40,26 @@ test("bridge inspection detects privileged remote launch evidence without treati
   assert.match(inspection.warnings.join("\n"), /Remote launch flags are only transport evidence/);
 });
 
+test("bridge inspection offers an opt-in launch hint only when privileged transport is absent", () => {
+  const gated = inspectBridge(context({ running: false, runningProcesses: [] }));
+  assert.ok(gated.launchHint);
+  assert.match(gated.launchHint, /--remote-debugging-port/);
+  assert.match(gated.launchHint, /--remote-allow-system-access/);
+  assert.match(gated.launchHint, /security-sensitive/);
+
+  const privileged = inspectBridge(context({
+    running: true,
+    runningProcesses: [
+      {
+        pid: 42,
+        args: `/Applications/Zen.app/Contents/MacOS/zen -profile ${profilePath} --remote-debugging-port=9222 --remote-allow-system-access`,
+        profilePath
+      }
+    ]
+  }));
+  assert.equal(privileged.launchHint, null);
+});
+
 test("bridge process summary ignores content process flags for browser readiness", () => {
   const process = summarizeBridgeProcess({
     pid: 7,

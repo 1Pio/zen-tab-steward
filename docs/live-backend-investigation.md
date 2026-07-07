@@ -173,3 +173,18 @@ The next live-backend spike should stay narrow until it can prove on the real pr
 - how to move one intentionally selected low-risk live tab through `zts sort --backend live --limit 1`,
 - how to verify the move from Zen state after the call and preserve the receipt,
 - how to fail closed without installing services, extensions, mods, or autostart items.
+
+## User-Owned Opt-In Path
+
+`zts bridge doctor` prints the exact relaunch command for a user who wants to try the live backend against their own profile. `zts` never relaunches Zen itself. The command is local-only and security-sensitive, and is the only currently-known way to make a running Zen attachable without an extension, mod, service, or autostart item:
+
+```bash
+/Applications/Zen.app/Contents/MacOS/zen \
+  --profile "<profile-path>" \
+  --remote-debugging-port 9222 \
+  --remote-allow-hosts 127.0.0.1,localhost \
+  --remote-allow-origins '*' \
+  --remote-allow-system-access
+```
+
+After relaunch, `zts bridge live-check --connect` reports whether the profile is now attachable, and `zts sort --backend live --limit 1 --apply --yes` can move one verified low-risk tab through Zen's own `gZenWorkspaces.moveTabToWorkspace(...)` for a narrow proof.

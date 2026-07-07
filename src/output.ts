@@ -105,10 +105,15 @@ export function formatBridge(bridge: BridgeInspection, mode: "status" | "doctor"
       ...bridge.requiredLaunchFlags.map((flag) => `  - ${flag}`),
       "",
       "Candidate internal APIs:",
-      ...bridge.candidateInternalApis.map((api) => `  - ${api}`),
-      "",
-      "Processes:"
+      ...bridge.candidateInternalApis.map((api) => `  - ${api}`)
     );
+
+    if (bridge.launchHint) {
+      lines.push("", "Opt-in live-backend launch (quit Zen first, local-only, security-sensitive):");
+      for (const hintLine of bridge.launchHint.split(/\r?\n/)) lines.push(`  ${hintLine}`);
+    }
+
+    lines.push("", "Processes:");
 
     if (bridge.processes.length === 0) {
       lines.push("  - none");

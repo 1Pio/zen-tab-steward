@@ -146,6 +146,25 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
   assert.match(sortDryRunHuman.stdout, /reason: domain_rule/);
   assert.match(sortDryRunHuman.stdout, /Skipped:/);
 
+  const previewHuman = spawnSync("node", ["dist/cli.js", "sort", "Space", "--preview"], {
+    env,
+    encoding: "utf8"
+  });
+  assert.equal(previewHuman.status, 0);
+  assert.match(previewHuman.stdout, /Sort preview · Space/);
+  assert.match(previewHuman.stdout, /Will move 1 tab to 1 workspace/);
+  assert.match(previewHuman.stdout, /Portfolio/);
+  assert.match(previewHuman.stdout, /conf 0\.90 high/);
+  assert.match(previewHuman.stdout, /Apply ready/);
+
+  const defaultIsPreview = spawnSync("node", ["dist/cli.js", "sort", "Space"], {
+    env,
+    encoding: "utf8"
+  });
+  assert.equal(defaultIsPreview.status, 0);
+  assert.match(defaultIsPreview.stdout, /Sort preview · Space/);
+  assert.equal(JSON.parse(spawnSync("node", ["dist/cli.js", "sort", "Space", "--json"], { env, encoding: "utf8" }).stdout).data.mode, "preview");
+
   const review = await execFileAsync("node", ["dist/cli.js", "review", "Space", "--json"], { env });
   const reviewJson = JSON.parse(review.stdout);
   assert.equal(reviewJson.ok, true);
