@@ -3,7 +3,7 @@ import { Command } from "commander";
 import { applySortPlanOffline, offlineApplyBlockers } from "./apply.js";
 import { createBackup, listBackups, restoreBackup } from "./backup.js";
 import { addDomainRuleInContents, getConfigValue, loadConfig, saveConfigContents, setConfigValueInContents, ZtsConfig } from "./config.js";
-import { envelope, formatBackup, formatBackupList, formatRestore, formatSortPreview, formatStatus, formatTabs, formatWorkspaces, printJson } from "./output.js";
+import { envelope, formatBackup, formatBackupList, formatRestore, formatSortDryRun, formatSortPreview, formatStatus, formatTabs, formatWorkspaces, printJson } from "./output.js";
 import { discoverProfileContext } from "./profile.js";
 import { listTabs, loadSession, loadSessionSummary, summarizeSession, withWorkspacePolicy } from "./session.js";
 import { classifyDomainForWorkspace, planSortPreview, SortInputs } from "./sort.js";
@@ -315,7 +315,7 @@ program
         printJson(envelope("sort", data, { ok, blockers: applyBlockers, suggestedNextCommands }));
         process.exitCode = ok ? 0 : 2;
       } else {
-        process.stdout.write(`${formatSortPreview(plan, applyBlockers, suggestedNextCommands, applyReceipt)}\n`);
+        process.stdout.write(`${options.dryRun ? formatSortDryRun(plan, applyBlockers, suggestedNextCommands) : formatSortPreview(plan, applyBlockers, suggestedNextCommands, applyReceipt)}\n`);
         process.exitCode = ok ? 0 : 2;
       }
     });

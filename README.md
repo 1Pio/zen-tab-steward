@@ -58,7 +58,7 @@ Each backup includes timestamped `.bak` files and a timestamped `manifest.json` 
 
 `zts sort [workspace] --preview` produces a safe read-only preview. It uses deterministic domain rules where a matching destination workspace exists, skips pinned tabs and essentials by default, and treats grouped/foldered tabs as protected so they are not split. Every tab from the source workspace is classified as move, skip, review, or blocked.
 
-Preview and dry-run commands exit successfully because they do not write. Plain `zts sort [workspace]` and `zts sort [workspace] --apply` attempt to apply eligible planned moves using the selected backend. Today, only the offline session backend can apply, and only when Zen is closed and `zen-sessions.jsonlz4` is the selected session source. If Zen is running, apply refuses and shows the same plan plus blockers.
+Preview and dry-run commands exit successfully because they do not write. Preview is glance-oriented; dry-run prints the full action list with reasons and explanations. Plain `zts sort [workspace]` and `zts sort [workspace] --apply` attempt to apply eligible planned moves using the selected backend. Today, only the offline session backend can apply, and only when Zen is closed and `zen-sessions.jsonlz4` is the selected session source. If Zen is running, apply refuses and shows the same plan plus blockers.
 
 `zts config` inspects and updates the user config at:
 
@@ -66,7 +66,7 @@ Preview and dry-run commands exit successfully because they do not write. Plain 
 ~/.config/zen-tab-steward/config.toml
 ```
 
-Supported keys include `defaults.inbox`, `defaults.min_confidence`, `defaults.include_pinned`, `defaults.include_essentials`, `defaults.apply_backend`, `sort.to`, `sort.not_to`, `sort.only`, `sort.except`, `protect.workspaces.from`, `protect.workspaces.to`, and `protect.domains.never_move`.
+Supported keys include `defaults.inbox`, `defaults.min_confidence`, `defaults.include_pinned`, `defaults.include_essentials`, `defaults.apply_backend`, `sort.from`, `sort.to`, `sort.not_to`, `sort.only`, `sort.except`, `protect.workspaces.from`, `protect.workspaces.to`, and `protect.domains.never_move`.
 
 `zts rules` manages deterministic domain routing rules:
 
@@ -114,6 +114,8 @@ The current implementation has read, backup, preview, and offline session apply 
 - It does not mutate files inside the active Zen profile while Zen is running.
 
 Pinned tabs and essentials are counted explicitly using Zen's observed `pinned` and `zenEssential` fields. Folder and group records are counted so later sorting can protect them as unsplittable entities.
+
+See [docs/live-backend-investigation.md](docs/live-backend-investigation.md) for the current live-backend evidence and blocker receipt.
 
 ## Development
 

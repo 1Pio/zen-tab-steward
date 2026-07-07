@@ -18,6 +18,13 @@ min_confidence = 0.9
 include_pinned = true
 apply_backend = "session"
 
+[sort]
+from = ["Space"]
+to = ["Portfolio"]
+not_to = ["Stash"]
+only = ["github.com"]
+except = ["youtube.com"]
+
 [rules.domains]
 "example.com" = "Portfolio"
 `);
@@ -26,17 +33,25 @@ apply_backend = "session"
   assert.equal(config.defaults.minConfidence, 0.9);
   assert.equal(config.defaults.includePinned, true);
   assert.equal(config.defaults.applyBackend, "session");
+  assert.deepEqual(config.sort.from, ["Space"]);
+  assert.deepEqual(config.sort.to, ["Portfolio"]);
+  assert.deepEqual(config.sort.notTo, ["Stash"]);
+  assert.deepEqual(config.sort.only, ["github.com"]);
+  assert.deepEqual(config.sort.except, ["youtube.com"]);
   assert.equal(config.rules.domains["example.com"], "Portfolio");
+  assert.match(formatConfig(config), /from = \["Space"]/);
   assert.match(formatConfig(config), /"example.com" = "Portfolio"/);
 });
 
 test("gets, sets, and adds supported config values", () => {
   const withInbox = setConfigValue(parseConfig(""), "defaults.inbox", "Inbox");
   const withConfidence = setConfigValue(withInbox, "defaults.min_confidence", "0.7");
-  const withRule = addDomainRule(withConfidence, "docs.example.com", "Research");
+  const withSourceAllowlist = setConfigValue(withConfidence, "sort.from", "Space,Inbox");
+  const withRule = addDomainRule(withSourceAllowlist, "docs.example.com", "Research");
 
   assert.equal(getConfigValue(withRule, "defaults.inbox"), "Inbox");
   assert.equal(getConfigValue(withRule, "defaults.min_confidence"), 0.7);
+  assert.deepEqual(getConfigValue(withRule, "sort.from"), ["Space", "Inbox"]);
   assert.equal(getConfigValue(withRule, "rules.domains.docs.example.com"), "Research");
 });
 
@@ -47,6 +62,7 @@ test("patches supported values without dropping comments or unknown sections", (
     "inbox = \"Space\"",
     "",
     "[sort]",
+    "from = [\"Space\"]",
     "to = [\"Portfolio\"]",
     "",
     "[rules.domains]",
@@ -59,6 +75,7 @@ test("patches supported values without dropping comments or unknown sections", (
 
   assert.match(withRule, /# keep me/);
   assert.match(withRule, /\[sort]/);
+  assert.match(withRule, /from = \["Space"]/);
   assert.match(withRule, /to = \["Portfolio"]/);
   assert.match(withRule, /min_confidence = 0.9/);
   assert.match(withRule, /"docs.example.com" = "Research"/);

@@ -64,6 +64,16 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
   assert.equal(sortJson.data.plan.moveCount, 1);
   assert.equal(sortJson.data.plan.skipCount, 2);
 
+  const sortDryRunHuman = spawnSync("node", ["dist/cli.js", "sort", "Space", "--dry-run"], {
+    env,
+    encoding: "utf8"
+  });
+  assert.equal(sortDryRunHuman.status, 0);
+  assert.match(sortDryRunHuman.stdout, /Sort dry run: Space/);
+  assert.match(sortDryRunHuman.stdout, /Moves:/);
+  assert.match(sortDryRunHuman.stdout, /reason: domain_rule/);
+  assert.match(sortDryRunHuman.stdout, /Skipped:/);
+
   const sortWithKnownFlags = spawnSync(
     "node",
     [
@@ -169,6 +179,9 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
   const protectSet = await execFileAsync("node", ["dist/cli.js", "config", "set", "protect.workspaces.from", "Stash", "--json"], { env });
   assert.deepEqual(JSON.parse(protectSet.stdout).data.value, ["Stash"]);
 
+  const sortFromSet = await execFileAsync("node", ["dist/cli.js", "config", "set", "sort.from", "Space", "--json"], { env });
+  assert.deepEqual(JSON.parse(sortFromSet.stdout).data.value, ["Space"]);
+
   await execFileAsync("node", ["dist/cli.js", "config", "set", "defaults.inbox", "Stash", "--json"], { env });
 
   const rulesAdd = await execFileAsync("node", ["dist/cli.js", "rules", "add", "domain", "docs.example.com", "Research", "--json"], { env });
@@ -192,6 +205,7 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
   });
   assert.equal(sortWithDefaultInbox.status, 0);
   assert.equal(JSON.parse(sortWithDefaultInbox.stdout).data.sourceWorkspace.name, "Stash");
+  assert.equal(JSON.parse(sortWithDefaultInbox.stdout).data.plan.blockedActions[0].reason, "source_workspace_protected");
 });
 
 async function makeZenFixture() {

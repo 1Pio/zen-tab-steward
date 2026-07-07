@@ -11,6 +11,7 @@ export interface ZtsConfig {
     applyBackend: "auto" | "live" | "session";
   };
   sort: {
+    from: string[];
     to: string[];
     notTo: string[];
     only: string[];
@@ -46,6 +47,7 @@ export const DEFAULT_CONFIG: ZtsConfig = {
     applyBackend: "auto"
   },
   sort: {
+    from: [],
     to: [],
     notTo: [],
     only: [],
@@ -131,6 +133,7 @@ export function formatConfig(config: ZtsConfig): string {
     `apply_backend = ${quote(config.defaults.applyBackend)}`,
     "",
     "[sort]",
+    `from = ${formatArray(config.sort.from)}`,
     `to = ${formatArray(config.sort.to)}`,
     `not_to = ${formatArray(config.sort.notTo)}`,
     `only = ${formatArray(config.sort.only)}`,
@@ -159,6 +162,7 @@ export function getConfigValue(config: ZtsConfig, keyPath: string): unknown {
   if (keyPath === "defaults.include_pinned") return config.defaults.includePinned;
   if (keyPath === "defaults.include_essentials") return config.defaults.includeEssentials;
   if (keyPath === "defaults.apply_backend") return config.defaults.applyBackend;
+  if (keyPath === "sort.from") return config.sort.from;
   if (keyPath === "sort.to") return config.sort.to;
   if (keyPath === "sort.not_to") return config.sort.notTo;
   if (keyPath === "sort.only") return config.sort.only;
@@ -179,6 +183,7 @@ export function setConfigValue(config: ZtsConfig, keyPath: string, rawValue: str
   else if (keyPath === "defaults.include_pinned") next.defaults.includePinned = parseBoolean(rawValue);
   else if (keyPath === "defaults.include_essentials") next.defaults.includeEssentials = parseBoolean(rawValue);
   else if (keyPath === "defaults.apply_backend") next.defaults.applyBackend = parseBackend(rawValue);
+  else if (keyPath === "sort.from") next.sort.from = parseStringArray(rawValue);
   else if (keyPath === "sort.to") next.sort.to = parseStringArray(rawValue);
   else if (keyPath === "sort.not_to") next.sort.notTo = parseStringArray(rawValue);
   else if (keyPath === "sort.only") next.sort.only = parseStringArray(rawValue);
@@ -213,6 +218,7 @@ function configPatchForSet(keyPath: string, rawValue: string): { section: string
   if (keyPath === "defaults.include_pinned") return { section: "defaults", key: "include_pinned", value: formatPrimitive(parseBoolean(rawValue)) };
   if (keyPath === "defaults.include_essentials") return { section: "defaults", key: "include_essentials", value: formatPrimitive(parseBoolean(rawValue)) };
   if (keyPath === "defaults.apply_backend") return { section: "defaults", key: "apply_backend", value: quote(parseBackend(rawValue)) };
+  if (keyPath === "sort.from") return { section: "sort", key: "from", value: formatArray(parseStringArray(rawValue)) };
   if (keyPath === "sort.to") return { section: "sort", key: "to", value: formatArray(parseStringArray(rawValue)) };
   if (keyPath === "sort.not_to") return { section: "sort", key: "not_to", value: formatArray(parseStringArray(rawValue)) };
   if (keyPath === "sort.only") return { section: "sort", key: "only", value: formatArray(parseStringArray(rawValue)) };
@@ -275,6 +281,7 @@ function setDefault(config: ZtsConfig, key: string, value: unknown): void {
 }
 
 function setSort(config: ZtsConfig, key: string, value: unknown): void {
+  if (key === "from") config.sort.from = parseStringArray(value);
   if (key === "to") config.sort.to = parseStringArray(value);
   if (key === "not_to") config.sort.notTo = parseStringArray(value);
   if (key === "only") config.sort.only = parseStringArray(value);

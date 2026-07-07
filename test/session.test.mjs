@@ -79,6 +79,7 @@ test("adds workspace policy status from config", () => {
       applyBackend: "auto"
     },
     sort: {
+      from: ["Space"],
       to: ["Portfolio"],
       notTo: ["Stash"],
       only: [],
@@ -107,7 +108,7 @@ test("adds workspace policy status from config", () => {
     [
       { name: "Space", protected: "none", inbox: true, from: true, to: false },
       { name: "Stash", protected: "from_to", inbox: false, from: false, to: false },
-      { name: "Portfolio", protected: "none", inbox: false, from: true, to: true }
+      { name: "Portfolio", protected: "none", inbox: false, from: false, to: true }
     ]
   );
 });

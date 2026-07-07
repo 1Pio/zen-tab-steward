@@ -4,7 +4,7 @@ import { SessionSummary, TabSummary } from "./session.js";
 import { VERSION } from "./version.js";
 import { configPath } from "./paths.js";
 import { backupRootForProfile } from "./backup.js";
-import { SortPlan } from "./sort.js";
+import { EntityPlan, SortPlan } from "./sort.js";
 import { ApplyReceipt } from "./apply.js";
 
 export interface CommandEnvelope<T> {
@@ -185,4 +185,56 @@ export function formatSortPreview(plan: SortPlan, applyBlockers: string[], sugge
   }
 
   return lines.join("\n");
+}
+
+export function formatSortDryRun(plan: SortPlan, applyBlockers: string[], suggestedNextCommands: string[]): string {
+  const lines = [
+    `Sort dry run: ${plan.sourceWorkspace.name}`,
+    "",
+    `Move ${plan.moveCount} entities`,
+    `Skip ${plan.skipCount} protected or filtered`,
+    `Review ${plan.reviewCount} low-confidence`,
+    `Blocked ${plan.blockedCount} unsafe`,
+    ""
+  ];
+
+  appendActionSection(lines, "Moves", plan.plannedActions);
+  appendActionSection(lines, "Skipped", plan.skippedActions);
+  appendActionSection(lines, "Review", plan.reviewActions);
+  appendActionSection(lines, "Blocked", plan.blockedActions);
+
+  if (applyBlockers.length > 0) {
+    lines.push(
+      "Apply refused:",
+      ...applyBlockers.map((blocker) => `  - ${blocker}`)
+    );
+  } else {
+    lines.push("Apply available: session backend");
+  }
+
+  if (suggestedNextCommands.length > 0) {
+    lines.push(
+      "",
+      "Next:",
+      ...suggestedNextCommands.map((command) => `  ${command}`)
+    );
+  }
+
+  return lines.join("\n");
+}
+
+function appendActionSection(lines: string[], heading: string, actions: EntityPlan[]): void {
+  if (actions.length === 0) return;
+  lines.push(`${heading}:`);
+  for (const action of actions) {
+    const destination = action.destinationWorkspaceName ? ` -> ${action.destinationWorkspaceName}` : "";
+    lines.push(
+      `  - [${action.action}] ${action.title}${destination}`,
+      `    url: ${action.url}`,
+      `    reason: ${action.reason}`,
+      `    confidence: ${action.confidence}`,
+      `    explanation: ${action.explanation}`
+    );
+  }
+  lines.push("");
 }

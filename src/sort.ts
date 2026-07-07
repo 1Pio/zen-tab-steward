@@ -82,12 +82,17 @@ export function planSortPreview(
     if (tab.zenWorkspace !== sourceWorkspace.id) return;
     const entity = describeTab(tab, index, sourceWorkspace);
     if (!sourceWorkspace.sortableFrom) {
+      const sourceBlockedReason = sourceWorkspace.protectedStatus === "from" || sourceWorkspace.protectedStatus === "from_to"
+        ? "source_workspace_protected"
+        : "source_workspace_not_allowed";
       blockedActions.push({
         ...entity,
         action: "blocked",
-        reason: "source_workspace_protected",
+        reason: sourceBlockedReason,
         confidence: 1,
-        explanation: `Source workspace ${sourceWorkspace.name} is protected from sorting`
+        explanation: sourceBlockedReason === "source_workspace_protected"
+          ? `Source workspace ${sourceWorkspace.name} is protected from sorting`
+          : `Source workspace ${sourceWorkspace.name} is not allowed by the active source policy`
       });
       return;
     }

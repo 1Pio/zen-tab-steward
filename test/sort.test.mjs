@@ -98,6 +98,44 @@ test("blocks protected domains and protected destination workspaces", () => {
   );
 });
 
+test("distinguishes source allowlist blocks from protected source blocks", () => {
+  const session = {
+    spaces: [
+      { uuid: "w1", name: "Space" },
+      { uuid: "w2", name: "Portfolio" }
+    ],
+    tabs: [
+      { zenWorkspace: "w1", entries: [{ url: "https://framer.com/projects/site", title: "Framer" }] }
+    ],
+    folders: [],
+    groups: []
+  };
+  const summary = summarizeSession(session, source);
+  const allowlistBlockedSummary = {
+    ...summary,
+    workspaces: summary.workspaces.map((workspace) => ({
+      ...workspace,
+      sortableFrom: workspace.name !== "Space"
+    }))
+  };
+  const protectedSummary = {
+    ...summary,
+    workspaces: summary.workspaces.map((workspace) => ({
+      ...workspace,
+      protectedStatus: workspace.name === "Space" ? "from" : "none",
+      sortableFrom: workspace.name !== "Space"
+    }))
+  };
+
+  const allowlistPlan = planSortPreview(session, allowlistBlockedSummary, allowlistBlockedSummary.workspaces[0], inputs);
+  const protectedPlan = planSortPreview(session, protectedSummary, protectedSummary.workspaces[0], inputs);
+
+  assert.equal(allowlistPlan.blockedActions[0].reason, "source_workspace_not_allowed");
+  assert.match(allowlistPlan.blockedActions[0].explanation, /not allowed/);
+  assert.equal(protectedPlan.blockedActions[0].reason, "source_workspace_protected");
+  assert.match(protectedPlan.blockedActions[0].explanation, /protected/);
+});
+
 test("respects only, except, to, and not-to filters", () => {
   const session = {
     spaces: [

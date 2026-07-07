@@ -160,6 +160,7 @@ export function withWorkspacePolicy(summary: SessionSummary, config: ZtsConfig):
   const fromProtected = new Set(config.protect.workspaces.from.map(normalizeName));
   const toProtected = new Set(config.protect.workspaces.to.map(normalizeName));
   const defaultInbox = normalizeName(config.defaults.inbox);
+  const sortFrom = new Set(config.sort.from.map(normalizeName));
   const sortTo = new Set(config.sort.to.map(normalizeName));
   const sortNotTo = new Set(config.sort.notTo.map(normalizeName));
 
@@ -169,13 +170,14 @@ export function withWorkspacePolicy(summary: SessionSummary, config: ZtsConfig):
       const names = workspaceNameKeys(workspace);
       const protectedFrom = names.some((name) => fromProtected.has(name));
       const protectedTo = names.some((name) => toProtected.has(name));
+      const explicitlyAllowedFrom = sortFrom.size === 0 || names.some((name) => sortFrom.has(name));
       const explicitlyAllowedTo = sortTo.size === 0 || names.some((name) => sortTo.has(name));
       const explicitlyDeniedTo = names.some((name) => sortNotTo.has(name));
       return {
         ...workspace,
         protectedStatus: protectedFrom && protectedTo ? "from_to" : protectedFrom ? "from" : protectedTo ? "to" : "none",
         defaultInbox: names.includes(defaultInbox),
-        sortableFrom: !protectedFrom,
+        sortableFrom: !protectedFrom && explicitlyAllowedFrom,
         sortableTo: !protectedTo && explicitlyAllowedTo && !explicitlyDeniedTo
       };
     })
