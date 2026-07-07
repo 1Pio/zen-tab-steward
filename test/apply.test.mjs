@@ -162,8 +162,9 @@ test("live backend applies planned moves with backup, proof, and receipt", async
   assert.equal(receipt.liveProofs[0].requestedUrl, "https://framer.com/project");
   assert.equal(receipts[0].id, receipt.id);
   assert.equal(receipts[0].backend, "live");
-  assert.equal(verification.verification.ok, false);
-  assert.match(verification.verification.blockers.join("\n"), /cannot be reverified from session files/);
+  assert.equal(verification.verification.ok, true);
+  assert.equal(verification.verification.checkedMoves, 1);
+  assert.equal(verification.verification.mismatchCount, 0);
   assert.equal(written.tabs[0].zenWorkspace, "w1");
 });
 
@@ -217,6 +218,202 @@ test("live backend records guarded move refusal without claiming success", async
   assert.equal(receipt.liveProofs.length, 0);
   assert.match(receipt.verification.blockers.join("\n"), /refused protected tab/);
   assert.equal(written.tabs[0].zenWorkspace, "w1");
+});
+
+test("live receipt verification detects current live workspace drift", async () => {
+  const fixture = await makeApplyFixture();
+  const oldStateDir = process.env.ZTS_STATE_DIR;
+  const originalWebSocket = globalThis.WebSocket;
+  process.env.ZTS_STATE_DIR = fixture.stateDir;
+  const context = {
+    ...fixture.context,
+    running: true,
+    runningProcesses: [privilegedBrowserProcess(fixture.profilePath)]
+  };
+  await writeFile(join(fixture.profilePath, "WebDriverBiDiServer.json"), JSON.stringify({ ws_host: "127.0.0.1", ws_port: 9222 }));
+  const summary = summarizeSession(fixture.session, fixture.context.sessionFile);
+  const plan = planSortPreview(fixture.session, summary, summary.workspaces[0], {
+    preview: false,
+    dryRun: false,
+    minConfidence: 0.8,
+    includePinned: false,
+    includeEssentials: false,
+    to: [],
+    notTo: [],
+    only: [],
+    except: [],
+    limit: null,
+    backend: "live",
+    domainRules: {},
+    protectedDomains: []
+  });
+
+  let receipt;
+  let verification;
+  try {
+    globalThis.WebSocket = FakeLiveApplyWebSocket;
+    receipt = await applySortPlanLive(context, plan, "zts sort Space --backend live");
+    FakeLiveApplyWebSocket.connectionCount = 0;
+    globalThis.WebSocket = FakeLiveVerifyMismatchWebSocket;
+    verification = await verifyApplyReceipt(context, receipt.id);
+  } finally {
+    globalThis.WebSocket = originalWebSocket;
+    FakeLiveApplyWebSocket.connectionCount = 0;
+    FakeLiveVerifyMismatchWebSocket.connectionCount = 0;
+    if (oldStateDir === undefined) delete process.env.ZTS_STATE_DIR;
+    else process.env.ZTS_STATE_DIR = oldStateDir;
+  }
+
+  assert.equal(receipt.verification.ok, true);
+  assert.equal(verification.verification.ok, false);
+  assert.equal(verification.verification.mismatchCount, 1);
+  assert.equal(verification.verification.mismatches[0].reason, "workspace_mismatch");
+  assert.equal(verification.verification.mismatches[0].actualWorkspaceId, "w1");
+});
+
+test("live receipt verification refuses when the live attachment gate is unavailable", async () => {
+  const fixture = await makeApplyFixture();
+  const oldStateDir = process.env.ZTS_STATE_DIR;
+  const originalWebSocket = globalThis.WebSocket;
+  process.env.ZTS_STATE_DIR = fixture.stateDir;
+  const context = {
+    ...fixture.context,
+    running: true,
+    runningProcesses: [privilegedBrowserProcess(fixture.profilePath)]
+  };
+  await writeFile(join(fixture.profilePath, "WebDriverBiDiServer.json"), JSON.stringify({ ws_host: "127.0.0.1", ws_port: 9222 }));
+  const summary = summarizeSession(fixture.session, fixture.context.sessionFile);
+  const plan = planSortPreview(fixture.session, summary, summary.workspaces[0], {
+    preview: false,
+    dryRun: false,
+    minConfidence: 0.8,
+    includePinned: false,
+    includeEssentials: false,
+    to: [],
+    notTo: [],
+    only: [],
+    except: [],
+    limit: null,
+    backend: "live",
+    domainRules: {},
+    protectedDomains: []
+  });
+
+  let receipt;
+  let verification;
+  try {
+    globalThis.WebSocket = FakeLiveApplyWebSocket;
+    receipt = await applySortPlanLive(context, plan, "zts sort Space --backend live");
+    verification = await verifyApplyReceipt({ ...context, runningProcesses: [] }, receipt.id);
+  } finally {
+    globalThis.WebSocket = originalWebSocket;
+    FakeLiveApplyWebSocket.connectionCount = 0;
+    if (oldStateDir === undefined) delete process.env.ZTS_STATE_DIR;
+    else process.env.ZTS_STATE_DIR = oldStateDir;
+  }
+
+  assert.equal(receipt.verification.ok, true);
+  assert.equal(verification.verification.ok, false);
+  assert.equal(verification.verification.checkedMoves, 0);
+  assert.match(verification.verification.blockers.join("\n"), /No browser process explicitly matched/);
+});
+
+test("zero-move live receipt verification still requires live attachment", async () => {
+  const fixture = await makeApplyFixture();
+  const oldStateDir = process.env.ZTS_STATE_DIR;
+  process.env.ZTS_STATE_DIR = fixture.stateDir;
+  const context = {
+    ...fixture.context,
+    running: true,
+    runningProcesses: []
+  };
+  const summary = summarizeSession(fixture.session, fixture.context.sessionFile);
+  const plan = planSortPreview(fixture.session, summary, summary.workspaces[0], {
+    preview: false,
+    dryRun: false,
+    minConfidence: 0.8,
+    includePinned: false,
+    includeEssentials: false,
+    to: [],
+    notTo: [],
+    only: [],
+    except: [],
+    limit: 0,
+    backend: "live",
+    domainRules: {},
+    protectedDomains: []
+  });
+  const emptyPlan = {
+    ...plan,
+    moveCount: 0,
+    plannedActions: [],
+    destinationSummaries: []
+  };
+
+  let receipt;
+  let verification;
+  try {
+    receipt = await applySortPlanLive(context, emptyPlan, "zts sort Space --backend live --limit 0");
+    verification = await verifyApplyReceipt(context, receipt.id);
+  } finally {
+    if (oldStateDir === undefined) delete process.env.ZTS_STATE_DIR;
+    else process.env.ZTS_STATE_DIR = oldStateDir;
+  }
+
+  assert.equal(receipt.verification.ok, true);
+  assert.equal(receipt.moveCount, 0);
+  assert.equal(verification.verification.ok, false);
+  assert.match(verification.verification.blockers.join("\n"), /No browser process explicitly matched|No Zen process is running|WebDriverBiDiServer/);
+});
+
+test("live receipt verification rejects verified entries that do not match the receipt move", async () => {
+  const fixture = await makeApplyFixture();
+  const oldStateDir = process.env.ZTS_STATE_DIR;
+  const originalWebSocket = globalThis.WebSocket;
+  process.env.ZTS_STATE_DIR = fixture.stateDir;
+  const context = {
+    ...fixture.context,
+    running: true,
+    runningProcesses: [privilegedBrowserProcess(fixture.profilePath)]
+  };
+  await writeFile(join(fixture.profilePath, "WebDriverBiDiServer.json"), JSON.stringify({ ws_host: "127.0.0.1", ws_port: 9222 }));
+  const summary = summarizeSession(fixture.session, fixture.context.sessionFile);
+  const plan = planSortPreview(fixture.session, summary, summary.workspaces[0], {
+    preview: false,
+    dryRun: false,
+    minConfidence: 0.8,
+    includePinned: false,
+    includeEssentials: false,
+    to: [],
+    notTo: [],
+    only: [],
+    except: [],
+    limit: null,
+    backend: "live",
+    domainRules: {},
+    protectedDomains: []
+  });
+
+  let verification;
+  try {
+    globalThis.WebSocket = FakeLiveApplyWebSocket;
+    const receipt = await applySortPlanLive(context, plan, "zts sort Space --backend live");
+    globalThis.WebSocket = FakeLiveVerifyWrongEntityWebSocket;
+    verification = await verifyApplyReceipt(context, receipt.id);
+  } finally {
+    globalThis.WebSocket = originalWebSocket;
+    FakeLiveApplyWebSocket.connectionCount = 0;
+    FakeLiveVerifyWrongEntityWebSocket.connectionCount = 0;
+    if (oldStateDir === undefined) delete process.env.ZTS_STATE_DIR;
+    else process.env.ZTS_STATE_DIR = oldStateDir;
+  }
+
+  assert.equal(verification.verification.ok, false);
+  assert.equal(verification.verification.mismatchCount, 2);
+  assert.deepEqual(
+    verification.verification.mismatches.map((mismatch) => mismatch.reason).sort(),
+    ["identity_mismatch", "missing_tab"]
+  );
 });
 
 async function makeApplyFixture() {
@@ -313,6 +510,34 @@ class FakeBlockedLiveApplyWebSocket extends FakeLiveApplyWebSocket {
   }
 }
 
+class FakeLiveVerifyMismatchWebSocket extends FakeLiveApplyWebSocket {
+  static connectionCount = 0;
+
+  constructor(url) {
+    super(url);
+    this.connectionNumber = ++FakeLiveVerifyMismatchWebSocket.connectionCount;
+  }
+
+  send(payload) {
+    const request = JSON.parse(payload);
+    setTimeout(() => this.emit("message", { data: JSON.stringify(fakeVerifyMismatchBidiResponse(request)) }), 0);
+  }
+}
+
+class FakeLiveVerifyWrongEntityWebSocket extends FakeLiveApplyWebSocket {
+  static connectionCount = 0;
+
+  constructor(url) {
+    super(url);
+    this.connectionNumber = ++FakeLiveVerifyWrongEntityWebSocket.connectionCount;
+  }
+
+  send(payload) {
+    const request = JSON.parse(payload);
+    setTimeout(() => this.emit("message", { data: JSON.stringify(fakeVerifyWrongEntityBidiResponse(request)) }), 0);
+  }
+}
+
 function fakeBidiResponse(request) {
   if (request.method === "session.status") {
     return { type: "success", id: request.id, result: { ready: true, message: "" } };
@@ -324,6 +549,35 @@ function fakeBidiResponse(request) {
     return { type: "success", id: request.id, result: { contexts: [{ context: "chrome-1" }] } };
   }
   if (request.method === "script.evaluate") {
+    if (String(request.params?.expression ?? "").includes("destinationCandidateCount")) {
+      if (String(request.params?.expression ?? "").includes('"moves":[]')) {
+        return {
+          type: "success",
+          id: request.id,
+          result: remoteObject({ moves: [] })
+        };
+      }
+      return {
+        type: "success",
+        id: request.id,
+        result: remoteObject({
+          moves: [{
+            entityId: "w1:0",
+            tabIndex: 0,
+            requestedUrl: "https://framer.com/project",
+            requestedTitle: "Framer",
+            expectedWorkspaceId: "w2",
+            candidateCount: 1,
+            destinationCandidateCount: 1,
+            actualWorkspaceId: "w2",
+            actualTitle: "Framer",
+            actualUrl: "https://framer.com/project",
+            verified: true,
+            reason: "verified"
+          }]
+        })
+      };
+    }
     return {
       type: "success",
       id: request.id,
@@ -375,6 +629,54 @@ function fakeBlockedBidiResponse(request) {
   };
 }
 
+function fakeVerifyMismatchBidiResponse(request) {
+  if (request.method !== "script.evaluate") return fakeBidiResponse(request);
+  return {
+    type: "success",
+    id: request.id,
+    result: remoteObject({
+      moves: [{
+        entityId: "w1:0",
+        tabIndex: 0,
+        requestedUrl: "https://framer.com/project",
+        requestedTitle: "Framer",
+        expectedWorkspaceId: "w2",
+        candidateCount: 1,
+        destinationCandidateCount: 0,
+        actualWorkspaceId: "w1",
+        actualTitle: "Framer",
+        actualUrl: "https://framer.com/project",
+        verified: false,
+        reason: "workspace_mismatch"
+      }]
+    })
+  };
+}
+
+function fakeVerifyWrongEntityBidiResponse(request) {
+  if (request.method !== "script.evaluate") return fakeBidiResponse(request);
+  return {
+    type: "success",
+    id: request.id,
+    result: remoteObject({
+      moves: [{
+        entityId: "wrong-entity",
+        tabIndex: 0,
+        requestedUrl: "https://framer.com/project",
+        requestedTitle: "Framer",
+        expectedWorkspaceId: "w2",
+        candidateCount: 1,
+        destinationCandidateCount: 1,
+        actualWorkspaceId: "w2",
+        actualTitle: "Framer",
+        actualUrl: "https://framer.com/project",
+        verified: true,
+        reason: "verified"
+      }]
+    })
+  };
+}
+
 function remoteObject(entries) {
   return {
     type: "success",
@@ -389,5 +691,6 @@ function remoteValue(value) {
   if (typeof value === "boolean") return { type: "boolean", value };
   if (typeof value === "number") return { type: "number", value };
   if (Array.isArray(value)) return { type: "array", value: value.map(remoteValue) };
+  if (value && typeof value === "object") return { type: "object", value: Object.entries(value).map(([key, child]) => [key, remoteValue(child)]) };
   return { type: "string", value };
 }

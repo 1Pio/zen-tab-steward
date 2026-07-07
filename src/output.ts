@@ -416,6 +416,7 @@ export function formatApplyVerification(report: ApplyVerificationReport): string
   const lines = [
     "Apply verification",
     `receipt: ${report.receiptId}`,
+    `backend: ${report.receipt.backend}`,
     `profile: ${report.profilePath}`,
     `session file: ${report.sessionFile}`,
     `status: ${report.verification.ok ? "verified" : "mismatch"}`,

@@ -79,7 +79,7 @@ Preview and dry-run commands exit successfully because they do not write. Previe
 
 `zts review [workspace]` lists only the sort-plan items that need attention, including low-confidence items, move-limit overflow, and grouped/foldered aggregate entities. It is read-only and supports the same policy/filter flags as `zts sort`.
 
-`zts apply list` lists sort-apply receipts for the discovered profile. Session receipts can be reverified against the current selected session file with `zts apply verify <receipt-id>`, which exits with status `2` if recorded moves no longer match. Live receipts are listed with their recorded live proof data, but `apply verify` currently refuses to reverify them from session files because live state can change after the receipt.
+`zts apply list` lists sort-apply receipts for the discovered profile. Session receipts are reverified against the current selected session file with `zts apply verify <receipt-id>`, which exits with status `2` if recorded moves no longer match. Live receipts are reverified through a read-only live bridge check when the live attachment gate passes; if the current Zen process is not attachable, verification refuses with the live-check blockers instead of reading stale session files.
 
 `zts config` inspects and updates the user config at:
 

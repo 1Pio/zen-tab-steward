@@ -154,6 +154,8 @@ No matching candidate browser process has --remote-allow-system-access.
 WebDriverBiDiServer.json does not exist.
 ```
 
+Live apply receipts can be reverified only through the same live attachment boundary. `zts apply verify <live-receipt-id>` is read-only, inspects current live tab URL/workspace state through WebDriver BiDi, and refuses with the live-check blockers when the running Zen process is not attachable.
+
 When Zen is closed:
 
 ```bash

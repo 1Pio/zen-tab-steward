@@ -1,7 +1,7 @@
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createBackup } from "./backup.js";
-import { BridgeLiveMoveProof, runBridgeLiveMoveProof } from "./bridge.js";
+import { BridgeLiveMoveProof, BridgeLiveVerifyEntry, runBridgeLiveMoveProof, runBridgeLiveVerifyProof } from "./bridge.js";
 import { readJsonLz4, writeJsonLz4 } from "./mozlz4.js";
 import { ProfileContext } from "./profile.js";
 import { RawTab, RawZenSession } from "./session.js";
@@ -58,7 +58,7 @@ export interface ApplyVerificationMismatch {
   actualEntityId: string | null;
   actualTitle: string | null;
   actualUrl: string | null;
-  reason: "missing_tab" | "identity_mismatch" | "workspace_mismatch";
+  reason: "missing_tab" | "identity_mismatch" | "workspace_mismatch" | "ambiguous_tab";
 }
 
 export interface ApplyVerificationResult {
@@ -290,13 +290,7 @@ export async function verifyApplyReceipt(context: ProfileContext, receiptId: str
       blockers
     };
   } else if (receipt.backend === "live") {
-    verification = {
-      ok: false,
-      checkedMoves: 0,
-      mismatchCount: 0,
-      mismatches: [],
-      blockers: ["Live apply receipts cannot be reverified from session files yet; rely on the recorded live proof receipt or run a fresh live read/check"]
-    };
+    verification = await verifyLiveReceiptMoves(context, receipt);
   } else {
     verification = await verifyMovesDetailed(context.sessionFile.path, receipt.moves);
   }
@@ -322,6 +316,83 @@ async function verifyAppliedMoves(path: string, moves: AppliedMove[]): Promise<A
     );
   }
   return { ok: true, checkedMoves: moves.length };
+}
+
+async function verifyLiveReceiptMoves(context: ProfileContext, receipt: ApplyReceipt): Promise<ApplyVerificationResult> {
+  const blockers = [...(receipt.verification.ok ? [] : (receipt.verification.blockers ?? ["Recorded live apply receipt was incomplete"]))];
+  const proof = await runBridgeLiveVerifyProof(context, receipt.moves.map((move) => ({
+    entityId: move.entityId,
+    tabIndex: move.tabIndex,
+    title: move.title,
+    url: move.url,
+    toWorkspaceId: move.toWorkspaceId
+  })));
+  blockers.push(...proof.blockers);
+  const entries = proof.verifyProof?.moves ?? [];
+  const mismatches = proof.blockers.length === 0
+    ? liveVerifyMismatches(receipt.moves, entries)
+    : [];
+
+  return {
+    ok: blockers.length === 0 && mismatches.length === 0 && entries.length === receipt.moves.length,
+    checkedMoves: entries.length,
+    mismatchCount: mismatches.length,
+    mismatches,
+    blockers
+  };
+}
+
+function liveVerifyMismatches(moves: AppliedMove[], entries: BridgeLiveVerifyEntry[]): ApplyVerificationMismatch[] {
+  const mismatches = entries.flatMap((entry) => liveVerifyEntryMismatch(moves, entry));
+  const entryKeys = new Set(entries.map(liveVerifyEntryKey));
+  for (const move of moves) {
+    if (entryKeys.has(liveVerifyMoveKey(move))) continue;
+    mismatches.push({
+      entityId: move.entityId,
+      tabIndex: move.tabIndex,
+      title: move.title,
+      url: move.url,
+      expectedWorkspaceId: move.toWorkspaceId,
+      actualWorkspaceId: null,
+      actualEntityId: null,
+      actualTitle: null,
+      actualUrl: null,
+      reason: "missing_tab"
+    });
+  }
+  return mismatches;
+}
+
+function liveVerifyEntryMismatch(moves: AppliedMove[], entry: BridgeLiveVerifyEntry): ApplyVerificationMismatch[] {
+  const move = moves.find((candidate) => liveVerifyMoveKey(candidate) === liveVerifyEntryKey(entry));
+  if (entry.verified && move) return [];
+  return [{
+    entityId: entry.entityId,
+    tabIndex: entry.tabIndex,
+    title: move?.title ?? entry.requestedTitle,
+    url: move?.url ?? entry.requestedUrl,
+    expectedWorkspaceId: move?.toWorkspaceId ?? entry.expectedWorkspaceId,
+    actualWorkspaceId: entry.actualWorkspaceId,
+    actualEntityId: null,
+    actualTitle: entry.actualTitle,
+    actualUrl: entry.actualUrl,
+    reason: liveVerifyMismatchReason(entry)
+  }];
+}
+
+function liveVerifyMoveKey(move: AppliedMove): string {
+  return `${move.entityId}\n${move.url}\n${move.toWorkspaceId}`;
+}
+
+function liveVerifyEntryKey(entry: BridgeLiveVerifyEntry): string {
+  return `${entry.entityId}\n${entry.requestedUrl}\n${entry.expectedWorkspaceId}`;
+}
+
+function liveVerifyMismatchReason(entry: BridgeLiveVerifyEntry): ApplyVerificationMismatch["reason"] {
+  if (entry.reason === "missing_tab") return "missing_tab";
+  if (entry.reason === "ambiguous_tab") return "ambiguous_tab";
+  if (entry.reason === "workspace_mismatch") return "workspace_mismatch";
+  return "identity_mismatch";
 }
 
 async function verifyMovesDetailed(path: string, moves: AppliedMove[]): Promise<ApplyVerificationResult> {
