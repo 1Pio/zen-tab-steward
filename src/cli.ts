@@ -722,12 +722,6 @@ function sortCommandForReceipt(sourceWorkspace: string | undefined, options: Sor
   return parts.join(" ");
 }
 
-interface ConfirmContext {
-  options: SortOptions;
-  plan: SortPlan;
-  resolvedBackend: "session" | "live";
-}
-
 async function confirmApply(options: SortOptions, plan: SortPlan, resolvedBackend: "session" | "live"): Promise<boolean> {
   if (options.yes) return true;
   if (!process.stdin.isTTY || !process.stdout.isTTY) return true;
