@@ -3,6 +3,7 @@ import { mkdir, readdir, stat, copyFile, readFile, writeFile, rename, rm } from 
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { stateDir } from "./paths.js";
 import { ProfileContext } from "./profile.js";
+import { sanitizePathSegment } from "./util.js";
 import { VERSION } from "./version.js";
 
 export interface BackupFileReceipt {
@@ -318,10 +319,6 @@ async function nextBackupId(backupRoot: string): Promise<{ id: string; createdAt
     suffix += 1;
   }
   return { id, createdAt };
-}
-
-function sanitizePathSegment(segment: string): string {
-  return segment.replace(/[^a-zA-Z0-9._ -]/g, "_");
 }
 
 async function exists(path: string): Promise<boolean> {

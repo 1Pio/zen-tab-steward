@@ -21,6 +21,8 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
   const help = await execFileAsync("node", ["dist/cli.js", "--help"], { env });
   assert.match(help.stdout, /Zen Tab Steward/);
 
+  await execFileAsync("node", ["dist/cli.js", "rules", "add", "domain", "framer.com", "Portfolio"], { env });
+
   const version = await execFileAsync("node", ["dist/cli.js", "--version"], { env });
   assert.match(version.stdout, /^0\.1\.0/);
 

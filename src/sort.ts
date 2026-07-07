@@ -1,4 +1,5 @@
 import { RawFolder, RawGroup, RawTab, RawZenSession, SessionSummary, WorkspaceSummary } from "./session.js";
+import { domainFromUrl, matchesUrlPattern, normalizeName, selectedTabEntry, tabProtectionReasons } from "./util.js";
 
 export interface SortInputs {
   preview: boolean;
@@ -60,14 +61,6 @@ export interface SortPlan {
   reviewActions: EntityPlan[];
   blockedActions: EntityPlan[];
 }
-
-const DOMAIN_RULES: Record<string, string[]> = {
-  "Portfolio": ["framer.com", "framer.university", "rpio.dev"],
-  "Tool Development": ["github.com", "localhost", "127.0.0.1", "dash.cloudflare.com", "cloudflare.com", "magicpath.ai"],
-  "Development": ["github.com", "localhost", "127.0.0.1", "dash.cloudflare.com", "cloudflare.com", "magicpath.ai"],
-  "Video": ["youtube.com", "hyperframes.heygen.com"],
-  "Travel": ["airbnb.de"]
-};
 
 export function planSortPreview(
   session: RawZenSession,
@@ -239,9 +232,9 @@ export function planSortPreview(
 }
 
 function describeTab(tab: RawTab, index: number, sourceWorkspace: WorkspaceSummary): Omit<EntityPlan, "action" | "reason" | "confidence" | "explanation"> {
-  const entry = selectedEntry(tab);
+  const entry = selectedTabEntry(tab);
   const url = entry?.url ?? "about:blank";
-  const domain = domainForUrl(url);
+  const domain = domainFromUrl(url);
   return {
     entityId: String(tab.zenSyncId ?? tab.zenGlanceId ?? `${sourceWorkspace.id}:${index}`),
     tabIndex: index,
@@ -298,7 +291,7 @@ function classifyStructuredEntity(
     return;
   }
 
-  if (inputs.only.length > 0 && !entity.urls.every((url) => inputs.only.some((pattern) => matchesPattern(pattern, domainForUrl(url), url)))) {
+  if (inputs.only.length > 0 && !entity.urls.every((url) => inputs.only.some((pattern) => matchesUrlPattern(pattern, domainFromUrl(url), url)))) {
     reviewActions.push({
       ...entity,
       action: "review",
@@ -410,12 +403,12 @@ function structuredEntityKey(tab: RawTab): string | null {
 }
 
 function tabSummaryFields(tab: RawTab): { title: string; url: string; domain: string } {
-  const entry = selectedEntry(tab);
+  const entry = selectedTabEntry(tab);
   const url = entry?.url ?? "about:blank";
   return {
     title: entry?.title ?? url,
     url,
-    domain: domainForUrl(url)
+    domain: domainFromUrl(url)
   };
 }
 
@@ -443,34 +436,26 @@ function classifyStructuredDestination(
 }
 
 function entityMatchesPattern(entity: Pick<EntityPlan, "domains" | "url" | "urls">, pattern: string): boolean {
-  return entity.domains.some((domain) => matchesPattern(pattern, domain, `https://${domain}/`))
-    || entity.urls.some((url) => matchesPattern(pattern, domainForUrl(url), url))
-    || matchesPattern(pattern, domainForUrl(entity.url), entity.url);
+  return entity.domains.some((domain) => matchesUrlPattern(pattern, domain, `https://${domain}/`))
+    || entity.urls.some((url) => matchesUrlPattern(pattern, domainFromUrl(url), url))
+    || matchesUrlPattern(pattern, domainFromUrl(entity.url), entity.url);
 }
 
 function entityLabel(entity: Pick<EntityPlan, "entityType">): string {
   return entity.entityType === "folder" ? "Folder" : "Group";
 }
 
-function selectedEntry(tab: RawTab) {
-  const entries = Array.isArray(tab.entries) ? tab.entries : [];
-  if (entries.length === 0) return undefined;
-  const rawIndex = typeof tab.index === "number" ? tab.index - 1 : entries.length - 1;
-  const index = Math.min(Math.max(rawIndex, 0), entries.length - 1);
-  return entries[index];
-}
-
 function protectionSkipReason(tab: RawTab, entity: { domain: string; url: string }, inputs: SortInputs): string | null {
   if (tab.zenEssential && !inputs.includeEssentials) return "essential_protected";
   if (tab.pinned && !inputs.includePinned) return "pinned_protected";
   if (tab.groupId || tab.zenLiveFolderItemId) return "grouped_or_foldered_protected";
-  if (inputs.except.some((pattern) => matchesPattern(pattern, entity.domain, entity.url))) return "excluded_by_filter";
-  if (inputs.only.length > 0 && !inputs.only.some((pattern) => matchesPattern(pattern, entity.domain, entity.url))) return "outside_only_filter";
+  if (inputs.except.some((pattern) => matchesUrlPattern(pattern, entity.domain, entity.url))) return "excluded_by_filter";
+  if (inputs.only.length > 0 && !inputs.only.some((pattern) => matchesUrlPattern(pattern, entity.domain, entity.url))) return "outside_only_filter";
   return null;
 }
 
 function protectionBlockReason(entity: { domain: string; url: string }, inputs: SortInputs): string | null {
-  if ((inputs.protectedDomains ?? []).some((pattern) => matchesPattern(pattern, entity.domain, entity.url))) return "domain_protected";
+  if ((inputs.protectedDomains ?? []).some((pattern) => matchesUrlPattern(pattern, entity.domain, entity.url))) return "domain_protected";
   return null;
 }
 
@@ -492,7 +477,7 @@ function destinationBlockedReason(workspace: WorkspaceSummary, inputs: SortInput
 
 export function classifyDomainForWorkspace(domain: string, domainRules: Record<string, string>): { workspaceName: string; matchedPattern: string } | null {
   for (const [workspaceName, patterns] of Object.entries(effectiveDomainRules(domainRules))) {
-    const matchedPattern = patterns.find((pattern) => matchesPattern(pattern, domain, `https://${domain}/`));
+    const matchedPattern = patterns.find((pattern) => matchesUrlPattern(pattern, domain, `https://${domain}/`));
     if (matchedPattern) return { workspaceName, matchedPattern };
   }
   return null;
@@ -502,7 +487,7 @@ function classifyByDomain(domain: string, destinationByName: Map<string, Workspa
   for (const [workspaceName, patterns] of Object.entries(domainRules)) {
     const workspace = destinationByName.get(workspaceName) ?? destinationByName.get(normalizeName(workspaceName));
     if (!workspace) continue;
-    const matchedPattern = patterns.find((pattern) => matchesPattern(pattern, domain, `https://${domain}/`));
+    const matchedPattern = patterns.find((pattern) => matchesUrlPattern(pattern, domain, `https://${domain}/`));
     if (matchedPattern) return { workspace, matchedPattern, confidence: 0.9 };
   }
   return null;
@@ -519,17 +504,8 @@ function workspaceLookup(workspaces: WorkspaceSummary[]): Map<string, WorkspaceS
   return lookup;
 }
 
-function tabProtectionReasons(tab: RawTab): string[] {
-  const reasons: string[] = [];
-  if (tab.pinned) reasons.push("pinned");
-  if (tab.zenEssential) reasons.push("essential");
-  if (tab.groupId) reasons.push("grouped");
-  if (tab.zenLiveFolderItemId) reasons.push("foldered");
-  return reasons;
-}
-
 function effectiveDomainRules(configRules: Record<string, string>): Record<string, string[]> {
-  const rules: Record<string, string[]> = structuredClone(DOMAIN_RULES);
+  const rules: Record<string, string[]> = {};
   for (const [pattern, workspaceName] of Object.entries(configRules)) {
     rules[workspaceName] = [...(rules[workspaceName] ?? []), pattern];
   }
@@ -557,33 +533,4 @@ function summarizeDestinations(actions: EntityPlan[]): DestinationSummary[] {
     ...summary,
     domains: summary.domains.sort()
   }));
-}
-
-function domainForUrl(url: string): string {
-  try {
-    const parsed = new URL(url);
-    return parsed.hostname.toLowerCase();
-  } catch {
-    return "";
-  }
-}
-
-function matchesPattern(pattern: string, domain: string, url: string): boolean {
-  const normalized = pattern.trim().toLowerCase();
-  if (!normalized) return false;
-  if (normalized.startsWith("http://") || normalized.startsWith("https://")) {
-    return url.toLowerCase().startsWith(normalized);
-  }
-  if (normalized.startsWith("*.")) {
-    const suffix = normalized.slice(2);
-    return domain.endsWith(`.${suffix}`);
-  }
-  if (normalized.startsWith(".")) {
-    return domain.endsWith(normalized);
-  }
-  return domain === normalized || domain.endsWith(`.${normalized}`);
-}
-
-function normalizeName(value: string): string {
-  return value.trim().toLowerCase();
 }

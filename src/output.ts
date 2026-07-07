@@ -7,6 +7,7 @@ import { backupRootForProfile } from "./backup.js";
 import { EntityPlan, SortPlan } from "./sort.js";
 import { ApplyReceipt, ApplyVerificationReport } from "./apply.js";
 import { BridgeInspection, BridgeLiveAttachmentInspection, BridgeLiveMoveReceipt, BridgeLiveReadReceipt, BridgeProbeReceipt } from "./bridge.js";
+import { plural, truncate } from "./util.js";
 
 export interface CommandEnvelope<T> {
   version: string;
@@ -759,13 +760,4 @@ function humanBlockReason(reason: string): string {
     case "destination_not_allowed": return "destination not allowed";
     default: return reason;
   }
-}
-
-function truncate(value: string, max: number): string {
-  if (value.length <= max) return value;
-  return `${value.slice(0, max - 1)}…`;
-}
-
-function plural(count: number, singular: string, pluralForm: string): string {
-  return count === 1 ? singular : pluralForm;
 }

@@ -25,7 +25,7 @@ test("offline session backend applies planned moves with backup and receipt", as
     except: [],
     limit: null,
     backend: "session",
-    domainRules: {},
+    domainRules: { "framer.com": "Portfolio" },
     protectedDomains: []
   });
 
@@ -129,7 +129,7 @@ test("live backend applies planned moves with backup, proof, and receipt", async
     except: [],
     limit: null,
     backend: "live",
-    domainRules: {},
+    domainRules: { "framer.com": "Portfolio" },
     protectedDomains: []
   });
 
@@ -192,7 +192,7 @@ test("live backend records guarded move refusal without claiming success", async
     except: [],
     limit: null,
     backend: "live",
-    domainRules: {},
+    domainRules: { "framer.com": "Portfolio" },
     protectedDomains: []
   });
 
@@ -244,7 +244,7 @@ test("live receipt verification detects current live workspace drift", async () 
     except: [],
     limit: null,
     backend: "live",
-    domainRules: {},
+    domainRules: { "framer.com": "Portfolio" },
     protectedDomains: []
   });
 
@@ -295,7 +295,7 @@ test("live receipt verification refuses when the live attachment gate is unavail
     except: [],
     limit: null,
     backend: "live",
-    domainRules: {},
+    domainRules: { "framer.com": "Portfolio" },
     protectedDomains: []
   });
 
@@ -340,7 +340,7 @@ test("zero-move live receipt verification still requires live attachment", async
     except: [],
     limit: 0,
     backend: "live",
-    domainRules: {},
+    domainRules: { "framer.com": "Portfolio" },
     protectedDomains: []
   });
   const emptyPlan = {
@@ -390,7 +390,7 @@ test("live receipt verification rejects verified entries that do not match the r
     except: [],
     limit: null,
     backend: "live",
-    domainRules: {},
+    domainRules: { "framer.com": "Portfolio" },
     protectedDomains: []
   });
 

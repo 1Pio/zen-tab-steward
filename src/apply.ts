@@ -7,6 +7,7 @@ import { ProfileContext } from "./profile.js";
 import { RawTab, RawZenSession } from "./session.js";
 import { stateDir } from "./paths.js";
 import { EntityPlan, SortPlan } from "./sort.js";
+import { sanitizePathSegment, selectedTabEntry } from "./util.js";
 import { VERSION } from "./version.js";
 
 export interface AppliedMove {
@@ -479,7 +480,7 @@ interface TabIdentity {
 }
 
 function tabIdentity(tab: RawTab, index: number): TabIdentity {
-  const entry = selectedEntry(tab);
+  const entry = selectedTabEntry(tab);
   const url = entry?.url ?? "about:blank";
   const stableEntityId = tab.zenSyncId || tab.zenGlanceId ? String(tab.zenSyncId ?? tab.zenGlanceId) : null;
   return {
@@ -488,14 +489,6 @@ function tabIdentity(tab: RawTab, index: number): TabIdentity {
     title: entry?.title ?? url,
     url
   };
-}
-
-function selectedEntry(tab: RawTab) {
-  const entries = Array.isArray(tab.entries) ? tab.entries : [];
-  if (entries.length === 0) return undefined;
-  const rawIndex = typeof tab.index === "number" ? tab.index - 1 : entries.length - 1;
-  const index = Math.min(Math.max(rawIndex, 0), entries.length - 1);
-  return entries[index];
 }
 
 function applyTabMove(session: RawZenSession, action: EntityPlan): AppliedMove {
@@ -537,8 +530,4 @@ function liveMoveFromAction(action: EntityPlan): AppliedMove {
     toWorkspaceId: action.destinationWorkspaceId,
     toWorkspaceName: action.destinationWorkspaceName
   };
-}
-
-function sanitizePathSegment(segment: string): string {
-  return segment.replace(/[^a-zA-Z0-9._ -]/g, "_");
 }

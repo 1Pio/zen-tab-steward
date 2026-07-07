@@ -23,7 +23,11 @@ const inputs = {
   except: [],
   limit: null,
   backend: "auto",
-  domainRules: {},
+  domainRules: {
+    "framer.com": "Portfolio",
+    "framer.university": "Portfolio",
+    "github.com": "Tool Development"
+  },
   protectedDomains: []
 };
 
