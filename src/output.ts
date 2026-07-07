@@ -263,6 +263,34 @@ export function formatSortDryRun(plan: SortPlan, applyBlockers: string[], sugges
   return lines.join("\n");
 }
 
+export function formatReview(plan: SortPlan, suggestedNextCommands: string[]): string {
+  const lines = [
+    `Sort review: ${plan.sourceWorkspace.name}`,
+    "",
+    `Review ${plan.reviewCount} needs attention`,
+    `Move ${plan.moveCount} ready`,
+    `Skip ${plan.skipCount} protected or filtered`,
+    `Blocked ${plan.blockedCount} unsafe`,
+    ""
+  ];
+
+  if (plan.reviewActions.length === 0) {
+    lines.push("No review items found");
+  } else {
+    appendActionSection(lines, "Review", plan.reviewActions);
+  }
+
+  if (suggestedNextCommands.length > 0) {
+    lines.push(
+      "",
+      "Next:",
+      ...suggestedNextCommands.map((command) => `  ${command}`)
+    );
+  }
+
+  return lines.join("\n").trimEnd();
+}
+
 function appendActionSection(lines: string[], heading: string, actions: EntityPlan[]): void {
   if (actions.length === 0) return;
   lines.push(`${heading}:`);

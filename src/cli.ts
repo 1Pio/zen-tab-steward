@@ -3,7 +3,7 @@ import { Command } from "commander";
 import { applySortPlanOffline, listApplyReceipts, offlineApplyBlockers, verifyApplyReceipt } from "./apply.js";
 import { createBackup, listBackups, restoreBackup } from "./backup.js";
 import { addDomainRuleInContents, getConfigValue, loadConfig, saveConfigContents, setConfigValueInContents, ZtsConfig } from "./config.js";
-import { envelope, formatApplyReceiptList, formatApplyVerification, formatBackup, formatBackupList, formatRestore, formatSortDryRun, formatSortPreview, formatStatus, formatTabs, formatWorkspaces, printJson } from "./output.js";
+import { envelope, formatApplyReceiptList, formatApplyVerification, formatBackup, formatBackupList, formatRestore, formatReview, formatSortDryRun, formatSortPreview, formatStatus, formatTabs, formatWorkspaces, printJson } from "./output.js";
 import { discoverProfileContext } from "./profile.js";
 import { listTabs, loadSession, loadSessionSummary, summarizeSession, withWorkspacePolicy } from "./session.js";
 import { classifyDomainForWorkspace, planSortPreview, SortInputs } from "./sort.js";
@@ -273,6 +273,78 @@ program
         printJson(envelope("backup", { manifest }));
       } else {
         process.stdout.write(`${formatBackup(manifest)}\n`);
+      }
+    });
+  });
+
+program
+  .command("review")
+  .description("List sort plan items that need human review")
+  .argument("[source-workspace]", "source workspace name or id")
+  .option("--min-confidence <number>", "minimum confidence required for future apply")
+  .option("--include-pinned", "include pinned tabs in review planning")
+  .option("--include-essentials", "include essentials in review planning")
+  .option("--to <workspaces>", "comma-separated destination workspace allowlist")
+  .option("--not-to <workspaces>", "comma-separated destination workspace denylist")
+  .option("--only <patterns>", "comma-separated source URL/domain patterns")
+  .option("--except <patterns>", "comma-separated exclusion URL/domain patterns")
+  .option("--limit <count>", "maximum number of move actions to plan before overflow review")
+  .option("--backend <backend>", "backend preference to include in resolved inputs")
+  .option("--json", "print stable JSON output")
+  .action(async (sourceWorkspace: string | undefined, options: JsonOption & SortOptions) => {
+    await runCommand("review", options, async () => {
+      const context = await discoverProfileContext();
+      const loadedConfig = await loadConfig();
+      const session = await loadSession(context.sessionFile);
+      const summary = withWorkspacePolicy(summarizeSession(session, context.sessionFile), loadedConfig.config);
+      const source = resolveSourceWorkspace(summary, sourceWorkspace, loadedConfig.config.defaults.inbox);
+      const inputs = sortInputs(options, loadedConfig.config);
+      const inputError = validateSortInputs(inputs);
+      if (inputError) {
+        if (options.json) {
+          printJson(envelope("review", { sourceWorkspace: sourceWorkspace ?? null, inputs }, { ok: false, blockers: [inputError], suggestedNextCommands: ["zts review --help"] }));
+        } else {
+          process.stderr.write(`zts: ${inputError}\n`);
+        }
+        process.exitCode = 1;
+        return;
+      }
+      if (!source) {
+        const message = sourceWorkspace
+          ? `Source workspace not found: ${sourceWorkspace}`
+          : "No source workspace could be resolved";
+        const suggestedNextCommands = ["zts workspaces", "zts sort --preview"];
+        if (options.json) {
+          printJson(envelope("review", { sourceWorkspace: sourceWorkspace ?? null, inputs }, { ok: false, blockers: [message], suggestedNextCommands }));
+        } else {
+          process.stderr.write(`zts: ${message}\n`);
+        }
+        process.exitCode = 1;
+        return;
+      }
+
+      const plan = planSortPreview(session, summary, source, inputs);
+      const data = {
+        profile: context.profile,
+        zenRunning: context.running,
+        sourceWorkspace: source,
+        inputs,
+        summary: {
+          moveCount: plan.moveCount,
+          skipCount: plan.skipCount,
+          reviewCount: plan.reviewCount,
+          blockedCount: plan.blockedCount
+        },
+        reviewActions: plan.reviewActions
+      };
+      const suggestedNextCommands = plan.reviewCount > 0
+        ? ["zts sort --dry-run", "zts rules test <url-or-domain>", "zts rules add domain <domain> <workspace>"]
+        : ["zts sort --preview"];
+
+      if (options.json) {
+        printJson(envelope("review", data, { suggestedNextCommands }));
+      } else {
+        process.stdout.write(`${formatReview(plan, suggestedNextCommands)}\n`);
       }
     });
   });

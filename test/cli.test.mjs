@@ -75,6 +75,17 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
   assert.match(sortDryRunHuman.stdout, /reason: domain_rule/);
   assert.match(sortDryRunHuman.stdout, /Skipped:/);
 
+  const review = await execFileAsync("node", ["dist/cli.js", "review", "Space", "--json"], { env });
+  const reviewJson = JSON.parse(review.stdout);
+  assert.equal(reviewJson.ok, true);
+  assert.equal(reviewJson.data.summary.reviewCount, 1);
+  assert.equal(reviewJson.data.reviewActions[0].entityType, "group");
+  assert.equal(reviewJson.data.reviewActions[0].reason, "structured_entity_review");
+
+  const reviewHuman = await execFileAsync("node", ["dist/cli.js", "review", "Space"], { env });
+  assert.match(reviewHuman.stdout, /Sort review: Space/);
+  assert.match(reviewHuman.stdout, /entity: group/);
+
   const sortWithKnownFlags = spawnSync(
     "node",
     [
