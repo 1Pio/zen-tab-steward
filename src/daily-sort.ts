@@ -1,6 +1,6 @@
 import { sha256Canonical } from "./domain/digest.js";
 import { createRulesPlan, rulesPlanRequestRevision } from "./engines/rules.js";
-import { snapshotFromSession } from "./manual.js";
+import { snapshotFromSession } from "./session-snapshot.js";
 import { resolveOrCreatePlan } from "./plans.js";
 
 import type { ZtsConfig } from "./config.js";

@@ -29,7 +29,10 @@ export interface JsonLz4State {
 
 export interface DurableJsonLz4WriteOptions {
   readonly mode?: number;
-  readonly beforeCommit?: () => Promise<void>;
+  readonly beforeCommit?: (prepared: {
+    readonly temporaryPath: string;
+    readonly encodedDigest: Sha256Digest;
+  }) => Promise<void>;
 }
 
 export function decodeJsonLz4Buffer(buffer: Buffer): unknown {
@@ -139,6 +142,7 @@ export async function writeJsonLz4Durable(
   const parent = dirname(path);
   const tempPath = join(parent, `.zts-${process.pid}-${randomUUID()}.jsonlz4.tmp`);
   const mode = options.mode ?? 0o600;
+  const encoded = encodeJsonLz4Buffer(value);
   const handle = await open(
     tempPath,
     constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
@@ -146,7 +150,7 @@ export async function writeJsonLz4Durable(
   );
   try {
     await handle.chmod(mode);
-    await handle.writeFile(encodeJsonLz4Buffer(value));
+    await handle.writeFile(encoded);
     await handle.sync();
   } catch (error) {
     await handle.close();
@@ -155,7 +159,7 @@ export async function writeJsonLz4Durable(
   }
   await handle.close();
   try {
-    await options.beforeCommit?.();
+    await options.beforeCommit?.({ temporaryPath: tempPath, encodedDigest: sha256Bytes(encoded) });
     await rename(tempPath, path);
     const directory = await open(parent, constants.O_RDONLY | constants.O_NOFOLLOW);
     try {

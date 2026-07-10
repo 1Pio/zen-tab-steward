@@ -34,6 +34,25 @@ export async function publishPrivateJson(path: string, value: unknown): Promise<
   await publishPrivateBytes(path, Buffer.from(encodeJson(value), "utf8"), DEFAULT_MAX_JSON_BYTES);
 }
 
+export async function createPrivateJsonExclusive(path: string, value: unknown): Promise<boolean> {
+  const contents = Buffer.from(encodeJson(value), "utf8");
+  const parent = dirname(path);
+  await ensureDirectory(parent);
+  const temporary = privatePath(parent, `.tmp-${randomUUID()}.json`);
+  await writeSyncedTemporary(temporary, contents);
+  try {
+    await link(temporary, path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw error;
+  } finally {
+    await rm(temporary, { force: true });
+  }
+  await enforcePrivateFile(path);
+  await syncDirectory(parent);
+  return true;
+}
+
 export async function publishPrivateBytes(
   path: string,
   value: Uint8Array,

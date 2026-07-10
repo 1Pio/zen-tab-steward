@@ -7,11 +7,12 @@ import { inspectBridge, inspectLiveAttachment, runBridgeLiveMoveProof, runBridge
 import { addDomainRuleInContents, getConfigValue, loadConfig, saveConfigContents, setConfigValueInContents, ZtsConfig } from "./config.js";
 import { planDailySort } from "./daily-sort.js";
 import { envelope, formatApplyReceiptList, formatApplyVerification, formatBackup, formatBackupList, formatBackupPrune, formatBridge, formatBridgeLiveAttachment, formatBridgeLiveMove, formatBridgeLiveRead, formatBridgeProbe, formatRestore, formatReview, formatSortDryRun, formatSortPreview, formatStatus, formatTabs, formatWorkspaces, printJson } from "./output.js";
-import { applyManualPatchOffline, createManualPlanFromInput, listManualApplyReceipts, readPatchInput, snapshotFromSession } from "./manual.js";
-import { applySavedPlanOffline } from "./plan-apply.js";
+import { applyManualPatchOffline, createManualPlanFromInput, listManualApplyReceipts, readPatchInput } from "./manual.js";
+import { applySavedPlanWithProfileLock } from "./plan-apply.js";
 import { deriveAndStoreSubsetPlan, loadStoredPlan, PlanReuseError } from "./plans.js";
 import { discoverProfileContext } from "./profile.js";
 import { listTabs, loadSession, loadSessionSummary, summarizeSession, withWorkspacePolicy } from "./session.js";
+import { snapshotFromSession } from "./session-snapshot.js";
 import { classifyDomainForWorkspace, planSortPreview, SortInputs } from "./sort.js";
 import { VERSION } from "./version.js";
 
@@ -514,10 +515,7 @@ program
         if (options.expectDigest !== selected.plan.digest) {
           throw new Error(`Expected Plan digest ${options.expectDigest} does not match selected Plan ${selected.plan.digest}`);
         }
-        const loadedConfig = await loadConfig();
-        const session = await loadSession(context.sessionFile);
-        const summary = withWorkspacePolicy(summarizeSession(session, context.sessionFile), loadedConfig.config);
-        const result = await applySavedPlanOffline(context, session, summary, selected.plan, applyPlanCommandForReceipt(selectedAction, options));
+        const result = await applySavedPlanWithProfileLock(context, selected.plan, applyPlanCommandForReceipt(selectedAction, options));
         const data = {
           profile: context.profile,
           originalPlan: original.plan,

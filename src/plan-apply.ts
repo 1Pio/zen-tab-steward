@@ -8,11 +8,13 @@ import {
   defineReceipt
 } from "./domain/change.js";
 import { sha256Canonical } from "./domain/digest.js";
-import { snapshotFromSession } from "./manual.js";
+import { loadConfig } from "./config.js";
 import { writeJsonLz4 } from "./mozlz4.js";
 import { stateDir } from "./paths.js";
 import { ProfileContext } from "./profile.js";
-import { listTabs, RawZenSession, SessionSummary } from "./session.js";
+import { acquireProfileTransactionLock } from "./profile-lock.js";
+import { loadSession, listTabs, RawZenSession, SessionSummary, summarizeSession, withWorkspacePolicy } from "./session.js";
+import { snapshotFromSession } from "./session-snapshot.js";
 
 import type {
   ApplyAuthorization,
@@ -182,6 +184,24 @@ export async function applySavedPlanOffline(
   const receiptPath = join(receiptRoot, `${safeSegment(receipt.id)}--domain-apply.json`);
   await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   return { snapshot, plan, authorization, receipt, receiptPath, summary: { moveCount: moveActions.length } };
+}
+
+export async function applySavedPlanWithProfileLock(
+  context: ProfileContext,
+  plan: Plan,
+  command: string,
+  now = new Date()
+): Promise<SavedPlanApplyResult> {
+  if (context.running) throw new Error("Saved Plan apply requires Zen to be closed; current Snapshot would be a persisted observation");
+  const lock = await acquireProfileTransactionLock(context.profile, command, now);
+  try {
+    const loadedConfig = await loadConfig();
+    const session = await loadSession(context.sessionFile);
+    const summary = withWorkspacePolicy(summarizeSession(session, context.sessionFile), loadedConfig.config);
+    return await applySavedPlanOffline(context, session, summary, plan, command, now);
+  } finally {
+    await lock.release();
+  }
 }
 
 function allowedTrustClasses(moveActions: readonly MoveAction[]): [AuthorizableTrustClass, ...AuthorizableTrustClass[]] {
