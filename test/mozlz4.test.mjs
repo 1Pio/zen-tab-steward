@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Buffer } from "node:buffer";
-import { mkdtemp } from "node:fs/promises";
+import { link, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -9,6 +9,8 @@ import {
   decodeJsonLz4Buffer,
   encodeLiteralJsonLz4ForFixture,
   readJsonLz4,
+  readJsonLz4State,
+  writeJsonLz4Durable,
   writeJsonLz4
 } from "../dist/mozlz4.js";
 
@@ -53,4 +55,35 @@ test("writes JSONLZ4 files that round-trip through the decoder", async () => {
   await writeJsonLz4(path, value);
 
   assert.deepEqual(await readJsonLz4(path), value);
+});
+
+test("rejects hardlinked JSONLZ4 sources before decoding", async () => {
+  const temp = await mkdtemp(join(tmpdir(), "zts-jsonlz4-"));
+  const path = join(temp, "zen-sessions.jsonlz4");
+  const hardlinkPath = join(temp, "hardlink.jsonlz4");
+  await writeJsonLz4(path, { ok: true });
+  await link(path, hardlinkPath);
+
+  await assert.rejects(() => readJsonLz4State(path), /unexpected hardlink count/);
+
+  await rm(hardlinkPath);
+  assert.deepEqual(await readJsonLz4(path), { ok: true });
+});
+
+test("durable JSONLZ4 write removes temp files when pre-commit validation fails", async () => {
+  const temp = await mkdtemp(join(tmpdir(), "zts-jsonlz4-"));
+  const path = join(temp, "zen-sessions.jsonlz4");
+  const original = { version: 1 };
+  await writeJsonLz4(path, original);
+  const before = await readFile(path);
+  const beforeMode = (await stat(path)).mode & 0o777;
+
+  await assert.rejects(
+    () => writeJsonLz4Durable(path, { version: 2 }, { beforeCommit: async () => { throw new Error("preflight failed"); } }),
+    /preflight failed/
+  );
+
+  assert.deepEqual(await readFile(path), before);
+  assert.equal((await stat(path)).mode & 0o777, beforeMode);
+  assert.deepEqual(await readJsonLz4(path), original);
 });
