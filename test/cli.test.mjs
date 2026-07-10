@@ -511,6 +511,12 @@ test("manual Patch apply writes a domain receipt and verifies the moved tab", as
   assert.equal(applyJson.data.receipt.operations[0].observedWorkspaceId, portfolioWorkspace.id);
   assert.match(applyJson.data.receiptPath, /domain-apply\.json$/);
 
+  const receipts = await execFileAsync("node", ["dist/cli.js", "patch", "receipts", "--json"], { env });
+  const receiptsJson = JSON.parse(receipts.stdout);
+  assert.equal(receiptsJson.ok, true);
+  assert.equal(receiptsJson.data.receipts[0].id, applyJson.data.receipt.id);
+  assert.equal(receiptsJson.data.receipts[0].operationCount, 1);
+
   const tabs = await execFileAsync("node", ["dist/cli.js", "tabs", "Portfolio", "--json"], { env });
   const tabsJson = JSON.parse(tabs.stdout);
   assert.equal(tabsJson.ok, true);

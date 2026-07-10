@@ -6,13 +6,13 @@ import { createBackup, listBackups, pruneBackups, restoreBackup } from "./backup
 import { inspectBridge, inspectLiveAttachment, runBridgeLiveMoveProof, runBridgeLiveReadProof, runBridgeProbe } from "./bridge.js";
 import { addDomainRuleInContents, getConfigValue, loadConfig, saveConfigContents, setConfigValueInContents, ZtsConfig } from "./config.js";
 import { envelope, formatApplyReceiptList, formatApplyVerification, formatBackup, formatBackupList, formatBackupPrune, formatBridge, formatBridgeLiveAttachment, formatBridgeLiveMove, formatBridgeLiveRead, formatBridgeProbe, formatRestore, formatReview, formatSortDryRun, formatSortPreview, formatStatus, formatTabs, formatWorkspaces, printJson } from "./output.js";
-import { applyManualPatchOffline, createManualPlanFromInput, readPatchInput, snapshotFromSession } from "./manual.js";
+import { applyManualPatchOffline, createManualPlanFromInput, listManualApplyReceipts, readPatchInput, snapshotFromSession } from "./manual.js";
 import { discoverProfileContext } from "./profile.js";
 import { listTabs, loadSession, loadSessionSummary, summarizeSession, withWorkspacePolicy } from "./session.js";
 import { classifyDomainForWorkspace, planSortPreview, SortInputs } from "./sort.js";
 import { VERSION } from "./version.js";
 
-import type { ManualApplyResult, ManualPlanResult } from "./manual.js";
+import type { ManualApplyReceiptSummary, ManualApplyResult, ManualPlanResult } from "./manual.js";
 import type { Snapshot } from "./domain/snapshot.js";
 
 interface JsonOption {
@@ -335,16 +335,16 @@ program
 program
   .command("patch")
   .description("Plan exact manual tab moves from a Patch JSON file")
-  .argument("[action]", "plan or apply")
+  .argument("[action]", "plan, apply, or receipts")
   .argument("[patch-file]", "Patch JSON path, or - for stdin")
   .option("--yes", "confirm an unattended apply; required for patch apply")
   .option("--json", "print stable JSON output")
   .action(async (action: string | undefined, patchFile: string | undefined, options: JsonOption & { yes?: boolean }) => {
     const selectedAction = action ?? "plan";
-    if (selectedAction !== "plan" && selectedAction !== "apply") {
+    if (selectedAction !== "plan" && selectedAction !== "apply" && selectedAction !== "receipts") {
       const message = `unknown patch action '${selectedAction}'`;
       if (options.json) {
-        printJson(envelope("patch", { action: selectedAction }, { ok: false, blockers: [message], suggestedNextCommands: ["zts patch plan <patch-file> --json", "zts patch apply <patch-file> --yes --json"] }));
+        printJson(envelope("patch", { action: selectedAction }, { ok: false, blockers: [message], suggestedNextCommands: ["zts patch plan <patch-file> --json", "zts patch apply <patch-file> --yes --json", "zts patch receipts --json"] }));
       } else {
         process.stderr.write(`zts: ${message}\n`);
       }
@@ -393,11 +393,23 @@ program
         const summary = withWorkspacePolicy(summarizeSession(session, context.sessionFile), loadedConfig.config);
         const patchInput = await readPatchInput(patchFile);
         const result = await applyManualPatchOffline(context, session, summary, patchInput, patchCommandForReceipt(selectedAction, patchFile, options));
-        const suggestedNextCommands = ["zts apply list", "zts snapshot --json", "zts backup list"];
+        const suggestedNextCommands = ["zts patch receipts --json", "zts snapshot --json", "zts backup list"];
         if (options.json) {
           printJson(envelope("patch apply", { profile: context.profile, zenRunning: context.running, ...result }, { suggestedNextCommands }));
         } else {
           process.stdout.write(formatManualApplySummary(result, suggestedNextCommands));
+        }
+      });
+    }
+
+    if (selectedAction === "receipts") {
+      await runCommand("patch receipts", options, async () => {
+        const context = await discoverProfileContext();
+        const receipts = await listManualApplyReceipts(context.profile.id);
+        if (options.json) {
+          printJson(envelope("patch receipts", { profile: context.profile, receipts }));
+        } else {
+          process.stdout.write(formatManualReceiptList(receipts));
         }
       });
     }
@@ -1011,6 +1023,16 @@ function formatManualApplySummary(result: ManualApplyResult, suggestedNextComman
   ];
   if (suggestedNextCommands.length > 0) lines.push("", "Next:", ...suggestedNextCommands.map((command) => `  ${command}`));
   return `${lines.join("\n")}\n`;
+}
+
+function formatManualReceiptList(receipts: ManualApplyReceiptSummary[]): string {
+  if (receipts.length === 0) return "No manual Patch apply receipts found\n";
+  return `${[
+    "Manual Patch apply receipts",
+    ...receipts.map((receipt) =>
+      `  - ${receipt.id} ${receipt.outcome} (${receipt.operationCount} ops) ${receipt.completedAt}`
+    )
+  ].join("\n")}\n`;
 }
 
 function terminalData(value: string): string {

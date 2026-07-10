@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createBackup } from "./backup.js";
 import { createApplyAuthorization, createPatch, createPlan, definePatch, defineReceipt } from "./domain/change.js";
@@ -50,9 +50,45 @@ export interface ManualApplyResult extends ManualPlanResult {
   receiptPath: string;
 }
 
+export interface ManualApplyReceiptSummary {
+  id: string;
+  outcome: Receipt["outcome"];
+  planId: string;
+  planDigest: string;
+  completedAt: string;
+  operationCount: number;
+  receiptPath: string;
+}
+
 export async function readPatchInput(path: string): Promise<unknown> {
   const contents = path === "-" ? await readStdin() : await readFile(path, "utf8");
   return JSON.parse(contents) as unknown;
+}
+
+export async function listManualApplyReceipts(profileId: string): Promise<ManualApplyReceiptSummary[]> {
+  const root = join(stateDir(), "applies", safeSegment(profileId));
+  try {
+    const entries = await readdir(root);
+    const receiptFiles = entries.filter((entry) => entry.endsWith("--domain-apply.json")).sort().reverse();
+    const receipts: ManualApplyReceiptSummary[] = [];
+    for (const receiptFile of receiptFiles) {
+      const receiptPath = join(root, receiptFile);
+      const receipt = JSON.parse(await readFile(receiptPath, "utf8")) as Receipt;
+      receipts.push({
+        id: receipt.id,
+        outcome: receipt.outcome,
+        planId: receipt.planId,
+        planDigest: receipt.planDigest,
+        completedAt: receipt.completedAt,
+        operationCount: receipt.operations.length,
+        receiptPath
+      });
+    }
+    return receipts;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
 }
 
 export function snapshotFromSession(context: ProfileContext, session: RawZenSession, summary: SessionSummary): Snapshot {
