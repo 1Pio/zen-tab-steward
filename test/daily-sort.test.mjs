@@ -151,6 +151,41 @@ test("explicit pinned and essential inclusion creates Protection-bound move Oper
   }
 });
 
+test("human dry-run renders a useful complete diff for the exact previewed Plan", async () => {
+  const fixture = await makeDailySortFixture();
+  const env = {
+    ...process.env,
+    HOME: fixture.temp,
+    PATH: `${fixture.binDir}:${process.env.PATH ?? ""}`,
+    ZTS_ZEN_APP_SUPPORT_DIR: fixture.appSupportDir,
+    ZTS_STATE_DIR: fixture.stateDir,
+    ZTS_CONFIG_PATH: fixture.configPath
+  };
+  const base = ["dist/cli.js", "sort", "--all", "--engine", "rules"];
+  const preview = spawnSync("node", [...base, "--preview"], { env, encoding: "utf8" });
+  assert.equal(preview.status, 0, `${preview.stdout}\n${preview.stderr}`);
+  assert.match(preview.stdout, /Sort preview · all applicable Workspaces/);
+  assert.match(preview.stdout, /Nothing changed\./);
+
+  const dryRun = spawnSync("node", [...base, "--dry-run"], { env, encoding: "utf8" });
+  assert.equal(dryRun.status, 0, `${dryRun.stdout}\n${dryRun.stderr}`);
+  assert.match(dryRun.stdout, /Framer project/);
+  assert.match(dryRun.stdout, /Space -> Portfolio Work/);
+  assert.match(dryRun.stdout, /framer\.com/);
+  assert.match(dryRun.stdout, /protected.+Would route to Stash/i);
+
+  const scopedPreview = spawnSync(
+    "node",
+    ["dist/cli.js", "sort", "Tool Development", "--engine", "rules", "--preview", "--json"],
+    { env, encoding: "utf8" }
+  );
+  assert.equal(scopedPreview.status, 0, `${scopedPreview.stdout}\n${scopedPreview.stderr}`);
+  assert.equal(
+    JSON.parse(scopedPreview.stdout).suggestedNextCommands[0],
+    "zts sort 'Tool Development' --engine rules --dry-run"
+  );
+});
+
 async function makeDailySortFixture() {
   const temp = await mkdtemp(join(tmpdir(), "zts-daily-sort-"));
   const appSupportDir = join(temp, "zen");
@@ -201,7 +236,7 @@ async function makeDailySortFixture() {
     "never_move = []",
     "",
     "[rules.domains]",
-    "\"framer.com\" = \"Portfolio\"",
+    "\"framer.com\" = \"Portfolio Work\"",
     "\"github.com\" = \"Tool Development\"",
     "\"example.org\" = \"Stash\"",
     ""
@@ -211,7 +246,7 @@ async function makeDailySortFixture() {
     spaces: [
       { uuid: "w-space", name: "Space" },
       { uuid: "w-stash", name: "Stash" },
-      { uuid: "w-portfolio", name: "Portfolio" },
+      { uuid: "w-portfolio", name: "Portfolio Work" },
       { uuid: "w-tools", name: "Tool Development" }
     ],
     tabs: [

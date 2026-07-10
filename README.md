@@ -75,6 +75,16 @@ Each backup includes timestamped `.bak` files and a timestamped `manifest.json` 
 
 `zts sort [workspace] --preview` produces a safe read-only preview. It uses deterministic domain rules where a matching destination workspace exists, skips pinned tabs and essentials by default, and represents grouped/foldered structures as single review entities so they are not split. Every sortable entity from the source workspace is classified as move, skip, review, or blocked.
 
+The production Plan path is available for exact-rule planning across every applicable Workspace:
+
+```bash
+zts sort --all --engine rules --preview
+zts sort --all --engine rules --dry-run
+zts plan show latest
+```
+
+Preview saves one owner-private, content-addressed domain Plan. Dry-run reuses that exact Plan and digest. If the Snapshot changes between the two commands, dry-run reports Snapshot Drift and preserves the reviewed Plan instead of silently regenerating it. Workspace Protection is directional, so a Workspace can remain usable as a source while protected as a destination. `--include-pinned` and `--include-essentials` may place those entities into the Plan, but their Operations retain Protection preconditions for later explicit grants. Engine Plan apply is not enabled yet; the current checkpoint is read-only for this new path.
+
 Plain `zts sort [workspace]`, `--preview`, and `--dry-run` are read-only. Preview is glance-oriented; dry-run prints the full action list with reasons and explanations. Use `--limit <count>` to cap planned move actions for a controlled proof; eligible overflow actions are kept in review with reason `over_move_limit`. Mutation requires explicit `--apply`. Interactive terminal use asks for confirmation; JSON and other unattended use also requires `--yes`. The session backend applies only when Zen is closed and `zen-sessions.jsonlz4` is the selected session source. The live backend applies only when Zen is running, the live attachment gate passes, and every planned tab move passes exact URL/workspace protection checks.
 
 `zts review [workspace]` lists only the sort-plan items that need attention, including low-confidence items, move-limit overflow, and grouped/foldered aggregate entities. It is read-only and supports the same policy/filter flags as `zts sort`.
@@ -127,6 +137,9 @@ zts apply list --json
 zts apply verify <receipt-id> --json
 zts sort Space --preview --json
 zts sort Space --dry-run --json
+zts sort --all --engine rules --preview --json
+zts sort --all --engine rules --dry-run --json
+zts plan show latest --json
 zts sort Space --dry-run --limit 3 --json
 zts review Space --json
 zts sort Space --apply --yes --backend session --json
@@ -152,6 +165,7 @@ The current implementation has read, backup, preview, offline session apply, and
 - It can run `zts bridge live-move-proof` only with explicit confirmation and exact tab/workspace selectors; `zts sort --apply --backend live` reuses that gated proof machinery.
 - It can run a disposable `zts bridge probe` against a temporary headless profile to verify WebDriver BiDi transport, script execution, Zen chrome object reachability, and one temp-profile workspace tab move without touching live tabs.
 - It creates a fresh backup before offline session mutation.
+- It stores production Plan artifacts under an owner-only state root using `0700` directories, `0600` files, bounded handle-based reads, content binding, fsync, and atomic publication.
 - It writes an apply receipt under the state directory after offline or live apply.
 - It can list and re-verify apply receipts without writing Zen state.
 - It creates a fresh safety backup and restore receipt before/after offline restore.

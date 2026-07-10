@@ -17,7 +17,7 @@ import { VERSION } from "./version.js";
 import type { ManualApplyReceiptSummary, ManualApplyResult, ManualPlanResult } from "./manual.js";
 import type { DailySortPlanResult } from "./daily-sort.js";
 import type { Plan } from "./domain/change.js";
-import type { Snapshot } from "./domain/snapshot.js";
+import type { Entity, EntityRef, Snapshot } from "./domain/snapshot.js";
 
 interface JsonOption {
   json?: boolean;
@@ -1163,12 +1163,22 @@ function formatDailySortPlan(
   ];
   if (mode === "dry-run") {
     lines.push("", "Actions:");
+    const entities = new Map<EntityRef, Entity>(result.snapshot.entities.map((entity) => [entity.ref, entity]));
+    const workspaces = new Map(result.snapshot.workspaces.map((workspace) => [workspace.id, workspace]));
     for (const action of result.plan.actions) {
-      if (action.disposition === "move") {
-        lines.push(`  ${action.actionId}  move ${action.operation.entityRef} -> ${action.operation.expectedPostState.workspaceId}`);
-      } else {
-        lines.push(`  ${action.actionId}  ${action.disposition} ${action.entityRef} -> ${action.candidateDestinationWorkspaceId ?? "(none)"}`);
-      }
+      const entityRef = action.disposition === "move" ? action.operation.entityRef : action.entityRef;
+      const entity = entities.get(entityRef);
+      const destinationId = action.disposition === "move"
+        ? action.operation.expectedPostState.workspaceId
+        : action.candidateDestinationWorkspaceId;
+      const sourceName = entity ? workspaces.get(entity.workspaceId)?.name ?? entity.workspaceId : "(unknown source)";
+      const destinationName = destinationId ? workspaces.get(destinationId)?.name ?? destinationId : "(none)";
+      const title = entity ? terminalData(entity.title) : entityRef;
+      const origin = entity?.members[0]?.url ? domainFromInput(entity.members[0].url) : "";
+      lines.push(`  ${action.actionId}`);
+      lines.push(`    ${action.disposition} ${title}`);
+      lines.push(`    ${terminalData(sourceName)} -> ${terminalData(destinationName)}${origin ? ` · ${terminalData(origin)}` : ""}`);
+      lines.push(`    ${terminalData(action.decision.explanation.value)}`);
     }
   }
   if (warnings.length > 0) lines.push("", "Warnings:", ...warnings.map((warning) => `  - ${warning}`));
