@@ -298,6 +298,12 @@ test("exact confirmed subset Plan applies only its selected Operations and write
   const unselectedNativeId = entities.get(unselectedAction.operation.entityRef).nativeId;
   const unselectedTab = afterSession.tabs.find((tab) => tab.zenSyncId === unselectedNativeId);
   assert.equal(unselectedTab.zenWorkspace, unselectedAction.operation.precondition.sourceWorkspace.workspaceId);
+
+  const list = await execFileAsync("node", ["dist/cli.js", "apply", "list", "--json"], { env });
+  const listed = JSON.parse(list.stdout).data.domainReceipts[0];
+  assert.equal(listed.id, applyJson.data.receipt.id);
+  assert.equal(listed.kind, "saved_plan");
+  assert.equal(listed.planDigest, derivedPlan.digest);
 });
 
 async function makeDailySortFixture() {

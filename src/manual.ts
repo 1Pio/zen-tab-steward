@@ -3,11 +3,11 @@ import { join } from "node:path";
 import { createBackup } from "./backup.js";
 import { createApplyAuthorization, createPatch, createPlan, definePatch, defineReceipt } from "./domain/change.js";
 import { sha256Canonical } from "./domain/digest.js";
-import { createSnapshot } from "./domain/snapshot.js";
 import { writeJsonLz4 } from "./mozlz4.js";
 import { stateDir } from "./paths.js";
 import { ProfileContext } from "./profile.js";
 import { listTabs, RawZenSession, SessionSummary } from "./session.js";
+import { snapshotFromSession } from "./session-snapshot.js";
 
 import type {
   AutoApplyEvidence,
@@ -22,15 +22,9 @@ import type {
   Receipt,
   ZtsMessage
 } from "./domain/change.js";
-import type {
-  CapabilityEvidence,
-  EntityDraft,
-  MovementRootRef,
-  Protection,
-  Snapshot,
-  SnapshotDraft,
-  Workspace
-} from "./domain/snapshot.js";
+import type { Protection, Snapshot } from "./domain/snapshot.js";
+
+export { snapshotFromSession } from "./session-snapshot.js";
 
 export interface ManualPlanResult {
   snapshot: Snapshot;
@@ -52,6 +46,7 @@ export interface ManualApplyResult extends ManualPlanResult {
 
 export interface ManualApplyReceiptSummary {
   id: string;
+  kind: "manual_patch" | "saved_plan" | "unknown";
   outcome: Receipt["outcome"];
   planId: string;
   planDigest: string;
@@ -76,6 +71,7 @@ export async function listManualApplyReceipts(profileId: string): Promise<Manual
       const receipt = JSON.parse(await readFile(receiptPath, "utf8")) as Receipt;
       receipts.push({
         id: receipt.id,
+        kind: receipt.id.startsWith("receipt:manual:") ? "manual_patch" : receipt.id.startsWith("receipt:plan:") ? "saved_plan" : "unknown",
         outcome: receipt.outcome,
         planId: receipt.planId,
         planDigest: receipt.planDigest,
@@ -89,123 +85,6 @@ export async function listManualApplyReceipts(profileId: string): Promise<Manual
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw error;
   }
-}
-
-export function snapshotFromSession(context: ProfileContext, session: RawZenSession, summary: SessionSummary): Snapshot {
-  const capturedAt = new Date().toISOString();
-  const route = context.running ? "persisted_session" : "closed_session";
-  const sourceRevision = sha256Canonical({
-    kind: context.sessionFile.kind,
-    modifiedMs: context.sessionFile.modifiedMs,
-    size: context.sessionFile.size,
-    session
-  });
-  const scope = {
-    profileId: context.profile.id,
-    route,
-    platform: `${process.platform}-${process.arch}`,
-    zenVersion: "unknown",
-    zenBuildId: null,
-    schemaFamily: context.sessionFile.kind,
-    entityKind: null
-  } as const;
-  const observeProof = {
-    artifact: { id: `session:${context.sessionFile.kind}:source`, digest: sourceRevision },
-    source: "runtime_probe" as const,
-    capturedAt,
-    scope,
-    controlSessionId: null,
-    processBindingRevision: null
-  };
-  const evidence: CapabilityEvidence[] = [
-    {
-      id: "observe.snapshot",
-      status: "available",
-      reason: context.running
-        ? "Read persisted Zen session state while Zen may have newer in-memory state"
-        : "Read Zen session state while Zen was not running",
-      proof: observeProof
-    }
-  ];
-  if (!context.running && context.sessionFile.kind === "zen-sessions") {
-    evidence.push({
-      id: "profile.exclusive_control",
-      status: "available",
-      reason: "Zen was not running for the selected Profile",
-      proof: { ...observeProof, artifact: { id: "session:closed-profile:exclusive-control", digest: sourceRevision } }
-    });
-    evidence.push({
-      id: "move.tab",
-      status: "available",
-      reason: "Closed-session tab moves are supported for unprotected tab Movement Roots",
-      proof: {
-        ...observeProof,
-        artifact: { id: "session:closed-profile:move-tab", digest: sourceRevision },
-        scope: { ...scope, entityKind: "tab" }
-      }
-    });
-  }
-
-  const draft = {
-    schemaVersion: "zts.snapshot.provisional-1",
-    profile: {
-      id: context.profile.id,
-      name: context.profile.name,
-      contentTrust: "browser_untrusted"
-    },
-    capturedAt,
-    authority: context.running ? "persisted_observation" : "authoritative",
-    freshness: context.running ? "possibly_stale" : "current",
-    provenance: {
-      route,
-      sourceRevision,
-      platform: scope.platform,
-      zenVersion: scope.zenVersion,
-      zenBuildId: scope.zenBuildId,
-      schemaFamily: scope.schemaFamily
-    },
-    capabilities: {
-      observedAt: capturedAt,
-      evidence: evidence as [CapabilityEvidence, ...CapabilityEvidence[]]
-    },
-    workspaces: summary.workspaces.map((workspace): Workspace => ({
-      id: workspace.id,
-      name: workspace.name,
-      contentTrust: "browser_untrusted",
-      position: workspace.order,
-      protection: workspaceProtection(workspace.protectedStatus)
-    })),
-    entities: listTabs(session, summary)
-      .filter((tab) => tab.workspaceId !== null)
-      .map((tab): EntityDraft => {
-        const ref = tabRef(tab.id, tab.index);
-        return {
-          ref,
-          kind: "tab",
-          nativeId: tab.id,
-          parentRef: null,
-          childRefs: [],
-          structuralRootRef: ref,
-          workspaceId: tab.workspaceId ?? "",
-          title: tab.title,
-          contentTrust: "browser_untrusted",
-          protection: tab.protected ? { protected: true, reasons: tab.protectionReasons as [string, ...string[]] } : { protected: false, reasons: [] },
-          members: [
-            {
-              nativeId: tab.id,
-              title: tab.title,
-              url: tab.url,
-              contentTrust: "browser_untrusted",
-              pinned: tab.pinned,
-              essential: tab.essential,
-              hidden: tab.hidden,
-              active: false
-            }
-          ]
-        };
-      })
-  } as SnapshotDraft;
-  return createSnapshot(draft);
 }
 
 export function createManualPlanFromInput(snapshot: Snapshot, patchInput: unknown): ManualPlanResult {
@@ -473,21 +352,6 @@ function moveProtection(protection: Protection, grantId: string): MoveProtection
     protectionRevision: sha256Canonical(protection),
     requiredGrantId: grantId
   };
-}
-
-function workspaceProtection(status: SessionSummary["workspaces"][number]["protectedStatus"]): Workspace["protection"] {
-  return {
-    source: status === "from" || status === "from_to"
-      ? { protected: true, reasons: ["protected_source"] }
-      : { protected: false, reasons: [] },
-    destination: status === "to" || status === "from_to"
-      ? { protected: true, reasons: ["protected_destination"] }
-      : { protected: false, reasons: [] }
-  };
-}
-
-function tabRef(tabId: string, index: number): MovementRootRef {
-  return `entity:root:tab:${safeSegment(tabId)}:${sha256Canonical({ tabId, index }).slice("sha256:".length, "sha256:".length + 12)}`;
 }
 
 function shortDigest(digest: string): string {

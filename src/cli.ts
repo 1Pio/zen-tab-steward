@@ -468,10 +468,11 @@ program
       await runCommand("apply list", options, async () => {
         const context = await discoverProfileContext();
         const receipts = await listApplyReceipts(context.profile.id);
+        const domainReceipts = await listManualApplyReceipts(context.profile.id);
         if (options.json) {
-          printJson(envelope("apply list", { profile: context.profile, receipts }));
+          printJson(envelope("apply list", { profile: context.profile, receipts, domainReceipts }));
         } else {
-          process.stdout.write(`${formatApplyReceiptList(receipts)}\n`);
+          process.stdout.write(`${formatApplyReceiptList(receipts)}\n${formatDomainApplyReceiptList(domainReceipts)}`);
         }
       });
       return;
@@ -1362,11 +1363,15 @@ function formatSavedPlanApply(result: SavedPlanApplyResult): string {
 }
 
 function formatManualReceiptList(receipts: ManualApplyReceiptSummary[]): string {
-  if (receipts.length === 0) return "No manual Patch apply receipts found\n";
+  return formatDomainApplyReceiptList(receipts);
+}
+
+function formatDomainApplyReceiptList(receipts: ManualApplyReceiptSummary[]): string {
+  if (receipts.length === 0) return "No domain apply receipts found\n";
   return `${[
-    "Manual Patch apply receipts",
+    "Domain apply receipts",
     ...receipts.map((receipt) =>
-      `  - ${receipt.id} ${receipt.outcome} (${receipt.operationCount} ops) ${receipt.completedAt}`
+      `  - ${receipt.id} ${receipt.kind} ${receipt.outcome} (${receipt.operationCount} ops) ${receipt.completedAt}`
     )
   ].join("\n")}\n`;
 }
