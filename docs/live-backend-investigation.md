@@ -35,7 +35,7 @@ It does not call any workspace mutation method, open tabs, move tabs, write prof
 - `--to-workspace <workspace-id>`,
 - the same live attachment gate as `live-read`.
 
-The proof searches live `gBrowser.tabs` for exactly one tab whose current URI exactly matches the requested URL and whose `zen-workspace-id` exactly matches the requested source workspace. It refuses pinned, essential, grouped, foldered, ambiguous, unmatched, missing-workspace, and same-workspace moves before calling `gZenWorkspaces.moveTabToWorkspace(...)`. After the move call, it verifies the tab's `zen-workspace-id` equals the requested destination. `zts sort --backend live` now reuses this proof for each planned move after the live attachment gate passes.
+The proof searches live `gBrowser.tabs` for exactly one tab whose current URI exactly matches the requested URL and whose `zen-workspace-id` exactly matches the requested source workspace. It refuses pinned, essential, grouped, foldered, ambiguous, unmatched, missing-workspace, and same-workspace moves before calling `gZenWorkspaces.moveTabToWorkspace(...)`. After the move call, it verifies the tab's `zen-workspace-id` equals the requested destination. `zts sort --apply --backend live` now reuses this proof for each planned move after the live attachment gate passes.
 
 `zts bridge probe` is a separate disposable bridge proof. It starts a headless Zen process with a temporary profile, local remote debugging flags, and `--remote-allow-system-access`, verifies WebDriver BiDi `session.status`, creates a session, executes harmless script in a content context, executes harmless script in Zen browser chrome, verifies `gZenWorkspaces` is reachable, performs one temp-profile workspace tab move through Zen internals, then terminates the process and removes the temporary profile. It does not attach to the live profile or move live tabs.
 
@@ -121,7 +121,7 @@ The probe validates that the disposable tab started in the target workspace, end
 
 The live movement backend is implemented behind attachment and tab-safety gates, but it has not yet been proven against the user's current real Zen process because the running process is not attachable.
 
-Until the intended live Zen profile/window is attachable, `zts sort --backend live` must continue to refuse before mutation. The project must still avoid UI automation, extension setup, Zen mod installation, daemon/autostart setup, and active session-file writes.
+Until the intended live Zen profile/window is attachable, `zts sort --apply --backend live` must continue to refuse before mutation. The project must still avoid UI automation, extension setup, Zen mod installation, daemon/autostart setup, and active session-file writes.
 
 `zts bridge doctor` records the current blockers:
 
@@ -159,7 +159,7 @@ Live apply receipts can be reverified only through the same live attachment boun
 When Zen is closed:
 
 ```bash
-zts sort Space --backend session --json
+zts sort Space --apply --yes --backend session --json
 ```
 
 uses the offline session backend, creates a fresh backup, mutates only planned tab workspace ids in `zen-sessions.jsonlz4`, writes an apply receipt, and verifies the recorded moves.
@@ -170,6 +170,6 @@ The next live-backend spike should stay narrow until it can prove on the real pr
 
 - how to address the intended Zen window/profile,
 - how to launch or attach to the live profile with local WebDriver BiDi without services, extensions, mods, or autostart items,
-- how to move one intentionally selected low-risk live tab through `zts sort --backend live --limit 1`,
+- how to move one intentionally selected low-risk live tab through `zts sort --apply --backend live --limit 1`,
 - how to verify the move from Zen state after the call and preserve the receipt,
 - how to fail closed without installing services, extensions, mods, or autostart items.

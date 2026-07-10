@@ -69,13 +69,13 @@ Each backup includes timestamped `.bak` files and a timestamped `manifest.json` 
 
 `zts bridge live-read` requires the same live attachment gate, then creates a WebDriver BiDi session and runs a read-only browser-chrome script against the live profile to verify the Zen chrome context, `gZenWorkspaces`, active workspace id, and workspace count. It does not move tabs or write Zen state.
 
-`zts bridge live-move-proof` is the first gated live movement proof. It refuses unless you pass `--confirm-live-move`, `--url <exact-tab-url>`, `--from-workspace <workspace-id>`, and `--to-workspace <workspace-id>`, and the live attachment gate passes. It moves at most one exact URL match from the exact source workspace to the exact destination workspace, and refuses pinned, essential, grouped, foldered, ambiguous, unmatched, or same-workspace moves. `zts sort --backend live` uses the same proof machinery for each planned move after creating a backup and writing a live apply receipt.
+`zts bridge live-move-proof` is the first gated live movement proof. It refuses unless you pass `--confirm-live-move`, `--url <exact-tab-url>`, `--from-workspace <workspace-id>`, and `--to-workspace <workspace-id>`, and the live attachment gate passes. It moves at most one exact URL match from the exact source workspace to the exact destination workspace, and refuses pinned, essential, grouped, foldered, ambiguous, unmatched, or same-workspace moves. `zts sort --apply --backend live` uses the same proof machinery for each planned move after creating a backup and writing a live apply receipt.
 
 `zts bridge probe` launches a disposable headless Zen instance with a temporary profile, checks local WebDriver BiDi, creates a session, executes harmless script in a content context, executes harmless script in Zen browser chrome, verifies `gZenWorkspaces` is reachable, performs one disposable temp-profile workspace tab move through Zen internals, then terminates the process and removes the temporary profile. It is still a proof only: it does not attach to the live profile and does not move live tabs.
 
 `zts sort [workspace] --preview` produces a safe read-only preview. It uses deterministic domain rules where a matching destination workspace exists, skips pinned tabs and essentials by default, and represents grouped/foldered structures as single review entities so they are not split. Every sortable entity from the source workspace is classified as move, skip, review, or blocked.
 
-Preview and dry-run commands exit successfully because they do not write. Preview is glance-oriented; dry-run prints the full action list with reasons and explanations. Use `--limit <count>` to cap planned move actions for a controlled proof; eligible overflow actions are kept in review with reason `over_move_limit`. Plain `zts sort [workspace]` and `zts sort [workspace] --apply` attempt to apply eligible planned moves using the selected backend. The session backend applies only when Zen is closed and `zen-sessions.jsonlz4` is the selected session source. The live backend applies only when Zen is running, the live attachment gate passes, and every planned tab move passes exact URL/workspace protection checks.
+Plain `zts sort [workspace]`, `--preview`, and `--dry-run` are read-only. Preview is glance-oriented; dry-run prints the full action list with reasons and explanations. Use `--limit <count>` to cap planned move actions for a controlled proof; eligible overflow actions are kept in review with reason `over_move_limit`. Mutation requires explicit `--apply`. Interactive terminal use asks for confirmation; JSON and other unattended use also requires `--yes`. The session backend applies only when Zen is closed and `zen-sessions.jsonlz4` is the selected session source. The live backend applies only when Zen is running, the live attachment gate passes, and every planned tab move passes exact URL/workspace protection checks.
 
 `zts review [workspace]` lists only the sort-plan items that need attention, including low-confidence items, move-limit overflow, and grouped/foldered aggregate entities. It is read-only and supports the same policy/filter flags as `zts sort`.
 
@@ -123,7 +123,7 @@ zts sort Space --preview --json
 zts sort Space --dry-run --json
 zts sort Space --dry-run --limit 3 --json
 zts review Space --json
-zts sort Space --backend session --json
+zts sort Space --apply --yes --backend session --json
 zts config show --json
 zts rules test https://github.com/1Pio/zen-tab-steward --json
 ```
@@ -143,7 +143,7 @@ The current implementation has read, backup, preview, offline session apply, and
 - It can inspect live-backend launch evidence with `zts bridge status` and `zts bridge doctor`, but those commands are read-only.
 - It can run `zts bridge live-check` as a read-only live-profile attachment gate; refusal is expected unless Zen was launched with the required remote-control flags and a local WebDriver BiDi server file exists.
 - It can run `zts bridge live-read` as a read-only live-profile browser-chrome proof after the attachment gate passes; it does not move tabs.
-- It can run `zts bridge live-move-proof` only with explicit confirmation and exact tab/workspace selectors; `zts sort --backend live` reuses that gated proof machinery.
+- It can run `zts bridge live-move-proof` only with explicit confirmation and exact tab/workspace selectors; `zts sort --apply --backend live` reuses that gated proof machinery.
 - It can run a disposable `zts bridge probe` against a temporary headless profile to verify WebDriver BiDi transport, script execution, Zen chrome object reachability, and one temp-profile workspace tab move without touching live tabs.
 - It creates a fresh backup before offline session mutation.
 - It writes an apply receipt under the state directory after offline or live apply.
@@ -164,5 +164,7 @@ npm test
 npm run build
 npm run smoke
 ```
+
+The smoke command runs only against a temporary fixture profile, home, config, and state directory. It does not inspect or mutate the installed Zen profile.
 
 The tests use synthetic JSONLZ4 fixtures and temporary directories. They do not depend on the user's real Zen profile.

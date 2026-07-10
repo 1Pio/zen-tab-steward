@@ -445,9 +445,15 @@ export function formatApplyVerification(report: ApplyVerificationReport): string
   return lines.join("\n");
 }
 
-export function formatSortPreview(plan: SortPlan, applyBlockers: string[], suggestedNextCommands: string[], applyReceipt?: ApplyReceipt): string {
+export function formatSortPreview(
+  plan: SortPlan,
+  applyBlockers: string[],
+  suggestedNextCommands: string[],
+  applyReceipt?: ApplyReceipt,
+  applyRequested = false
+): string {
   const lines = [
-    `Sort preview: ${plan.sourceWorkspace.name}`,
+    `${applyRequested ? "Sort apply" : "Sort preview"}: ${plan.sourceWorkspace.name}`,
     "",
     `Move ${plan.moveCount} entities`,
     `Skip ${plan.skipCount} protected or filtered`,
@@ -465,7 +471,9 @@ export function formatSortPreview(plan: SortPlan, applyBlockers: string[], sugge
     );
   }
 
-  if (applyReceipt) {
+  if (applyRequested && plan.moveCount === 0) {
+    lines.push("No eligible moves; no changes or receipt were written");
+  } else if (applyReceipt) {
     const planned = applyReceipt.plannedMoveCount ?? applyReceipt.moves.length;
     const attempted = applyReceipt.attemptedMoveCount ?? applyReceipt.moveCount;
     const succeeded = applyReceipt.succeededMoveCount ?? applyReceipt.moveCount;

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { Command } from "commander";
+import { createInterface } from "node:readline/promises";
 import { applySortPlanLive, applySortPlanOffline, listApplyReceipts, offlineApplyBlockers, resolveApplyBackend, sortApplyBlockers, verifyApplyReceipt } from "./apply.js";
 import { createBackup, listBackups, pruneBackups, restoreBackup } from "./backup.js";
 import { inspectBridge, inspectLiveAttachment, runBridgeLiveMoveProof, runBridgeLiveReadProof, runBridgeProbe } from "./bridge.js";
@@ -509,6 +510,7 @@ program
   .option("--preview", "show a glanceable preview without writing")
   .option("--dry-run", "show an operational dry run without writing")
   .option("--apply", "apply planned safe moves with the selected backend")
+  .option("--yes", "confirm an unattended apply; requires --apply")
   .option("--min-confidence <number>", "minimum confidence required for future apply")
   .option("--include-pinned", "include pinned tabs in future sort planning")
   .option("--include-essentials", "include essentials in future sort planning")
@@ -527,7 +529,7 @@ program
       const summary = withWorkspacePolicy(summarizeSession(session, context.sessionFile), loadedConfig.config);
       const source = resolveSourceWorkspace(summary, sourceWorkspace, loadedConfig.config.defaults.inbox);
       const inputs = sortInputs(options, loadedConfig.config);
-      const inputError = validateSortInputs(inputs);
+      const inputError = validateSortMode(options) ?? validateSortInputs(inputs);
       if (inputError) {
         if (options.json) {
           printJson(envelope("sort", { sourceWorkspace: sourceWorkspace ?? null, inputs }, { ok: false, blockers: [inputError], suggestedNextCommands: ["zts sort --help"] }));
@@ -551,12 +553,21 @@ program
         return;
       }
       const plan = planSortPreview(session, summary, source, inputs);
-      const previewRequested = Boolean(options.preview || options.dryRun);
-      let applyBlockers = previewRequested ? offlineApplyBlockers(context, inputs.backend) : sortApplyBlockers(context, inputs.backend);
-      const applyRequested = !previewRequested;
+      const applyRequested = Boolean(options.apply);
+      const previewRequested = !applyRequested;
+      const applyRequestedWithMoves = applyRequested && plan.moveCount > 0;
+      let applyBlockers = applyRequested && plan.moveCount === 0
+        ? []
+        : previewRequested
+          ? offlineApplyBlockers(context, inputs.backend)
+          : sortApplyBlockers(context, inputs.backend);
       let applyReceipt = undefined;
       let resolvedBackend: "session" | "live" = resolveApplyBackend(context, inputs.backend);
-      if (applyRequested && applyBlockers.length === 0) {
+      if (applyRequestedWithMoves && applyBlockers.length === 0) {
+        const consent = await requestSortApplyConsent(plan.moveCount, resolvedBackend, options);
+        if (!consent.granted && consent.blocker) applyBlockers.push(consent.blocker);
+      }
+      if (applyRequestedWithMoves && applyBlockers.length === 0) {
         resolvedBackend = resolveApplyBackend(context, inputs.backend);
         if (resolvedBackend === "live") {
           const liveCheck = await inspectLiveAttachment(context, { connect: true });
@@ -572,7 +583,9 @@ program
       }
       const suggestedNextCommands = applyBlockers.length > 0
         ? ["zts sort --preview", "zts status", resolvedBackend === "live" ? "zts bridge live-check --connect --json" : "zts backup"]
-        : ["zts status", "zts backup"];
+        : previewRequested
+          ? ["zts sort --apply", "zts status"]
+          : ["zts status", "zts backup"];
       const ok = previewRequested || applyBlockers.length === 0;
 
       const data = {
@@ -581,7 +594,9 @@ program
         sourceWorkspace: source,
         inputs,
         plan,
+        mode: applyRequested ? "apply" : options.dryRun ? "dry-run" : "preview",
         previewOnly: previewRequested,
+        noChanges: applyRequested && plan.moveCount === 0,
         applied: Boolean(applyReceipt?.verification.ok),
         applyReceiptWritten: Boolean(applyReceipt),
         applyReceipt: applyReceipt ?? null,
@@ -602,7 +617,7 @@ program
         printJson(envelope("sort", data, { ok, blockers: applyBlockers, suggestedNextCommands }));
         process.exitCode = ok ? 0 : 2;
       } else {
-        process.stdout.write(`${options.dryRun ? formatSortDryRun(plan, applyBlockers, suggestedNextCommands) : formatSortPreview(plan, applyBlockers, suggestedNextCommands, applyReceipt)}\n`);
+        process.stdout.write(`${options.dryRun ? formatSortDryRun(plan, applyBlockers, suggestedNextCommands) : formatSortPreview(plan, applyBlockers, suggestedNextCommands, applyReceipt, applyRequested)}\n`);
         process.exitCode = ok ? 0 : 2;
       }
     });
@@ -612,6 +627,7 @@ interface SortOptions {
   preview?: boolean;
   dryRun?: boolean;
   apply?: boolean;
+  yes?: boolean;
   minConfidence?: string;
   includePinned?: boolean;
   includeEssentials?: boolean;
@@ -769,6 +785,51 @@ function validateSortInputs(inputs: SortInputs): string | null {
     return "--limit must be a whole number greater than or equal to 0";
   }
   return null;
+}
+
+function validateSortMode(options: SortOptions): string | null {
+  if (options.apply && (options.preview || options.dryRun)) {
+    return "--apply cannot be combined with --preview or --dry-run";
+  }
+  if (options.preview && options.dryRun) {
+    return "--preview cannot be combined with --dry-run";
+  }
+  if (options.yes && !options.apply) {
+    return "--yes requires --apply";
+  }
+  return null;
+}
+
+async function requestSortApplyConsent(
+  moveCount: number,
+  backend: "session" | "live",
+  options: SortOptions & JsonOption
+): Promise<{ granted: boolean; blocker: string | null }> {
+  if (options.yes) return { granted: true, blocker: null };
+  if (options.json) {
+    return {
+      granted: false,
+      blocker: "JSON apply requires explicit unattended consent with --apply --yes"
+    };
+  }
+  if (!process.stdin.isTTY || !process.stderr.isTTY) {
+    return {
+      granted: false,
+      blocker: "Unattended apply requires explicit consent with --apply --yes"
+    };
+  }
+
+  const prompt = createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    const answer = await prompt.question(`Apply ${moveCount} planned move${moveCount === 1 ? "" : "s"} using ${backend}? [y/N] `);
+    const granted = answer.trim().toLowerCase() === "y" || answer.trim().toLowerCase() === "yes";
+    return {
+      granted,
+      blocker: granted ? null : "Apply cancelled; no changes were made"
+    };
+  } finally {
+    prompt.close();
+  }
 }
 
 function normalizeBackend(backend?: string): SortInputs["backend"] {

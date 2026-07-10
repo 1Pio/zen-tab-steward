@@ -13,6 +13,7 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
   const fixture = await makeZenFixture();
   const env = {
     ...process.env,
+    HOME: fixture.temp,
     ZTS_ZEN_APP_SUPPORT_DIR: fixture.appSupportDir,
     ZTS_STATE_DIR: fixture.stateDir,
     ZTS_CONFIG_PATH: join(fixture.temp, "config.toml")
@@ -218,7 +219,7 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
   assert.equal(limitedSortJson.data.plan.moveCount, 0);
   assert.equal(limitedSortJson.data.plan.reviewActions.some((action) => action.reason === "over_move_limit"), true);
 
-  const liveSortClosed = spawnSync("node", ["dist/cli.js", "sort", "Space", "--backend", "live", "--json"], {
+  const liveSortClosed = spawnSync("node", ["dist/cli.js", "sort", "Space", "--apply", "--yes", "--backend", "live", "--json"], {
     env,
     encoding: "utf8"
   });
@@ -235,9 +236,49 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
   assert.equal(plainSort.status, 0);
   const plainSortJson = JSON.parse(plainSort.stdout);
   assert.equal(plainSortJson.ok, true);
-  assert.equal(plainSortJson.data.applied, true);
-  assert.equal(plainSortJson.data.applyReceipt.moveCount, 1);
-  const applyReceiptId = plainSortJson.data.applyReceipt.id;
+  assert.equal(plainSortJson.data.mode, "preview");
+  assert.equal(plainSortJson.data.previewOnly, true);
+  assert.equal(plainSortJson.data.applied, false);
+  assert.equal(plainSortJson.data.applyReceipt, null);
+  const unchangedSession = await readJsonLz4(join(fixture.profilePath, "zen-sessions.jsonlz4"));
+  assert.equal(unchangedSession.tabs[2].zenWorkspace, "w1");
+
+  const unattendedApplyWithoutConsent = spawnSync("node", ["dist/cli.js", "sort", "Space", "--apply", "--json"], {
+    env,
+    encoding: "utf8"
+  });
+  assert.equal(unattendedApplyWithoutConsent.status, 2);
+  const unattendedApplyWithoutConsentJson = JSON.parse(unattendedApplyWithoutConsent.stdout);
+  assert.equal(unattendedApplyWithoutConsentJson.ok, false);
+  assert.equal(unattendedApplyWithoutConsentJson.data.applied, false);
+  assert.match(unattendedApplyWithoutConsentJson.blockers.join("\n"), /requires explicit unattended consent/);
+  const stillUnchangedSession = await readJsonLz4(join(fixture.profilePath, "zen-sessions.jsonlz4"));
+  assert.equal(stillUnchangedSession.tabs[2].zenWorkspace, "w1");
+
+  const zeroMoveApply = spawnSync("node", ["dist/cli.js", "sort", "Space", "--apply", "--yes", "--limit", "0", "--json"], {
+    env,
+    encoding: "utf8"
+  });
+  assert.equal(zeroMoveApply.status, 0);
+  const zeroMoveApplyJson = JSON.parse(zeroMoveApply.stdout);
+  assert.equal(zeroMoveApplyJson.ok, true);
+  assert.equal(zeroMoveApplyJson.data.noChanges, true);
+  assert.equal(zeroMoveApplyJson.data.applyReceiptWritten, false);
+  const unchangedAfterZeroMoveApply = await readJsonLz4(join(fixture.profilePath, "zen-sessions.jsonlz4"));
+  assert.equal(unchangedAfterZeroMoveApply.tabs[2].zenWorkspace, "w1");
+
+  const explicitApply = spawnSync("node", ["dist/cli.js", "sort", "Space", "--apply", "--yes", "--json"], {
+    env,
+    encoding: "utf8"
+  });
+  assert.equal(explicitApply.status, 0);
+  const explicitApplyJson = JSON.parse(explicitApply.stdout);
+  assert.equal(explicitApplyJson.ok, true);
+  assert.equal(explicitApplyJson.data.mode, "apply");
+  assert.equal(explicitApplyJson.data.previewOnly, false);
+  assert.equal(explicitApplyJson.data.applied, true);
+  assert.equal(explicitApplyJson.data.applyReceipt.moveCount, 1);
+  const applyReceiptId = explicitApplyJson.data.applyReceipt.id;
   const appliedSession = await readJsonLz4(join(fixture.profilePath, "zen-sessions.jsonlz4"));
   assert.equal(appliedSession.tabs[2].zenWorkspace, "w3");
 
@@ -276,6 +317,27 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
   });
   assert.equal(sortWithUnknownFlag.status, 1);
   assert.match(sortWithUnknownFlag.stderr, /unknown option '--typo'/);
+
+  const conflictingSortModes = spawnSync("node", ["dist/cli.js", "sort", "Space", "--preview", "--apply", "--yes", "--json"], {
+    env,
+    encoding: "utf8"
+  });
+  assert.equal(conflictingSortModes.status, 1);
+  assert.match(JSON.parse(conflictingSortModes.stdout).blockers.join("\n"), /cannot be combined/);
+
+  const conflictingReadModes = spawnSync("node", ["dist/cli.js", "sort", "Space", "--preview", "--dry-run", "--json"], {
+    env,
+    encoding: "utf8"
+  });
+  assert.equal(conflictingReadModes.status, 1);
+  assert.match(JSON.parse(conflictingReadModes.stdout).blockers.join("\n"), /cannot be combined/);
+
+  const yesWithoutApply = spawnSync("node", ["dist/cli.js", "sort", "Space", "--yes", "--json"], {
+    env,
+    encoding: "utf8"
+  });
+  assert.equal(yesWithoutApply.status, 1);
+  assert.match(JSON.parse(yesWithoutApply.stdout).blockers.join("\n"), /requires --apply/);
 
   const missingSort = spawnSync(
     "node",
