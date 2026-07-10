@@ -195,6 +195,7 @@ export function createRulesPlan(snapshot: Snapshot, options: RulesPlanOptions): 
     engineManifestRevision: ENGINE_MANIFEST_REVISION,
     createdAt,
     expiresAt,
+    derivation: { kind: "original" },
     source: { kind: "engine", engine: "rules", intentRevision: requestRevision },
     actions
   });

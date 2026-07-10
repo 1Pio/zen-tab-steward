@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 const DIRECTORY_MODE = 0o700;
 const FILE_MODE = 0o600;
 const DEFAULT_MAX_JSON_BYTES = 16 * 1024 * 1024;
+const DEFAULT_MAX_BINARY_BYTES = 256 * 1024 * 1024;
 
 export function privatePath(root: string, ...segments: string[]): string {
   const resolvedRoot = resolve(root);
@@ -30,17 +31,25 @@ export async function ensurePrivateDirectory(root: string, ...segments: string[]
 }
 
 export async function publishPrivateJson(path: string, value: unknown): Promise<void> {
-  const contents = encodeJson(value);
+  await publishPrivateBytes(path, Buffer.from(encodeJson(value), "utf8"), DEFAULT_MAX_JSON_BYTES);
+}
+
+export async function publishPrivateBytes(
+  path: string,
+  value: Uint8Array,
+  maxBytes = DEFAULT_MAX_BINARY_BYTES
+): Promise<void> {
+  const contents = boundedBytes(value, maxBytes, "Private binary artifact");
   const parent = dirname(path);
   await ensureDirectory(parent);
-  const temporary = privatePath(parent, `.tmp-${randomUUID()}.json`);
+  const temporary = privatePath(parent, `.tmp-${randomUUID()}.artifact`);
   await writeSyncedTemporary(temporary, contents);
   try {
     await link(temporary, path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    const existing = await readPrivateText(path, Buffer.byteLength(contents));
-    if (existing !== contents) throw new Error("Private artifact identifier collision");
+    const existing = await readPrivateBytes(path, maxBytes);
+    if (!existing.equals(contents)) throw new Error("Private artifact identifier collision");
   } finally {
     await rm(temporary, { force: true });
   }
@@ -49,10 +58,18 @@ export async function publishPrivateJson(path: string, value: unknown): Promise<
 }
 
 export async function replacePrivateJson(path: string, value: unknown): Promise<void> {
-  const contents = encodeJson(value);
+  await replacePrivateBytes(path, Buffer.from(encodeJson(value), "utf8"), DEFAULT_MAX_JSON_BYTES);
+}
+
+export async function replacePrivateBytes(
+  path: string,
+  value: Uint8Array,
+  maxBytes = DEFAULT_MAX_BINARY_BYTES
+): Promise<void> {
+  const contents = boundedBytes(value, maxBytes, "Private binary artifact");
   const parent = dirname(path);
   await ensureDirectory(parent);
-  const temporary = privatePath(parent, `.tmp-${randomUUID()}.json`);
+  const temporary = privatePath(parent, `.tmp-${randomUUID()}.artifact`);
   await writeSyncedTemporary(temporary, contents);
   try {
     await rename(temporary, path);
@@ -65,7 +82,7 @@ export async function replacePrivateJson(path: string, value: unknown): Promise<
 }
 
 export async function readPrivateJson(path: string, maxBytes = DEFAULT_MAX_JSON_BYTES): Promise<unknown> {
-  const contents = await readPrivateText(path, maxBytes);
+  const contents = (await readPrivateBytes(path, maxBytes)).toString("utf8");
   try {
     return JSON.parse(contents) as unknown;
   } catch {
@@ -90,7 +107,7 @@ async function ensureDirectory(path: string): Promise<void> {
   await chmod(path, DIRECTORY_MODE);
 }
 
-async function writeSyncedTemporary(path: string, contents: string): Promise<void> {
+async function writeSyncedTemporary(path: string, contents: string | Uint8Array): Promise<void> {
   const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW;
   const handle = await open(path, flags, FILE_MODE);
   try {
@@ -102,7 +119,7 @@ async function writeSyncedTemporary(path: string, contents: string): Promise<voi
   }
 }
 
-async function readPrivateText(path: string, maxBytes: number): Promise<string> {
+export async function readPrivateBytes(path: string, maxBytes = DEFAULT_MAX_BINARY_BYTES): Promise<Buffer> {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error("Private artifact read limit must be a positive integer");
   const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
@@ -110,10 +127,10 @@ async function readPrivateText(path: string, maxBytes: number): Promise<string> 
     assertPrivateFileMetadata(before, path);
     if (before.size > maxBytes) throw new Error(`Private artifact exceeds the ${maxBytes}-byte read limit: ${path}`);
     await handle.chmod(FILE_MODE);
-    const contents = await handle.readFile("utf8");
+    const contents = await handle.readFile();
     const after = await handle.stat();
     assertPrivateFileMetadata(after, path);
-    if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || Buffer.byteLength(contents) !== after.size) {
+    if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || contents.byteLength !== after.size) {
       throw new Error(`Private artifact changed while it was being read: ${path}`);
     }
     return contents;
@@ -153,6 +170,12 @@ function encodeJson(value: unknown): string {
     throw new Error(`Private JSON artifact exceeds the ${DEFAULT_MAX_JSON_BYTES}-byte write limit`);
   }
   return contents;
+}
+
+function boundedBytes(value: Uint8Array, maxBytes: number, label: string): Buffer {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error(`${label} write limit must be a positive integer`);
+  if (value.byteLength > maxBytes) throw new Error(`${label} exceeds the ${maxBytes}-byte write limit`);
+  return Buffer.from(value);
 }
 
 function assertSafeSegment(segment: string): void {

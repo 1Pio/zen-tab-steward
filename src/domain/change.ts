@@ -278,6 +278,17 @@ export type PlanAction =
       readonly decision: DecisionEvidence;
     };
 
+export type PlanDerivation =
+  | {
+      readonly kind: "original";
+    }
+  | {
+      readonly kind: "subset";
+      readonly parentPlanId: string;
+      readonly parentPlanDigest: Sha256Digest;
+      readonly selectedActionIds: NonEmptyReadonlyArray<string>;
+    };
+
 export interface Plan {
   readonly schemaVersion: "zts.plan.provisional-1";
   readonly id: string;
@@ -290,6 +301,7 @@ export interface Plan {
   readonly engineManifestRevision: Sha256Digest;
   readonly createdAt: string;
   readonly expiresAt: string;
+  readonly derivation: PlanDerivation;
   readonly source: IntentSource;
   /** One canonical list. Counts and summaries are derived presentation views. */
   readonly actions: readonly PlanAction[];
@@ -761,6 +773,7 @@ function validatePlan(plan: Plan): void {
   assertTimestamp(plan.createdAt, "Plan createdAt");
   assertTimestamp(plan.expiresAt, "Plan expiresAt");
   if (Date.parse(plan.expiresAt) <= Date.parse(plan.createdAt)) throw new Error("Plan expiry must follow creation");
+  validatePlanDerivation(plan);
 
   const actionIds = new Set<string>();
   const movedEntities = new Set<MovementRootRef>();
@@ -821,6 +834,23 @@ function validatePlan(plan: Plan): void {
   if (plan.digest !== sha256Canonical(content)) throw new Error("Plan digest does not match Plan content");
 }
 
+function validatePlanDerivation(plan: Plan): void {
+  if (plan.derivation.kind === "original") return;
+  if (!plan.derivation.parentPlanId.trim()) throw new Error("Subset Plan requires a parent Plan id");
+  assertDigest(plan.derivation.parentPlanDigest, "Subset Plan parent digest");
+  if (plan.derivation.parentPlanDigest === plan.digest) throw new Error("Subset Plan cannot derive from itself");
+  if (plan.derivation.selectedActionIds.length === 0) throw new Error("Subset Plan requires selected action ids");
+  if (new Set(plan.derivation.selectedActionIds).size !== plan.derivation.selectedActionIds.length) {
+    throw new Error("Subset Plan selected action ids must be unique");
+  }
+  if (plan.actions.some((action) => action.disposition !== "move")) {
+    throw new Error("Subset Plan may contain only executable move actions");
+  }
+  if (!sameOrderedValues(plan.derivation.selectedActionIds, plan.actions.map((action) => action.actionId))) {
+    throw new Error("Subset Plan selected action ids must match its canonical action list");
+  }
+}
+
 function validatePlanShape(plan: Plan): void {
   assertExactKeys(plan, [
     "schemaVersion",
@@ -834,9 +864,18 @@ function validatePlanShape(plan: Plan): void {
     "engineManifestRevision",
     "createdAt",
     "expiresAt",
+    "derivation",
     "source",
     "actions"
   ], "Plan");
+  if (plan.derivation.kind === "original") {
+    assertExactKeys(plan.derivation, ["kind"], "Original Plan derivation");
+  } else if (plan.derivation.kind === "subset") {
+    assertExactKeys(plan.derivation, ["kind", "parentPlanId", "parentPlanDigest", "selectedActionIds"], "Subset Plan derivation");
+    assertArray(plan.derivation.selectedActionIds, "Subset Plan selected actions");
+  } else {
+    throw new Error("Plan has an unknown derivation kind");
+  }
   if (plan.source.kind === "manual_patch") {
     assertExactKeys(plan.source, ["kind", "intentRevision"], "Plan source");
   } else {

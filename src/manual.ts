@@ -441,6 +441,7 @@ function createManualPlan(snapshot: Snapshot, patch: Patch): Plan {
     engineManifestRevision: sha256Canonical({ manual: "zts.manual.provisional-1" }),
     createdAt,
     expiresAt,
+    derivation: { kind: "original" },
     source: {
       kind: "manual_patch",
       intentRevision: sha256Canonical(patch)

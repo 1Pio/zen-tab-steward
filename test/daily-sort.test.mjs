@@ -186,6 +186,120 @@ test("human dry-run renders a useful complete diff for the exact previewed Plan"
   );
 });
 
+test("selected apply actions derive and persist a new exact Plan before consent", async () => {
+  const fixture = await makeDailySortFixture();
+  const env = {
+    ...process.env,
+    HOME: fixture.temp,
+    PATH: `${fixture.binDir}:${process.env.PATH ?? ""}`,
+    ZTS_ZEN_APP_SUPPORT_DIR: fixture.appSupportDir,
+    ZTS_STATE_DIR: fixture.stateDir,
+    ZTS_CONFIG_PATH: fixture.configPath
+  };
+  const beforeSession = await readFile(fixture.sessionPath);
+  const preview = spawnSync(
+    "node",
+    ["dist/cli.js", "sort", "--all", "--engine", "rules", "--preview", "--json"],
+    { env, encoding: "utf8" }
+  );
+  assert.equal(preview.status, 0, `${preview.stdout}\n${preview.stderr}`);
+  const previewJson = JSON.parse(preview.stdout);
+  const selectedActionIds = previewJson.data.plan.actions
+    .filter((action) => action.disposition === "move")
+    .slice(0, 2)
+    .map((action) => action.actionId);
+  assert.equal(selectedActionIds.length, 2);
+
+  const derive = spawnSync(
+    "node",
+    ["dist/cli.js", "apply", "latest", "--actions", selectedActionIds.join(","), "--json"],
+    { env, encoding: "utf8" }
+  );
+  assert.equal(derive.status, 2, `${derive.stdout}\n${derive.stderr}`);
+  const deriveJson = JSON.parse(derive.stdout);
+  assert.equal(deriveJson.ok, false);
+  assert.equal(deriveJson.data.applied, false);
+  assert.equal(deriveJson.data.originalPlan.digest, previewJson.data.plan.digest);
+  assert.notEqual(deriveJson.data.plan.digest, previewJson.data.plan.digest);
+  assert.equal(deriveJson.data.plan.derivation.kind, "subset");
+  assert.equal(deriveJson.data.plan.derivation.parentPlanDigest, previewJson.data.plan.digest);
+  assert.deepEqual(deriveJson.data.plan.derivation.selectedActionIds, selectedActionIds);
+  assert.deepEqual(deriveJson.data.plan.actions.map((action) => action.actionId), selectedActionIds);
+  assert.match(deriveJson.blockers.join("\n"), /confirm the exact derived Plan/i);
+
+  const stored = await execFileAsync("node", ["dist/cli.js", "plan", "show", deriveJson.data.plan.id, "--json"], { env });
+  assert.equal(JSON.parse(stored.stdout).data.plan.digest, deriveJson.data.plan.digest);
+  assert.deepEqual(await readFile(fixture.sessionPath), beforeSession);
+});
+
+test("exact confirmed subset Plan applies only its selected Operations and writes a domain Receipt", async () => {
+  const fixture = await makeDailySortFixture();
+  const env = {
+    ...process.env,
+    HOME: fixture.temp,
+    PATH: `${fixture.binDir}:${process.env.PATH ?? ""}`,
+    ZTS_ZEN_APP_SUPPORT_DIR: fixture.appSupportDir,
+    ZTS_STATE_DIR: fixture.stateDir,
+    ZTS_CONFIG_PATH: fixture.configPath
+  };
+  const preview = spawnSync(
+    "node",
+    ["dist/cli.js", "sort", "--all", "--engine", "rules", "--preview", "--json"],
+    { env, encoding: "utf8" }
+  );
+  assert.equal(preview.status, 0, `${preview.stdout}\n${preview.stderr}`);
+  const previewJson = JSON.parse(preview.stdout);
+  const moveActions = previewJson.data.plan.actions.filter((action) => action.disposition === "move");
+  const selectedActionIds = moveActions.slice(0, 2).map((action) => action.actionId);
+  const unselectedAction = moveActions[2];
+  assert.equal(selectedActionIds.length, 2);
+  assert.ok(unselectedAction);
+
+  const derive = spawnSync(
+    "node",
+    ["dist/cli.js", "apply", "latest", "--actions", selectedActionIds.join(","), "--json"],
+    { env, encoding: "utf8" }
+  );
+  assert.equal(derive.status, 2, `${derive.stdout}\n${derive.stderr}`);
+  const derivedPlan = JSON.parse(derive.stdout).data.plan;
+  const apply = spawnSync(
+    "node",
+    [
+      "dist/cli.js",
+      "apply",
+      derivedPlan.id,
+      "--yes",
+      "--expect-digest",
+      derivedPlan.digest,
+      "--json"
+    ],
+    { env, encoding: "utf8" }
+  );
+  assert.equal(apply.status, 0, `${apply.stdout}\n${apply.stderr}`);
+  const applyJson = JSON.parse(apply.stdout);
+  assert.equal(applyJson.ok, true);
+  assert.equal(applyJson.data.applied, true);
+  assert.equal(applyJson.data.plan.digest, derivedPlan.digest);
+  assert.equal(applyJson.data.authorization.planDigest, derivedPlan.digest);
+  assert.deepEqual(applyJson.data.authorization.authorizedActionIds, selectedActionIds);
+  assert.equal(applyJson.data.receipt.outcome, "applied");
+  assert.equal(applyJson.data.receipt.planDigest, derivedPlan.digest);
+  assert.deepEqual(applyJson.data.receipt.operations.map((operation) => operation.actionId), selectedActionIds);
+  assert.ok(applyJson.data.receipt.backupArtifact);
+  assert.ok(applyJson.data.receipt.inversePlanArtifact);
+
+  const afterSession = await readJsonLz4(fixture.sessionPath);
+  const entities = new Map(previewJson.data.snapshot.entities.map((entity) => [entity.ref, entity]));
+  for (const action of derivedPlan.actions) {
+    const nativeId = entities.get(action.operation.entityRef).nativeId;
+    const rawTab = afterSession.tabs.find((tab) => tab.zenSyncId === nativeId);
+    assert.equal(rawTab.zenWorkspace, action.operation.expectedPostState.workspaceId);
+  }
+  const unselectedNativeId = entities.get(unselectedAction.operation.entityRef).nativeId;
+  const unselectedTab = afterSession.tabs.find((tab) => tab.zenSyncId === unselectedNativeId);
+  assert.equal(unselectedTab.zenWorkspace, unselectedAction.operation.precondition.sourceWorkspace.workspaceId);
+});
+
 async function makeDailySortFixture() {
   const temp = await mkdtemp(join(tmpdir(), "zts-daily-sort-"));
   const appSupportDir = join(temp, "zen");

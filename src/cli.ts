@@ -8,13 +8,15 @@ import { addDomainRuleInContents, getConfigValue, loadConfig, saveConfigContents
 import { planDailySort } from "./daily-sort.js";
 import { envelope, formatApplyReceiptList, formatApplyVerification, formatBackup, formatBackupList, formatBackupPrune, formatBridge, formatBridgeLiveAttachment, formatBridgeLiveMove, formatBridgeLiveRead, formatBridgeProbe, formatRestore, formatReview, formatSortDryRun, formatSortPreview, formatStatus, formatTabs, formatWorkspaces, printJson } from "./output.js";
 import { applyManualPatchOffline, createManualPlanFromInput, listManualApplyReceipts, readPatchInput, snapshotFromSession } from "./manual.js";
-import { loadStoredPlan, PlanReuseError } from "./plans.js";
+import { applySavedPlanOffline } from "./plan-apply.js";
+import { deriveAndStoreSubsetPlan, loadStoredPlan, PlanReuseError } from "./plans.js";
 import { discoverProfileContext } from "./profile.js";
 import { listTabs, loadSession, loadSessionSummary, summarizeSession, withWorkspacePolicy } from "./session.js";
 import { classifyDomainForWorkspace, planSortPreview, SortInputs } from "./sort.js";
 import { VERSION } from "./version.js";
 
 import type { ManualApplyReceiptSummary, ManualApplyResult, ManualPlanResult } from "./manual.js";
+import type { SavedPlanApplyResult } from "./plan-apply.js";
 import type { DailySortPlanResult } from "./daily-sort.js";
 import type { Plan } from "./domain/change.js";
 import type { Entity, EntityRef, Snapshot } from "./domain/snapshot.js";
@@ -452,11 +454,14 @@ program
 
 program
   .command("apply")
-  .description("List or verify sort apply receipts")
-  .argument("[action]", "list or verify")
+  .description("Apply an exact saved Plan, or inspect apply receipts")
+  .argument("[action]", "latest, Plan id/digest, list, or verify")
   .argument("[receipt-id]", "apply receipt id for verify")
+  .option("--actions <ids>", "comma-separated executable action ids to derive as an exact subset Plan")
+  .option("--yes", "confirm unattended application of the exact Plan")
+  .option("--expect-digest <digest>", "required exact Plan digest for unattended mutation")
   .option("--json", "print stable JSON output")
-  .action(async (action: string | undefined, receiptId: string | undefined, options: JsonOption) => {
+  .action(async (action: string | undefined, receiptId: string | undefined, options: JsonOption & ApplyPlanOptions) => {
     const selectedAction = action ?? "list";
 
     if (selectedAction === "list") {
@@ -488,13 +493,70 @@ program
       return;
     }
 
-    const message = `unknown apply action '${selectedAction}'`;
-    if (options.json) {
-      printJson(envelope("apply", { action: selectedAction }, { ok: false, blockers: [message], suggestedNextCommands: ["zts apply list", "zts apply verify <receipt-id>"] }));
-    } else {
-      process.stderr.write(`zts: ${message}\n`);
-    }
-    process.exitCode = 1;
+    await runCommand("apply plan", options, async () => {
+      if (receiptId) throw new Error("Saved Plan apply accepts one Plan selector");
+      const context = await discoverProfileContext();
+      const original = await loadStoredPlan(context.profile.id, selectedAction);
+      let selected = original;
+      const requestedActionIds = splitCsv(options.actions);
+      if (options.actions !== undefined) {
+        if (requestedActionIds.length === 0) throw new Error("--actions requires at least one action id");
+        if (options.yes) throw new Error("Selected action apply must first derive a subset Plan, then apply that exact Plan id with --yes");
+        const loadedConfig = await loadConfig();
+        const session = await loadSession(context.sessionFile);
+        const summary = withWorkspacePolicy(summarizeSession(session, context.sessionFile), loadedConfig.config);
+        const snapshot = snapshotFromSession(context, session, summary);
+        selected = await deriveAndStoreSubsetPlan(snapshot, original.plan, requestedActionIds);
+      }
+      if (options.yes) {
+        if (!options.expectDigest) throw new Error("Saved Plan apply requires --expect-digest with the exact Plan digest");
+        if (options.expectDigest !== selected.plan.digest) {
+          throw new Error(`Expected Plan digest ${options.expectDigest} does not match selected Plan ${selected.plan.digest}`);
+        }
+        const loadedConfig = await loadConfig();
+        const session = await loadSession(context.sessionFile);
+        const summary = withWorkspacePolicy(summarizeSession(session, context.sessionFile), loadedConfig.config);
+        const result = await applySavedPlanOffline(context, session, summary, selected.plan, applyPlanCommandForReceipt(selectedAction, options));
+        const data = {
+          profile: context.profile,
+          originalPlan: original.plan,
+          plan: result.plan,
+          authorization: result.authorization,
+          receipt: result.receipt,
+          receiptPath: result.receiptPath,
+          summary: result.summary,
+          applied: true
+        };
+        if (options.json) {
+          printJson(envelope("apply plan", data, { suggestedNextCommands: ["zts backup list --json", "zts plan show latest --json"] }));
+        } else {
+          process.stdout.write(formatSavedPlanApply(result));
+        }
+        return;
+      }
+      const exactCommand = `zts apply ${shellQuote(selected.plan.id)} --yes --expect-digest ${selected.plan.digest}`;
+      const blocker = selected.plan.derivation.kind === "subset"
+        ? `Review and confirm the exact derived Plan ${selected.plan.digest} before mutation`
+        : `Confirm the exact saved Plan ${selected.plan.digest} before mutation`;
+      const data = {
+        profile: context.profile,
+        originalPlan: original.plan,
+        plan: selected.plan,
+        requestRevision: selected.requestRevision,
+        artifacts: [{ kind: "plan", ...selected.artifact }],
+        applied: false
+      };
+      if (options.json) {
+        printJson(envelope("apply plan", data, {
+          ok: false,
+          blockers: [blocker],
+          suggestedNextCommands: [`${exactCommand} --json`, "zts plan show latest --json"]
+        }));
+      } else {
+        process.stdout.write(`${formatSavedPlan(selected.plan, false)}\n${blocker}\n\nNext:\n  ${exactCommand}\n`);
+      }
+      process.exitCode = 2;
+    });
   });
 
 program
@@ -889,6 +951,12 @@ interface SortOptions {
   backend?: string;
 }
 
+interface ApplyPlanOptions {
+  actions?: string;
+  yes?: boolean;
+  expectDigest?: string;
+}
+
 interface BackupOptions {
   before?: string;
   olderThan?: string;
@@ -926,6 +994,13 @@ function patchCommandForReceipt(action: string, patchFile: string, options: { ye
   const parts = ["zts", "patch", action, patchFile];
   if (options.yes) parts.push("--yes");
   if (options.json) parts.push("--json");
+  return parts.join(" ");
+}
+
+function applyPlanCommandForReceipt(selector: string, options: ApplyPlanOptions): string {
+  const parts = ["zts", "apply", shellQuote(selector)];
+  if (options.yes) parts.push("--yes");
+  if (options.expectDigest) parts.push("--expect-digest", options.expectDigest);
   return parts.join(" ");
 }
 
@@ -1267,6 +1342,23 @@ function formatManualApplySummary(result: ManualApplyResult, suggestedNextComman
   ];
   if (suggestedNextCommands.length > 0) lines.push("", "Next:", ...suggestedNextCommands.map((command) => `  ${command}`));
   return `${lines.join("\n")}\n`;
+}
+
+function formatSavedPlanApply(result: SavedPlanApplyResult): string {
+  return `${[
+    "Saved Plan Apply",
+    `Receipt: ${result.receipt.id}`,
+    `Plan: ${result.plan.id}`,
+    `Digest: ${result.plan.digest}`,
+    `Moves: ${result.summary.moveCount}`,
+    `Before Snapshot: ${result.receipt.beforeSnapshotRevision}`,
+    `After Snapshot: ${result.receipt.afterSnapshotRevision ?? "(none)"}`,
+    `Backup: ${result.receipt.backupArtifact?.id ?? "(none)"}`,
+    `Receipt file: ${result.receiptPath}`,
+    "",
+    "Applied:",
+    ...result.receipt.operations.map((operation) => `  - ${operation.entityRef} -> ${operation.observedWorkspaceId}`)
+  ].join("\n")}\n`;
 }
 
 function formatManualReceiptList(receipts: ManualApplyReceiptSummary[]): string {

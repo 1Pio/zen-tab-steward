@@ -167,6 +167,7 @@ function planFixture(snapshot, decision = manualDecision()) {
     engineManifestRevision: digest("5"),
     createdAt: "2026-07-10T08:01:00.000Z",
     expiresAt: "2026-07-10T08:06:00.000Z",
+    derivation: { kind: "original" },
     source: { kind: "manual_patch", intentRevision: digest("6") },
     actions: [
       {

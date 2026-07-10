@@ -336,6 +336,7 @@ const exactRulePlan = createPlan(closedSnapshot, {
   engineManifestRevision: D2,
   createdAt: "2026-07-10T08:03:00.000Z",
   expiresAt: "2026-07-10T08:08:00.000Z",
+  derivation: { kind: "original" },
   source: { kind: "engine", engine: "rules", intentRevision: D3 },
   actions: [
     {

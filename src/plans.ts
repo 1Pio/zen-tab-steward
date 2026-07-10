@@ -1,5 +1,6 @@
 import { sha256Canonical } from "./domain/digest.js";
-import { definePlan, definePlanForSnapshot } from "./domain/change.js";
+import { createPlan, definePlanForSnapshot } from "./domain/change.js";
+import { defineSnapshot } from "./domain/snapshot.js";
 import { stateDir } from "./paths.js";
 import { ensurePrivateDirectory, privatePath, publishPrivateJson, readPrivateJson, replacePrivateJson } from "./private-store.js";
 
@@ -7,12 +8,13 @@ import type { Plan } from "./domain/change.js";
 import type { ArtifactReference, Snapshot } from "./domain/snapshot.js";
 import type { Sha256Digest } from "./domain/digest.js";
 
-const ARTIFACT_SCHEMA = "zts.plan-artifact.provisional-1" as const;
+const ARTIFACT_SCHEMA = "zts.plan-artifact.provisional-2" as const;
 const POINTER_SCHEMA = "zts.plan-pointer.provisional-1" as const;
 
 interface PlanArtifactEnvelope {
   readonly schemaVersion: typeof ARTIFACT_SCHEMA;
   readonly requestRevision: Sha256Digest;
+  readonly snapshot: Snapshot;
   readonly plan: Plan;
 }
 
@@ -25,6 +27,7 @@ interface PlanPointer {
 }
 
 export interface StoredPlan {
+  readonly snapshot: Snapshot;
   readonly plan: Plan;
   readonly requestRevision: Sha256Digest;
   readonly artifact: ArtifactReference;
@@ -109,7 +112,7 @@ export async function resolveOrCreatePlan(
   }
 
   const plan = definePlanForSnapshot(snapshot, create());
-  const stored = await storePlan(layout, requestRevision, plan, now);
+  const stored = await storePlan(layout, requestRevision, snapshot, plan, now);
   return { ...stored, resolution: "created" };
 }
 
@@ -129,15 +132,68 @@ export async function loadStoredPlan(profileId: string, selector: string): Promi
   return stored;
 }
 
+export async function deriveAndStoreSubsetPlan(
+  snapshot: Snapshot,
+  parent: Plan,
+  requestedActionIds: readonly string[],
+  now = new Date()
+): Promise<StoredPlan> {
+  definePlanForSnapshot(snapshot, parent);
+  if (Date.parse(parent.expiresAt) <= now.getTime()) throw new Error(`Plan ${parent.digest} has expired`);
+  if (requestedActionIds.length === 0) throw new Error("Selected apply requires at least one action id");
+  if (new Set(requestedActionIds).size !== requestedActionIds.length) throw new Error("Selected action ids must be unique");
+  const requested = new Set(requestedActionIds);
+  const executable = new Map(
+    parent.actions
+      .filter((action) => action.disposition === "move")
+      .map((action) => [action.actionId, action] as const)
+  );
+  for (const actionId of requested) {
+    if (!executable.has(actionId)) throw new Error(`Selected action id is not executable in Plan ${parent.id}: ${actionId}`);
+  }
+  const actions = parent.actions.filter((action) => requested.has(action.actionId));
+  const selectedActionIds = actions.map((action) => action.actionId) as [string, ...string[]];
+  const intentRevision = sha256Canonical({
+    kind: "subset",
+    parentPlanId: parent.id,
+    parentPlanDigest: parent.digest,
+    selectedActionIds
+  });
+  const source = parent.source.kind === "engine"
+    ? { kind: "engine" as const, engine: parent.source.engine, intentRevision }
+    : { kind: "manual_patch" as const, intentRevision };
+  const plan = createPlan(snapshot, {
+    schemaVersion: "zts.plan.provisional-1",
+    id: `plan:subset:${digestHex(intentRevision).slice(0, 20)}`,
+    configRevision: parent.configRevision,
+    engineManifestRevision: parent.engineManifestRevision,
+    createdAt: parent.createdAt,
+    expiresAt: parent.expiresAt,
+    derivation: {
+      kind: "subset",
+      parentPlanId: parent.id,
+      parentPlanDigest: parent.digest,
+      selectedActionIds
+    },
+    source,
+    actions
+  });
+  const layout = await planLayout(snapshot.profile.id);
+  return storePlan(layout, intentRevision, snapshot, plan, now);
+}
+
 async function storePlan(
   layout: PlanLayout,
   requestRevision: Sha256Digest,
+  snapshot: Snapshot,
   plan: Plan,
   now: Date
 ): Promise<StoredPlan> {
+  definePlanForSnapshot(snapshot, plan);
   const envelope: PlanArtifactEnvelope = {
     schemaVersion: ARTIFACT_SCHEMA,
     requestRevision,
+    snapshot,
     plan
   };
   const objectPath = privatePath(layout.objects, `${digestHex(plan.digest)}.json`);
@@ -159,12 +215,14 @@ async function readStoredPlan(layout: PlanLayout, digest: Sha256Digest): Promise
   const value = await readPrivateJson(privatePath(layout.objects, `${digestHex(digest)}.json`));
   const envelope = defineArtifactEnvelope(value);
   if (envelope.plan.digest !== digest) throw new Error("Plan artifact filename does not match its Plan digest");
-  definePlan(envelope.plan);
+  defineSnapshot(envelope.snapshot);
+  definePlanForSnapshot(envelope.snapshot, envelope.plan);
   return storedPlan(envelope);
 }
 
 function storedPlan(envelope: PlanArtifactEnvelope): StoredPlan {
   return {
+    snapshot: envelope.snapshot,
     plan: envelope.plan,
     requestRevision: envelope.requestRevision,
     artifact: { id: envelope.plan.id, digest: envelope.plan.digest }
@@ -211,7 +269,7 @@ async function readPointer(path: string): Promise<PlanPointer> {
 
 function defineArtifactEnvelope(value: unknown): PlanArtifactEnvelope {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Plan artifact must be an object");
-  assertExactKeys(value, ["schemaVersion", "requestRevision", "plan"], "Plan artifact");
+  assertExactKeys(value, ["schemaVersion", "requestRevision", "snapshot", "plan"], "Plan artifact");
   const envelope = value as unknown as PlanArtifactEnvelope;
   if (envelope.schemaVersion !== ARTIFACT_SCHEMA) throw new Error("Plan artifact has an unsupported schema");
   assertDigest(envelope.requestRevision, "Plan artifact request revision");
