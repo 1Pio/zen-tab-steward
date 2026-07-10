@@ -13,7 +13,8 @@
   ],
   "scripts": {
     "build": "tsc",
-    "test": "npm run build && node --test test/*.test.mjs",
+    "typecheck:contracts": "tsc --project tsconfig.contract.json",
+    "test": "npm run build && npm run typecheck:contracts && node --test test/*.test.mjs",
     "smoke": "npm run build && node --test test/cli.test.mjs"
   },
   "repository": {

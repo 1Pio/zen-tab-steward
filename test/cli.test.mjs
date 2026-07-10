@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFile, spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -14,6 +14,7 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
   const env = {
     ...process.env,
     HOME: fixture.temp,
+    PATH: `${fixture.binDir}:${process.env.PATH ?? ""}`,
     ZTS_ZEN_APP_SUPPORT_DIR: fixture.appSupportDir,
     ZTS_STATE_DIR: fixture.stateDir,
     ZTS_CONFIG_PATH: join(fixture.temp, "config.toml")
@@ -406,7 +407,12 @@ async function makeZenFixture() {
   const appSupportDir = join(temp, "zen");
   const profilePath = join(appSupportDir, "Profiles", "abc.Default");
   const stateDir = join(temp, "state");
+  const binDir = join(temp, "bin");
   await mkdir(join(profilePath, "sessionstore-backups"), { recursive: true });
+  await mkdir(binDir, { recursive: true });
+  const fakePs = join(binDir, "ps");
+  await writeFile(fakePs, "#!/bin/sh\nexit 0\n");
+  await chmod(fakePs, 0o755);
   await writeFile(
     join(appSupportDir, "profiles.ini"),
     [
@@ -448,5 +454,5 @@ async function makeZenFixture() {
   await writeFile(join(profilePath, "zen-sessions.jsonlz4"), encodeLiteralJsonLz4ForFixture(session));
   await writeFile(join(profilePath, "sessionstore-backups", "recovery.jsonlz4"), "recovery");
   await writeFile(join(profilePath, "sessionstore-backups", "previous.jsonlz4"), "previous");
-  return { temp, appSupportDir, profilePath, stateDir };
+  return { temp, appSupportDir, profilePath, stateDir, binDir };
 }
