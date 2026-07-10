@@ -304,6 +304,13 @@ test("exact confirmed subset Plan applies only its selected Operations and write
   assert.equal(listed.id, applyJson.data.receipt.id);
   assert.equal(listed.kind, "saved_plan");
   assert.equal(listed.planDigest, derivedPlan.digest);
+
+  const verify = await execFileAsync("node", ["dist/cli.js", "apply", "verify", applyJson.data.receipt.id, "--json"], { env });
+  const verifyJson = JSON.parse(verify.stdout);
+  assert.equal(verifyJson.ok, true);
+  assert.equal(verifyJson.data.report.receipt.planDigest, derivedPlan.digest);
+  assert.equal(verifyJson.data.report.verification.checkedOperations, selectedActionIds.length);
+  assert.equal(verifyJson.data.report.verification.mismatchCount, 0);
 });
 
 async function makeDailySortFixture() {

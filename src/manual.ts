@@ -55,6 +55,26 @@ export interface ManualApplyReceiptSummary {
   receiptPath: string;
 }
 
+export interface DomainApplyVerificationReport {
+  receiptId: string;
+  profileId: string;
+  receiptPath: string;
+  receipt: Receipt;
+  verification: {
+    ok: boolean;
+    checkedOperations: number;
+    mismatchCount: number;
+    blockers: string[];
+    mismatches: {
+      actionId: string;
+      entityRef: string;
+      expectedWorkspaceId: string | null;
+      actualWorkspaceId: string | null;
+      reason: "missing_entity" | "workspace_mismatch" | "unsupported_operation";
+    }[];
+  };
+}
+
 export async function readPatchInput(path: string): Promise<unknown> {
   const contents = path === "-" ? await readStdin() : await readFile(path, "utf8");
   return JSON.parse(contents) as unknown;
@@ -83,6 +103,88 @@ export async function listManualApplyReceipts(profileId: string): Promise<Manual
     return receipts;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+}
+
+export async function verifyDomainApplyReceipt(
+  context: ProfileContext,
+  session: RawZenSession,
+  summary: SessionSummary,
+  receiptId: string
+): Promise<DomainApplyVerificationReport> {
+  const found = await findDomainApplyReceipt(context.profile.id, receiptId);
+  if (!found) throw new Error(`Domain apply receipt not found: ${receiptId}`);
+  const { receipt, receiptPath } = found;
+  const blockers: string[] = [];
+  if (context.running) blockers.push("Domain apply receipt verification requires Zen to be closed for an authoritative Snapshot");
+  if (receipt.profileId !== context.profile.id) blockers.push("Domain apply receipt belongs to a different Profile");
+  const snapshot = snapshotFromSession(context, session, summary);
+  const entities = new Map(snapshot.entities.map((entity) => [entity.ref, entity]));
+  const mismatches: DomainApplyVerificationReport["verification"]["mismatches"] = [];
+
+  for (const operation of receipt.operations) {
+    if (operation.status === "not_attempted") continue;
+    if (!operation.observedWorkspaceId) {
+      mismatches.push({
+        actionId: operation.actionId,
+        entityRef: operation.entityRef,
+        expectedWorkspaceId: null,
+        actualWorkspaceId: null,
+        reason: "unsupported_operation"
+      });
+      continue;
+    }
+    const entity = entities.get(operation.entityRef);
+    if (!entity) {
+      mismatches.push({
+        actionId: operation.actionId,
+        entityRef: operation.entityRef,
+        expectedWorkspaceId: operation.observedWorkspaceId,
+        actualWorkspaceId: null,
+        reason: "missing_entity"
+      });
+      continue;
+    }
+    if (entity.workspaceId !== operation.observedWorkspaceId) {
+      mismatches.push({
+        actionId: operation.actionId,
+        entityRef: operation.entityRef,
+        expectedWorkspaceId: operation.observedWorkspaceId,
+        actualWorkspaceId: entity.workspaceId,
+        reason: "workspace_mismatch"
+      });
+    }
+  }
+
+  return {
+    receiptId: receipt.id,
+    profileId: receipt.profileId,
+    receiptPath,
+    receipt,
+    verification: {
+      ok: blockers.length === 0 && mismatches.length === 0,
+      checkedOperations: receipt.operations.length,
+      mismatchCount: mismatches.length,
+      blockers,
+      mismatches
+    }
+  };
+}
+
+async function findDomainApplyReceipt(profileId: string, receiptId: string): Promise<{ receipt: Receipt; receiptPath: string } | null> {
+  const root = join(stateDir(), "applies", safeSegment(profileId));
+  try {
+    const entries = await readdir(root);
+    const receiptFiles = entries.filter((entry) => entry.endsWith("--domain-apply.json"));
+    for (const receiptFile of receiptFiles) {
+      const receiptPath = join(root, receiptFile);
+      const receipt = JSON.parse(await readFile(receiptPath, "utf8")) as Receipt;
+      if (receipt.id === receiptId) return { receipt, receiptPath };
+    }
+    return null;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;
   }
 }

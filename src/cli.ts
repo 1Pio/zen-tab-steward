@@ -7,7 +7,7 @@ import { inspectBridge, inspectLiveAttachment, runBridgeLiveMoveProof, runBridge
 import { addDomainRuleInContents, getConfigValue, loadConfig, saveConfigContents, setConfigValueInContents, ZtsConfig } from "./config.js";
 import { planDailySort } from "./daily-sort.js";
 import { envelope, formatApplyReceiptList, formatApplyVerification, formatBackup, formatBackupList, formatBackupPrune, formatBridge, formatBridgeLiveAttachment, formatBridgeLiveMove, formatBridgeLiveRead, formatBridgeProbe, formatRestore, formatReview, formatSortDryRun, formatSortPreview, formatStatus, formatTabs, formatWorkspaces, printJson } from "./output.js";
-import { applyManualPatchOffline, createManualPlanFromInput, listManualApplyReceipts, readPatchInput } from "./manual.js";
+import { applyManualPatchOffline, createManualPlanFromInput, listManualApplyReceipts, readPatchInput, verifyDomainApplyReceipt } from "./manual.js";
 import { applySavedPlanWithProfileLock } from "./plan-apply.js";
 import { deriveAndStoreSubsetPlan, loadStoredPlan, PlanReuseError } from "./plans.js";
 import { discoverProfileContext } from "./profile.js";
@@ -16,7 +16,7 @@ import { snapshotFromSession } from "./session-snapshot.js";
 import { classifyDomainForWorkspace, planSortPreview, SortInputs } from "./sort.js";
 import { VERSION } from "./version.js";
 
-import type { ManualApplyReceiptSummary, ManualApplyResult, ManualPlanResult } from "./manual.js";
+import type { DomainApplyVerificationReport, ManualApplyReceiptSummary, ManualApplyResult, ManualPlanResult } from "./manual.js";
 import type { SavedPlanApplyResult } from "./plan-apply.js";
 import type { DailySortPlanResult } from "./daily-sort.js";
 import type { Plan } from "./domain/change.js";
@@ -483,7 +483,24 @@ program
       await runCommand("apply verify", options, async () => {
         const context = await discoverProfileContext();
         if (!receiptId) throw new Error("Apply receipt id is required");
-        const report = await verifyApplyReceipt(context, receiptId);
+        let report;
+        try {
+          report = await verifyApplyReceipt(context, receiptId);
+        } catch (error) {
+          if (!(error instanceof Error) || !/Apply receipt not found/.test(error.message)) throw error;
+          const loadedConfig = await loadConfig();
+          const session = await loadSession(context.sessionFile);
+          const summary = withWorkspacePolicy(summarizeSession(session, context.sessionFile), loadedConfig.config);
+          const domainReport = await verifyDomainApplyReceipt(context, session, summary, receiptId);
+          const ok = domainReport.verification.ok;
+          if (options.json) {
+            printJson(envelope("apply verify", { profile: context.profile, report: domainReport }, { ok, blockers: domainReport.verification.blockers }));
+          } else {
+            process.stdout.write(formatDomainApplyVerification(domainReport));
+          }
+          process.exitCode = ok ? 0 : 2;
+          return;
+        }
         const ok = report.verification.ok;
         if (options.json) {
           printJson(envelope("apply verify", { profile: context.profile, report }, { ok, blockers: report.verification.blockers }));
@@ -1358,6 +1375,28 @@ function formatSavedPlanApply(result: SavedPlanApplyResult): string {
     "Applied:",
     ...result.receipt.operations.map((operation) => `  - ${operation.entityRef} -> ${operation.observedWorkspaceId}`)
   ].join("\n")}\n`;
+}
+
+function formatDomainApplyVerification(report: DomainApplyVerificationReport): string {
+  const lines = [
+    "Domain apply receipt verification",
+    `Receipt: ${report.receiptId}`,
+    `Outcome: ${report.receipt.outcome}`,
+    `Plan: ${report.receipt.planId}`,
+    `Digest: ${report.receipt.planDigest}`,
+    `Operations checked: ${report.verification.checkedOperations}`,
+    `Mismatches: ${report.verification.mismatchCount}`,
+    `Status: ${report.verification.ok ? "verified" : "blocked"}`
+  ];
+  if (report.verification.blockers.length > 0) {
+    lines.push("", "Blockers:", ...report.verification.blockers.map((blocker) => `  - ${blocker}`));
+  }
+  if (report.verification.mismatches.length > 0) {
+    lines.push("", "Mismatches:", ...report.verification.mismatches.map((mismatch) =>
+      `  - ${mismatch.actionId} ${mismatch.reason}: expected ${mismatch.expectedWorkspaceId ?? "(none)"}, actual ${mismatch.actualWorkspaceId ?? "(none)"}`
+    ));
+  }
+  return `${lines.join("\n")}\n`;
 }
 
 function formatManualReceiptList(receipts: ManualApplyReceiptSummary[]): string {
