@@ -456,6 +456,67 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
   assert.equal(JSON.parse(sortWithDefaultInbox.stdout).data.plan.blockedActions[0].reason, "source_workspace_protected");
 });
 
+test("manual Patch apply writes a domain receipt and verifies the moved tab", async () => {
+  const fixture = await makeZenFixture();
+  const env = {
+    ...process.env,
+    HOME: fixture.temp,
+    PATH: `${fixture.binDir}:${process.env.PATH ?? ""}`,
+    ZTS_ZEN_APP_SUPPORT_DIR: fixture.appSupportDir,
+    ZTS_STATE_DIR: fixture.stateDir,
+    ZTS_CONFIG_PATH: join(fixture.temp, "config.toml")
+  };
+
+  const snapshot = await execFileAsync("node", ["dist/cli.js", "snapshot", "--json"], { env });
+  const snapshotJson = JSON.parse(snapshot.stdout);
+  const spaceWorkspace = snapshotJson.data.snapshot.workspaces.find((workspace) => workspace.name === "Space");
+  const portfolioWorkspace = snapshotJson.data.snapshot.workspaces.find((workspace) => workspace.name === "Portfolio");
+  const manualEntity = snapshotJson.data.snapshot.entities.find((entity) =>
+    entity.kind === "tab" && entity.workspaceId === spaceWorkspace.id && !entity.protection.protected
+  );
+  const manualPatch = {
+    operations: [
+      {
+        op: "move",
+        entityRef: manualEntity.ref,
+        expectedSourceWorkspaceId: spaceWorkspace.id,
+        destinationWorkspaceId: portfolioWorkspace.id,
+        reason: {
+          value: "Manual exact apply from CLI smoke",
+          provenance: "caller_untrusted",
+          interpretation: "data_only",
+          referencedEntityRefs: [manualEntity.ref]
+        }
+      }
+    ]
+  };
+
+  const missingConsent = spawnSync("node", ["dist/cli.js", "patch", "apply", "-", "--json"], {
+    env,
+    input: JSON.stringify(manualPatch),
+    encoding: "utf8"
+  });
+  assert.equal(missingConsent.status, 1);
+  assert.match(JSON.parse(missingConsent.stdout).blockers.join("\n"), /--yes/);
+
+  const apply = spawnSync("node", ["dist/cli.js", "patch", "apply", "-", "--yes", "--json"], {
+    env,
+    input: JSON.stringify(manualPatch),
+    encoding: "utf8"
+  });
+  assert.equal(apply.status, 0, `${apply.stdout}\n${apply.stderr}`);
+  const applyJson = JSON.parse(apply.stdout);
+  assert.equal(applyJson.ok, true);
+  assert.equal(applyJson.data.receipt.outcome, "applied");
+  assert.equal(applyJson.data.receipt.operations[0].observedWorkspaceId, portfolioWorkspace.id);
+  assert.match(applyJson.data.receiptPath, /domain-apply\.json$/);
+
+  const tabs = await execFileAsync("node", ["dist/cli.js", "tabs", "Portfolio", "--json"], { env });
+  const tabsJson = JSON.parse(tabs.stdout);
+  assert.equal(tabsJson.ok, true);
+  assert.equal(tabsJson.data.tabs.some((tab) => tab.id === manualEntity.nativeId), true);
+});
+
 async function makeZenFixture() {
   const temp = await mkdtemp(join(tmpdir(), "zts-cli-"));
   const appSupportDir = join(temp, "zen");

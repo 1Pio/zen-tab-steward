@@ -6,13 +6,13 @@ import { createBackup, listBackups, pruneBackups, restoreBackup } from "./backup
 import { inspectBridge, inspectLiveAttachment, runBridgeLiveMoveProof, runBridgeLiveReadProof, runBridgeProbe } from "./bridge.js";
 import { addDomainRuleInContents, getConfigValue, loadConfig, saveConfigContents, setConfigValueInContents, ZtsConfig } from "./config.js";
 import { envelope, formatApplyReceiptList, formatApplyVerification, formatBackup, formatBackupList, formatBackupPrune, formatBridge, formatBridgeLiveAttachment, formatBridgeLiveMove, formatBridgeLiveRead, formatBridgeProbe, formatRestore, formatReview, formatSortDryRun, formatSortPreview, formatStatus, formatTabs, formatWorkspaces, printJson } from "./output.js";
-import { createManualPlanFromInput, readPatchInput, snapshotFromSession } from "./manual.js";
+import { applyManualPatchOffline, createManualPlanFromInput, readPatchInput, snapshotFromSession } from "./manual.js";
 import { discoverProfileContext } from "./profile.js";
 import { listTabs, loadSession, loadSessionSummary, summarizeSession, withWorkspacePolicy } from "./session.js";
 import { classifyDomainForWorkspace, planSortPreview, SortInputs } from "./sort.js";
 import { VERSION } from "./version.js";
 
-import type { ManualPlanResult } from "./manual.js";
+import type { ManualApplyResult, ManualPlanResult } from "./manual.js";
 import type { Snapshot } from "./domain/snapshot.js";
 
 interface JsonOption {
@@ -335,15 +335,16 @@ program
 program
   .command("patch")
   .description("Plan exact manual tab moves from a Patch JSON file")
-  .argument("[action]", "plan")
+  .argument("[action]", "plan or apply")
   .argument("[patch-file]", "Patch JSON path, or - for stdin")
+  .option("--yes", "confirm an unattended apply; required for patch apply")
   .option("--json", "print stable JSON output")
-  .action(async (action: string | undefined, patchFile: string | undefined, options: JsonOption) => {
+  .action(async (action: string | undefined, patchFile: string | undefined, options: JsonOption & { yes?: boolean }) => {
     const selectedAction = action ?? "plan";
-    if (selectedAction !== "plan") {
+    if (selectedAction !== "plan" && selectedAction !== "apply") {
       const message = `unknown patch action '${selectedAction}'`;
       if (options.json) {
-        printJson(envelope("patch", { action: selectedAction }, { ok: false, blockers: [message], suggestedNextCommands: ["zts patch plan <patch-file> --json"] }));
+        printJson(envelope("patch", { action: selectedAction }, { ok: false, blockers: [message], suggestedNextCommands: ["zts patch plan <patch-file> --json", "zts patch apply <patch-file> --yes --json"] }));
       } else {
         process.stderr.write(`zts: ${message}\n`);
       }
@@ -351,33 +352,55 @@ program
       return;
     }
 
-    await runCommand("patch plan", options, async () => {
-      if (!patchFile) throw new Error("Patch file is required; use - to read JSON from stdin");
-      const context = await discoverProfileContext();
-      const loadedConfig = await loadConfig();
-      const session = await loadSession(context.sessionFile);
-      const summary = withWorkspacePolicy(summarizeSession(session, context.sessionFile), loadedConfig.config);
-      const snapshot = snapshotFromSession(context, session, summary);
-      const patchInput = await readPatchInput(patchFile);
-      const result = createManualPlanFromInput(snapshot, patchInput);
-      const blockers = result.plan.snapshotAuthority === "authoritative" && result.plan.snapshotFreshness === "current"
-        ? []
-        : ["Patch Plan was created from a persisted observation and is not executable for apply"];
-      const suggestedNextCommands = blockers.length > 0
-        ? ["Quit Zen, then rerun zts snapshot --json and zts patch plan <patch-file> --json"]
-        : ["zts patch apply <patch-file> --yes", "zts snapshot --json"];
-      if (options.json) {
-        printJson(envelope("patch plan", { profile: context.profile, zenRunning: context.running, ...result }, {
-          ok: blockers.length === 0,
-          blockers,
-          suggestedNextCommands
-        }));
-        process.exitCode = blockers.length === 0 ? 0 : 2;
-      } else {
-        process.stdout.write(formatManualPlanSummary(result, blockers, suggestedNextCommands));
-        process.exitCode = blockers.length === 0 ? 0 : 2;
-      }
-    });
+    if (selectedAction === "plan") {
+      await runCommand("patch plan", options, async () => {
+        if (!patchFile) throw new Error("Patch file is required; use - to read JSON from stdin");
+        const context = await discoverProfileContext();
+        const loadedConfig = await loadConfig();
+        const session = await loadSession(context.sessionFile);
+        const summary = withWorkspacePolicy(summarizeSession(session, context.sessionFile), loadedConfig.config);
+        const snapshot = snapshotFromSession(context, session, summary);
+        const patchInput = await readPatchInput(patchFile);
+        const result = createManualPlanFromInput(snapshot, patchInput);
+        const blockers = result.plan.snapshotAuthority === "authoritative" && result.plan.snapshotFreshness === "current"
+          ? []
+          : ["Patch Plan was created from a persisted observation and is not executable for apply"];
+        const suggestedNextCommands = blockers.length > 0
+          ? ["Quit Zen, then rerun zts snapshot --json and zts patch plan <patch-file> --json"]
+          : ["zts patch apply <patch-file> --yes", "zts snapshot --json"];
+        if (options.json) {
+          printJson(envelope("patch plan", { profile: context.profile, zenRunning: context.running, ...result }, {
+            ok: blockers.length === 0,
+            blockers,
+            suggestedNextCommands
+          }));
+          process.exitCode = blockers.length === 0 ? 0 : 2;
+        } else {
+          process.stdout.write(formatManualPlanSummary(result, blockers, suggestedNextCommands));
+          process.exitCode = blockers.length === 0 ? 0 : 2;
+        }
+      });
+      return;
+    }
+
+    if (selectedAction === "apply") {
+      await runCommand("patch apply", options, async () => {
+        if (!patchFile) throw new Error("Patch file is required; use - to read JSON from stdin");
+        if (!options.yes) throw new Error("Manual Patch apply requires explicit consent with --yes");
+        const context = await discoverProfileContext();
+        const loadedConfig = await loadConfig();
+        const session = await loadSession(context.sessionFile);
+        const summary = withWorkspacePolicy(summarizeSession(session, context.sessionFile), loadedConfig.config);
+        const patchInput = await readPatchInput(patchFile);
+        const result = await applyManualPatchOffline(context, session, summary, patchInput, patchCommandForReceipt(selectedAction, patchFile, options));
+        const suggestedNextCommands = ["zts apply list", "zts snapshot --json", "zts backup list"];
+        if (options.json) {
+          printJson(envelope("patch apply", { profile: context.profile, zenRunning: context.running, ...result }, { suggestedNextCommands }));
+        } else {
+          process.stdout.write(formatManualApplySummary(result, suggestedNextCommands));
+        }
+      });
+    }
   });
 
 program
@@ -752,6 +775,13 @@ function backupPruneCommand(options: BackupOptions): string {
   return parts.join(" ");
 }
 
+function patchCommandForReceipt(action: string, patchFile: string, options: { yes?: boolean; json?: boolean }): string {
+  const parts = ["zts", "patch", action, patchFile];
+  if (options.yes) parts.push("--yes");
+  if (options.json) parts.push("--json");
+  return parts.join(" ");
+}
+
 function pruneCutoff(options: BackupOptions): Date {
   if (options.before && options.olderThan) {
     throw new Error("Use only one prune selector: --before or --older-than");
@@ -961,6 +991,24 @@ function formatManualPlanSummary(result: ManualPlanResult, blockers: string[], s
   }
   if (result.plan.actions.length > 12) lines.push(`  ... ${result.plan.actions.length - 12} more`);
   if (blockers.length > 0) lines.push("", "Blockers:", ...blockers.map((blocker) => `  - ${blocker}`));
+  if (suggestedNextCommands.length > 0) lines.push("", "Next:", ...suggestedNextCommands.map((command) => `  ${command}`));
+  return `${lines.join("\n")}\n`;
+}
+
+function formatManualApplySummary(result: ManualApplyResult, suggestedNextCommands: string[]): string {
+  const lines = [
+    "Manual Patch Apply",
+    `Receipt: ${result.receipt.id}`,
+    `Plan: ${result.plan.id}`,
+    `Moves: ${result.summary.moveCount}`,
+    `Before Snapshot: ${result.receipt.beforeSnapshotRevision}`,
+    `After Snapshot: ${result.receipt.afterSnapshotRevision ?? "(none)"}`,
+    `Backup: ${result.receipt.backupArtifact?.id ?? "(none)"}`,
+    `Receipt file: ${result.receiptPath}`,
+    "",
+    "Applied:",
+    ...result.receipt.operations.map((operation) => `  - ${operation.entityRef} -> ${operation.observedWorkspaceId}`)
+  ];
   if (suggestedNextCommands.length > 0) lines.push("", "Next:", ...suggestedNextCommands.map((command) => `  ${command}`));
   return `${lines.join("\n")}\n`;
 }

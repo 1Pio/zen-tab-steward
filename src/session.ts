@@ -197,7 +197,7 @@ export function listTabs(session: RawZenSession, summary: SessionSummary, worksp
       const folderId = typeof tab.zenLiveFolderItemId === "string" ? tab.zenLiveFolderItemId : null;
       const protectionReasons = tabProtectionReasons(tab);
       return {
-        id: String(tab.zenSyncId ?? tab.zenGlanceId ?? `${tab.zenWorkspace ?? "unknown"}:${index}`),
+        id: String(tab.zenSyncId ?? tab.zenGlanceId ?? `tab:${index}`),
         index,
         title: entry?.title ?? url,
         url,

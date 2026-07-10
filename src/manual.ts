@@ -1,12 +1,17 @@
-import { readFile } from "node:fs/promises";
-import { createPatch, createPlan, definePatch } from "./domain/change.js";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { createBackup } from "./backup.js";
+import { createApplyAuthorization, createPatch, createPlan, definePatch, defineReceipt } from "./domain/change.js";
 import { sha256Canonical } from "./domain/digest.js";
 import { createSnapshot } from "./domain/snapshot.js";
+import { writeJsonLz4 } from "./mozlz4.js";
+import { stateDir } from "./paths.js";
 import { ProfileContext } from "./profile.js";
 import { listTabs, RawZenSession, SessionSummary } from "./session.js";
 
 import type {
   AutoApplyEvidence,
+  ApplyAuthorization,
   CallerText,
   ManualDecisionEvidence,
   MoveProtectionPrecondition,
@@ -14,6 +19,7 @@ import type {
   PatchDraft,
   Plan,
   PlanAction,
+  Receipt,
   ZtsMessage
 } from "./domain/change.js";
 import type {
@@ -36,6 +42,12 @@ export interface ManualPlanResult {
     blockedCount: number;
     unchangedCount: number;
   };
+}
+
+export interface ManualApplyResult extends ManualPlanResult {
+  authorization: ApplyAuthorization;
+  receipt: Receipt;
+  receiptPath: string;
 }
 
 export async function readPatchInput(path: string): Promise<unknown> {
@@ -177,6 +189,144 @@ export function createManualPlanFromInput(snapshot: Snapshot, patchInput: unknow
   };
 }
 
+export async function applyManualPatchOffline(
+  context: ProfileContext,
+  session: RawZenSession,
+  summary: SessionSummary,
+  patchInput: unknown,
+  command: string
+): Promise<ManualApplyResult> {
+  if (context.running) throw new Error("Manual Patch apply requires Zen to be closed; current Snapshot would be a persisted observation");
+  if (context.sessionFile.kind !== "zen-sessions") throw new Error("Manual Patch apply requires zen-sessions.jsonlz4 as the selected session source");
+
+  const snapshot = snapshotFromSession(context, session, summary);
+  const result = createManualPlanFromInput(snapshot, patchInput);
+  const moveActions = result.plan.actions.filter((action): action is Extract<PlanAction, { readonly disposition: "move" }> =>
+    action.disposition === "move"
+  );
+  if (moveActions.length === 0) throw new Error("Manual Patch apply has no executable move actions");
+
+  const authorizedAt = new Date().toISOString();
+  const authorization = createApplyAuthorization(snapshot, result.plan, {
+    schemaVersion: "zts.authorization.provisional-1",
+    id: `authorization:manual:${shortDigest(result.plan.digest)}`,
+    planId: result.plan.id,
+    planDigest: result.plan.digest,
+    profileId: result.plan.profileId,
+    authorizedAt,
+    expiresAt: result.plan.expiresAt,
+    source: {
+      kind: "unattended_invocation",
+      consentArtifact: {
+        id: `consent:manual:${shortDigest(result.plan.digest)}`,
+        digest: result.plan.digest
+      }
+    },
+    authorizedActionIds: moveActions.map((action) => action.actionId) as [string, ...string[]],
+    allowedTrustClasses: ["manual_exact"],
+    protectionGrants: [],
+    lifecycle: { kind: "none" },
+    wholePlanPreflight: true
+  });
+  const receiptRoot = join(stateDir(), "applies", safeSegment(context.profile.id));
+  await mkdir(receiptRoot, { recursive: true, mode: 0o700 });
+  const journalArtifact = {
+    id: `journal:manual:${shortDigest(result.plan.digest)}`,
+    digest: sha256Canonical({ plan: result.plan.digest, authorization: authorization.revision, patch: result.patch.snapshotRevision })
+  };
+  await writeFile(
+    join(receiptRoot, `${safeSegment(journalArtifact.id)}--journal.json`),
+    `${JSON.stringify({
+      schemaVersion: "zts.manual-apply-journal.provisional-1",
+      stage: "authorized",
+      planDigest: result.plan.digest,
+      authorizationRevision: authorization.revision,
+      patch: result.patch
+    }, null, 2)}\n`,
+    { encoding: "utf8", mode: 0o600 }
+  );
+
+  const nextSession = structuredClone(session);
+  const tabs = Array.isArray(nextSession.tabs) ? nextSession.tabs : [];
+  const tabSummaries = listTabs(nextSession, summary);
+  const entities = new Map(snapshot.entities.map((entity) => [entity.ref, entity]));
+  for (const action of moveActions) {
+    const entity = entities.get(action.operation.entityRef);
+    const tabSummary = tabSummaries.find((tab) => tab.id === entity?.nativeId);
+    if (!entity || !tabSummary) throw new Error(`Manual Patch apply cannot find ${action.operation.entityRef} in the current session`);
+    const tab = tabs[tabSummary.index];
+    if (!tab) throw new Error(`Manual Patch apply cannot find raw tab for ${action.operation.entityRef}`);
+    if (tab.zenWorkspace !== action.operation.precondition.sourceWorkspace.workspaceId) {
+      throw new Error(`Manual Patch apply found Drift for ${action.operation.entityRef}`);
+    }
+    tab.zenWorkspace = action.operation.expectedPostState.workspaceId;
+  }
+
+  const backup = await createBackup(context, command);
+  await writeJsonLz4(context.sessionFile.path, nextSession);
+  const afterSnapshot = snapshotFromSession(context, nextSession, summary);
+  const afterEntitiesByNativeId = new Map(afterSnapshot.entities.map((entity) => [entity.nativeId, entity]));
+  const operations = moveActions.map((action) => {
+    const beforeEntity = entities.get(action.operation.entityRef);
+    const afterEntity = beforeEntity ? afterEntitiesByNativeId.get(beforeEntity.nativeId) : undefined;
+    if (!afterEntity || afterEntity.workspaceId !== action.operation.expectedPostState.workspaceId) {
+      throw new Error(`Manual Patch apply verification failed for ${action.operation.entityRef}`);
+    }
+    return {
+      actionId: action.actionId,
+      entityRef: action.operation.entityRef,
+      observedWorkspaceId: action.operation.expectedPostState.workspaceId,
+      status: "verified" as const,
+      mutationAttempted: true as const,
+      netChanged: true as const,
+      issueCodes: []
+    };
+  });
+  const receiptOperations = operations as unknown as Extract<Receipt, { readonly outcome: "applied" }>["operations"];
+
+  const completedAt = new Date().toISOString();
+  const receipt = defineReceipt(snapshot, result.plan, authorization, {
+    schemaVersion: "zts.receipt.provisional-1",
+    id: `receipt:manual:${shortDigest(sha256Canonical({ plan: result.plan.digest, completedAt }))}`,
+    planId: result.plan.id,
+    planDigest: result.plan.digest,
+    authorization: {
+      id: authorization.id,
+      revision: authorization.revision,
+      artifact: { id: `authorization:${authorization.id}`, digest: authorization.revision }
+    },
+    profileId: result.plan.profileId,
+    beforeSnapshotRevision: snapshot.revision,
+    startedAt: authorizedAt,
+    completedAt,
+    journalArtifact,
+    issues: [],
+    outcome: "applied",
+    mutationAttempted: true,
+    netChanged: true,
+    afterSnapshotRevision: afterSnapshot.revision,
+    control: {
+      route: "closed_session",
+      proof: { id: "control:closed-session:manual-apply", digest: snapshot.provenance.sourceRevision },
+      exclusiveControlReleased: "verified"
+    },
+    backupArtifact: { id: `backup:${backup.id}`, digest: sha256Canonical({ backupId: backup.id }) },
+    inversePlanArtifact: {
+      id: `inverse:${result.plan.id}`,
+      digest: sha256Canonical(moveActions.map((action) => ({
+        entityRef: action.operation.entityRef,
+        destinationWorkspaceId: action.operation.inverse.destinationWorkspaceId
+      })))
+    },
+    recoveryArtifact: null,
+    operations: receiptOperations
+  });
+
+  const receiptPath = join(receiptRoot, `${safeSegment(receipt.id)}--domain-apply.json`);
+  await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  return { ...result, authorization, receipt, receiptPath };
+}
+
 function createManualPlan(snapshot: Snapshot, patch: Patch): Plan {
   const createdAt = new Date().toISOString();
   const expiresAt = new Date(Date.parse(createdAt) + 5 * 60 * 1000).toISOString();
@@ -296,6 +446,10 @@ function workspaceProtection(status: SessionSummary["workspaces"][number]["prote
 
 function tabRef(tabId: string, index: number): MovementRootRef {
   return `entity:root:tab:${safeSegment(tabId)}:${sha256Canonical({ tabId, index }).slice("sha256:".length, "sha256:".length + 12)}`;
+}
+
+function shortDigest(digest: string): string {
+  return digest.startsWith("sha256:") ? digest.slice("sha256:".length, "sha256:".length + 16) : safeSegment(digest).slice(0, 16);
 }
 
 function safeSegment(value: string): string {
