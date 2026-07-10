@@ -393,8 +393,8 @@ function createManualPlan(snapshot: Snapshot, patch: Patch): Plan {
       };
     }
     const entityProtection = moveProtection(entity.protection, `grant:${actionId}:entity`);
-    const sourceProtection = moveProtection(source.protection, `grant:${actionId}:source`);
-    const destinationProtection = moveProtection(destination.protection, `grant:${actionId}:destination`);
+    const sourceProtection = moveProtection(source.protection.source, `grant:${actionId}:source`);
+    const destinationProtection = moveProtection(destination.protection.destination, `grant:${actionId}:destination`);
     if (entityProtection.protected || sourceProtection.protected || destinationProtection.protected) {
       return {
         actionId,
@@ -474,10 +474,15 @@ function moveProtection(protection: Protection, grantId: string): MoveProtection
   };
 }
 
-function workspaceProtection(status: SessionSummary["workspaces"][number]["protectedStatus"]): Protection {
-  if (status === "none") return { protected: false, reasons: [] };
-  const reasons = status === "from_to" ? ["protected_source", "protected_destination"] : status === "from" ? ["protected_source"] : ["protected_destination"];
-  return { protected: true, reasons: reasons as [string, ...string[]] };
+function workspaceProtection(status: SessionSummary["workspaces"][number]["protectedStatus"]): Workspace["protection"] {
+  return {
+    source: status === "from" || status === "from_to"
+      ? { protected: true, reasons: ["protected_source"] }
+      : { protected: false, reasons: [] },
+    destination: status === "to" || status === "from_to"
+      ? { protected: true, reasons: ["protected_destination"] }
+      : { protected: false, reasons: [] }
+  };
 }
 
 function tabRef(tabId: string, index: number): MovementRootRef {

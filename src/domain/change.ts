@@ -312,14 +312,20 @@ export function createPlan<T extends PlanDraft>(
     snapshotAuthority: snapshot.authority,
     snapshotFreshness: snapshot.freshness
   };
-  const plan = definePlan({ ...content, digest: sha256Canonical(content) });
-  validatePlanAgainstSnapshot(snapshot, plan);
+  const plan = definePlanForSnapshot(snapshot, { ...content, digest: sha256Canonical(content) });
   return plan as T & Pick<Plan, "profileId" | "snapshotRevision" | "snapshotAuthority" | "snapshotFreshness" | "digest">;
 }
 
 /** Validates cross-action decision invariants, then freezes the Plan. */
 export function definePlan<T extends Plan>(plan: T): T {
   validatePlan(plan);
+  return deepFreeze(plan);
+}
+
+/** Validates a stored or received Plan against the actual Snapshot it binds. */
+export function definePlanForSnapshot<T extends Plan>(snapshot: Snapshot, plan: T): T {
+  definePlan(plan);
+  validatePlanAgainstSnapshot(snapshot, plan);
   return deepFreeze(plan);
 }
 
@@ -964,10 +970,10 @@ function validatePlanAgainstSnapshot(snapshot: Snapshot, plan: Plan): void {
       throw new Error(`Plan action ${action.actionId} source Workspace does not match the Snapshot`);
     }
     if (!destination) throw new Error(`Plan action ${action.actionId} destination Workspace is outside the Snapshot`);
-    if (!sameProtectionPrecondition(action.operation.precondition.sourceWorkspace.protection, source.protection)) {
+    if (!sameProtectionPrecondition(action.operation.precondition.sourceWorkspace.protection, source.protection.source)) {
       throw new Error(`Plan action ${action.actionId} source Workspace Protection does not match the Snapshot`);
     }
-    if (!sameProtectionPrecondition(action.operation.precondition.destinationWorkspace.protection, destination.protection)) {
+    if (!sameProtectionPrecondition(action.operation.precondition.destinationWorkspace.protection, destination.protection.destination)) {
       throw new Error(`Plan action ${action.actionId} destination Workspace Protection does not match the Snapshot`);
     }
   }

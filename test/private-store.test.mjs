@@ -1,0 +1,33 @@
+import assert from "node:assert/strict";
+import { mkdtemp, mkdir, readdir, stat, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import { ensurePrivateDirectory, privatePath, publishPrivateJson, readPrivateJson, replacePrivateJson } from "../dist/private-store.js";
+
+test("private JSON artifacts enforce owner-only durable publication and reject symlink roots", async () => {
+  const temp = await mkdtemp(join(tmpdir(), "zts-private-store-"));
+  const root = join(temp, "state");
+  const plans = await ensurePrivateDirectory(root, "plans");
+  const objectPath = privatePath(plans, "object.json");
+  const pointerPath = privatePath(plans, "latest.json");
+
+  await publishPrivateJson(objectPath, { schemaVersion: "fixture-1", value: "private" });
+  await replacePrivateJson(pointerPath, { schemaVersion: "pointer-1", value: 1 });
+  await replacePrivateJson(pointerPath, { schemaVersion: "pointer-1", value: 2 });
+
+  assert.deepEqual(await readPrivateJson(objectPath), { schemaVersion: "fixture-1", value: "private" });
+  assert.deepEqual(await readPrivateJson(pointerPath), { schemaVersion: "pointer-1", value: 2 });
+  assert.equal((await stat(root)).mode & 0o777, 0o700);
+  assert.equal((await stat(plans)).mode & 0o777, 0o700);
+  assert.equal((await stat(objectPath)).mode & 0o777, 0o600);
+  assert.equal((await stat(pointerPath)).mode & 0o777, 0o600);
+  assert.equal((await readdir(plans)).some((entry) => entry.startsWith(".tmp-")), false);
+
+  const outside = join(temp, "outside");
+  const linkedRoot = join(temp, "linked-state");
+  await mkdir(outside);
+  await symlink(outside, linkedRoot);
+  await assert.rejects(() => ensurePrivateDirectory(linkedRoot, "plans"), /not a real directory/);
+  assert.deepEqual(await readdir(outside), []);
+});

@@ -91,14 +91,20 @@ function snapshotFixture() {
         name: "Inbox",
         contentTrust: "browser_untrusted",
         position: 0,
-        protection: { protected: false, reasons: [] }
+        protection: {
+          source: { protected: false, reasons: [] },
+          destination: { protected: false, reasons: [] }
+        }
       },
       {
         id: "workspace-research",
         name: "Research",
         contentTrust: "browser_untrusted",
         position: 1,
-        protection: { protected: false, reasons: [] }
+        protection: {
+          source: { protected: false, reasons: [] },
+          destination: { protected: false, reasons: [] }
+        }
       }
     ],
     entities: [
@@ -548,7 +554,10 @@ test("Apply Authorization binds the exact Plan, actions, Trust Classes, and life
   assert.equal(createApplyAuthorization(protectedSnapshot, protectedPlan, granted).protectionGrants.length, 1);
 
   const workspaceProtectedSnapshotDraft = snapshotFixture();
-  workspaceProtectedSnapshotDraft.workspaces[1].protection = { protected: true, reasons: ["protected_destination"] };
+  workspaceProtectedSnapshotDraft.workspaces[1].protection.destination = {
+    protected: true,
+    reasons: ["protected_destination"]
+  };
   const workspaceProtectedSnapshot = createSnapshot(workspaceProtectedSnapshotDraft);
   const workspaceProtectedInput = planFixture(workspaceProtectedSnapshot);
   workspaceProtectedInput.actions[0].operation.precondition.destinationWorkspace.protection = {

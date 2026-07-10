@@ -62,14 +62,20 @@ const workspaces = [
     name: "Inbox",
     contentTrust: "browser_untrusted",
     position: 0,
-    protection: { protected: false, reasons: [] }
+    protection: {
+      source: { protected: false, reasons: [] },
+      destination: { protected: false, reasons: [] }
+    }
   },
   {
     id: "workspace-research",
     name: "Research",
     contentTrust: "browser_untrusted",
     position: 1,
-    protection: { protected: false, reasons: [] }
+    protection: {
+      source: { protected: false, reasons: [] },
+      destination: { protected: false, reasons: [] }
+    }
   }
 ] as const;
 

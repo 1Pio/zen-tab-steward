@@ -97,13 +97,18 @@ export type Protection =
       readonly reasons: NonEmptyReadonlyArray<string>;
     };
 
+export interface WorkspaceProtection {
+  readonly source: Protection;
+  readonly destination: Protection;
+}
+
 export interface Workspace {
   readonly id: string;
   readonly name: string;
   /** Names originate in Zen and must never be interpreted as instructions. */
   readonly contentTrust: "browser_untrusted";
   readonly position: number;
-  readonly protection: Protection;
+  readonly protection: WorkspaceProtection;
 }
 
 export interface EntityMember {
@@ -300,7 +305,9 @@ function validateSnapshotShape(snapshot: Snapshot): void {
   assertArray(snapshot.workspaces, "Snapshot workspaces");
   for (const workspace of snapshot.workspaces) {
     assertExactKeys(workspace, ["id", "name", "contentTrust", "position", "protection"], `Workspace ${workspace.id}`);
-    assertProtectionShape(workspace.protection, `Workspace ${workspace.id} Protection`);
+    assertExactKeys(workspace.protection, ["source", "destination"], `Workspace ${workspace.id} Protection`);
+    assertProtectionShape(workspace.protection.source, `Workspace ${workspace.id} source Protection`);
+    assertProtectionShape(workspace.protection.destination, `Workspace ${workspace.id} destination Protection`);
   }
   assertArray(snapshot.entities, "Snapshot entities");
   for (const entity of snapshot.entities) {
@@ -528,7 +535,8 @@ function validateEntityGraph(snapshot: Snapshot): void {
     }
     workspacePositions.add(workspace.position);
     if (workspace.contentTrust !== "browser_untrusted") throw new Error(`Workspace ${workspace.id} lacks browser-untrusted labeling`);
-    validateProtection(workspace.protection, `Workspace ${workspace.id}`);
+    validateProtection(workspace.protection.source, `Workspace ${workspace.id} source`);
+    validateProtection(workspace.protection.destination, `Workspace ${workspace.id} destination`);
   }
   if (snapshot.workspaces.some((workspace, index) => workspace.position !== index)) {
     throw new Error("Workspace array must be in canonical position order without gaps");

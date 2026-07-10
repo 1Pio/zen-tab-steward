@@ -5,14 +5,18 @@ import { applySortPlanLive, applySortPlanOffline, listApplyReceipts, offlineAppl
 import { createBackup, listBackups, pruneBackups, restoreBackup } from "./backup.js";
 import { inspectBridge, inspectLiveAttachment, runBridgeLiveMoveProof, runBridgeLiveReadProof, runBridgeProbe } from "./bridge.js";
 import { addDomainRuleInContents, getConfigValue, loadConfig, saveConfigContents, setConfigValueInContents, ZtsConfig } from "./config.js";
+import { planDailySort } from "./daily-sort.js";
 import { envelope, formatApplyReceiptList, formatApplyVerification, formatBackup, formatBackupList, formatBackupPrune, formatBridge, formatBridgeLiveAttachment, formatBridgeLiveMove, formatBridgeLiveRead, formatBridgeProbe, formatRestore, formatReview, formatSortDryRun, formatSortPreview, formatStatus, formatTabs, formatWorkspaces, printJson } from "./output.js";
 import { applyManualPatchOffline, createManualPlanFromInput, listManualApplyReceipts, readPatchInput, snapshotFromSession } from "./manual.js";
+import { loadStoredPlan } from "./plans.js";
 import { discoverProfileContext } from "./profile.js";
 import { listTabs, loadSession, loadSessionSummary, summarizeSession, withWorkspacePolicy } from "./session.js";
 import { classifyDomainForWorkspace, planSortPreview, SortInputs } from "./sort.js";
 import { VERSION } from "./version.js";
 
 import type { ManualApplyReceiptSummary, ManualApplyResult, ManualPlanResult } from "./manual.js";
+import type { DailySortPlanResult } from "./daily-sort.js";
+import type { Plan } from "./domain/change.js";
 import type { Snapshot } from "./domain/snapshot.js";
 
 interface JsonOption {
@@ -333,6 +337,37 @@ program
   });
 
 program
+  .command("plan")
+  .description("Inspect a saved state-bound Plan")
+  .argument("[action]", "show")
+  .argument("[selector]", "latest, Plan id, or Plan digest")
+  .option("--json", "print stable JSON output")
+  .action(async (action: string | undefined, selector: string | undefined, options: JsonOption) => {
+    await runCommand("plan", options, async () => {
+      const selectedAction = action ?? "show";
+      if (selectedAction !== "show") throw new Error("Usage: zts plan show [latest|plan-id|plan-digest]");
+      const context = await discoverProfileContext();
+      const stored = await loadStoredPlan(context.profile.id, selector ?? "latest");
+      const expired = Date.parse(stored.plan.expiresAt) <= Date.now();
+      const data = {
+        profile: context.profile,
+        plan: stored.plan,
+        requestRevision: stored.requestRevision,
+        artifact: stored.artifact,
+        expired
+      };
+      if (options.json) {
+        printJson(envelope("plan show", data, {
+          warnings: expired ? ["Saved Plan has expired and cannot be authorized for apply"] : [],
+          suggestedNextCommands: expired ? ["zts sort --all --engine rules --preview"] : ["zts sort --all --engine rules --dry-run", "zts plan show latest --json"]
+        }));
+      } else {
+        process.stdout.write(formatSavedPlan(stored.plan, expired));
+      }
+    });
+  });
+
+program
   .command("patch")
   .description("Plan exact manual tab moves from a Patch JSON file")
   .argument("[action]", "plan, apply, or receipts")
@@ -592,7 +627,7 @@ program
         return;
       }
 
-      const plan = planSortPreview(session, summary, source, inputs);
+      const plan = planSortPreview(session, summary, source!, inputs);
       const data = {
         profile: context.profile,
         zenRunning: context.running,
@@ -622,6 +657,8 @@ program
   .command("sort")
   .description("Plan or apply Zen tab sorting")
   .argument("[source-workspace]", "source workspace name or id")
+  .option("--all", "sort from every applicable source Workspace")
+  .option("--engine <engine>", "sorting Engine: rules, lexical, bge-small, or hybrid")
   .option("--preview", "show a glanceable preview without writing")
   .option("--dry-run", "show an operational dry run without writing")
   .option("--apply", "apply planned safe moves with the selected backend")
@@ -644,7 +681,15 @@ program
       const summary = withWorkspacePolicy(summarizeSession(session, context.sessionFile), loadedConfig.config);
       const source = resolveSourceWorkspace(summary, sourceWorkspace, loadedConfig.config.defaults.inbox);
       const inputs = sortInputs(options, loadedConfig.config);
-      const inputError = validateSortMode(options) ?? validateSortInputs(inputs);
+      const productionPlanRequested = Boolean(options.all || options.engine);
+      const selectedEngine = normalizeEngine(options.engine);
+      const inputError = validateSortMode(options, sourceWorkspace)
+        ?? validateSortInputs(inputs)
+        ?? (productionPlanRequested && selectedEngine !== "rules"
+          ? selectedEngine === "invalid"
+            ? `Unknown Engine '${options.engine}'; expected rules, lexical, bge-small, or hybrid`
+            : `Engine '${options.engine}' is not installed in the production planner yet; explicit Engine selection never falls back`
+          : null);
       if (inputError) {
         if (options.json) {
           printJson(envelope("sort", { sourceWorkspace: sourceWorkspace ?? null, inputs }, { ok: false, blockers: [inputError], suggestedNextCommands: ["zts sort --help"] }));
@@ -654,7 +699,7 @@ program
         process.exitCode = 1;
         return;
       }
-      if (!source) {
+      if (!source && !options.all) {
         const message = sourceWorkspace
           ? `Source workspace not found: ${sourceWorkspace}`
           : "No source workspace could be resolved";
@@ -667,7 +712,62 @@ program
         process.exitCode = 1;
         return;
       }
-      const plan = planSortPreview(session, summary, source, inputs);
+
+      if (productionPlanRequested) {
+        const sourceScope = options.all
+          ? { kind: "all_workspaces" as const }
+          : { kind: "workspace" as const, workspaceId: source!.id, workspaceName: source!.name };
+        const result = await planDailySort(context, session, summary, loadedConfig.config, {
+          scope: sourceScope.kind === "all_workspaces"
+            ? sourceScope
+            : { kind: "workspace", workspaceId: sourceScope.workspaceId },
+          engine: "rules",
+          destinationAllowlist: inputs.to,
+          destinationDenylist: inputs.notTo,
+          only: inputs.only,
+          except: inputs.except,
+          limit: inputs.limit,
+          includePinned: inputs.includePinned,
+          includeEssentials: inputs.includeEssentials,
+          autoApplyRequested: Boolean(options.apply)
+        });
+        const mode = options.apply ? "apply" : options.dryRun ? "dry-run" : "preview";
+        const applyBlockers = options.apply
+          ? ["Apply the exact saved Plan with zts apply latest; sort never regenerates and applies an Engine Plan in one step"]
+          : [];
+        const warnings = result.snapshot.authority === "persisted_observation"
+          ? ["Zen is running; this Plan is based on a persisted observation and cannot be authorized for apply"]
+          : [];
+        const suggestedNextCommands = dailySortNextCommands(options, mode, result.plan);
+        const data = {
+          profile: context.profile,
+          zenRunning: context.running,
+          sourceScope,
+          engine: selectedEngine,
+          mode,
+          snapshot: result.snapshot,
+          plan: result.plan,
+          planResolution: result.planResolution,
+          requestRevision: result.requestRevision,
+          summary: result.summary,
+          artifacts: [{ kind: "plan", ...result.artifact }],
+          applied: false
+        };
+        if (options.json) {
+          printJson(envelope("sort", data, {
+            ok: applyBlockers.length === 0,
+            warnings,
+            blockers: applyBlockers,
+            suggestedNextCommands
+          }));
+        } else {
+          process.stdout.write(formatDailySortPlan(result, sourceScope, mode, warnings, applyBlockers, suggestedNextCommands));
+        }
+        process.exitCode = applyBlockers.length === 0 ? 0 : 2;
+        return;
+      }
+
+      const plan = planSortPreview(session, summary, source!, inputs);
       const applyRequested = Boolean(options.apply);
       const previewRequested = !applyRequested;
       const applyRequestedWithMoves = applyRequested && plan.moveCount > 0;
@@ -739,6 +839,8 @@ program
   });
 
 interface SortOptions {
+  all?: boolean;
+  engine?: string;
   preview?: boolean;
   dryRun?: boolean;
   apply?: boolean;
@@ -909,7 +1011,10 @@ function validateSortInputs(inputs: SortInputs): string | null {
   return null;
 }
 
-function validateSortMode(options: SortOptions): string | null {
+function validateSortMode(options: SortOptions, sourceWorkspace?: string): string | null {
+  if (options.all && sourceWorkspace) {
+    return "--all cannot be combined with a source Workspace argument";
+  }
   if (options.apply && (options.preview || options.dryRun)) {
     return "--apply cannot be combined with --preview or --dry-run";
   }
@@ -920,6 +1025,14 @@ function validateSortMode(options: SortOptions): string | null {
     return "--yes requires --apply";
   }
   return null;
+}
+
+function normalizeEngine(engine?: string): "rules" | "lexical" | "bge_small" | "hybrid" | "invalid" {
+  if (engine === undefined || engine === "rules") return "rules";
+  if (engine === "lexical") return "lexical";
+  if (engine === "bge-small" || engine === "bge_small") return "bge_small";
+  if (engine === "hybrid") return "hybrid";
+  return "invalid";
 }
 
 async function requestSortApplyConsent(
@@ -959,6 +1072,88 @@ function normalizeBackend(backend?: string): SortInputs["backend"] {
     return backend ?? "auto";
   }
   return backend as SortInputs["backend"];
+}
+
+function sortFollowUpCommand(options: SortOptions, mode: "--preview" | "--dry-run"): string {
+  const parts = ["zts", "sort"];
+  if (options.all) parts.push("--all");
+  if (options.engine) parts.push("--engine", options.engine);
+  parts.push(mode);
+  return parts.join(" ");
+}
+
+function dailySortNextCommands(
+  options: SortOptions,
+  mode: "preview" | "dry-run" | "apply",
+  plan: Plan
+): string[] {
+  const commands = mode === "preview"
+    ? [sortFollowUpCommand(options, "--dry-run"), "zts plan show latest"]
+    : ["zts plan show latest"];
+  if (plan.snapshotAuthority !== "authoritative" || plan.snapshotFreshness !== "current") {
+    commands.push("Quit Zen, then rerun zts sort --all --engine rules --dry-run");
+    return commands;
+  }
+  commands.push("Plan apply is not enabled for Engine Plans yet; use zts patch apply for exact manual Patch apply");
+  return commands;
+}
+
+function formatDailySortPlan(
+  result: DailySortPlanResult,
+  sourceScope: { readonly kind: "all_workspaces" } | { readonly kind: "workspace"; readonly workspaceId: string; readonly workspaceName: string },
+  mode: "preview" | "dry-run" | "apply",
+  warnings: readonly string[],
+  blockers: readonly string[],
+  suggestedNextCommands: readonly string[]
+): string {
+  const title = mode === "dry-run" ? "Sort dry run" : mode === "apply" ? "Sort apply blocked" : "Sort preview";
+  const scope = sourceScope.kind === "all_workspaces" ? "all applicable Workspaces" : sourceScope.workspaceName;
+  const lines = [
+    `${title} · ${scope}`,
+    `Plan ${result.plan.id}`,
+    `Digest ${result.plan.digest}`,
+    `${result.planResolution === "created" ? "Saved" : "Reused"} exact state-bound Plan`,
+    "",
+    `Move       ${result.summary.moveCount}`,
+    `Review     ${result.summary.reviewCount}`,
+    `Protected  ${result.summary.protectedCount}`,
+    `Blocked    ${result.summary.blockedCount}`,
+    `Unchanged  ${result.summary.unchangedCount}`,
+    "",
+    "Nothing changed."
+  ];
+  if (mode === "dry-run") {
+    lines.push("", "Actions:");
+    for (const action of result.plan.actions) {
+      if (action.disposition === "move") {
+        lines.push(`  ${action.actionId}  move ${action.operation.entityRef} -> ${action.operation.expectedPostState.workspaceId}`);
+      } else {
+        lines.push(`  ${action.actionId}  ${action.disposition} ${action.entityRef} -> ${action.candidateDestinationWorkspaceId ?? "(none)"}`);
+      }
+    }
+  }
+  if (warnings.length > 0) lines.push("", "Warnings:", ...warnings.map((warning) => `  - ${warning}`));
+  if (blockers.length > 0) lines.push("", "Blockers:", ...blockers.map((blocker) => `  - ${blocker}`));
+  if (suggestedNextCommands.length > 0) lines.push("", "Next:", ...suggestedNextCommands.map((command) => `  ${command}`));
+  return `${lines.join("\n")}\n`;
+}
+
+function formatSavedPlan(plan: Plan, expired: boolean): string {
+  const counts = new Map<string, number>();
+  for (const action of plan.actions) counts.set(action.disposition, (counts.get(action.disposition) ?? 0) + 1);
+  return `${[
+    "Saved Plan",
+    `Plan: ${plan.id}`,
+    `Digest: ${plan.digest}`,
+    `Snapshot: ${plan.snapshotRevision}`,
+    `Authority: ${plan.snapshotAuthority}`,
+    `Expires: ${plan.expiresAt}${expired ? " (expired)" : ""}`,
+    `Move: ${counts.get("move") ?? 0}`,
+    `Review: ${counts.get("review") ?? 0}`,
+    `Protected: ${counts.get("protected") ?? 0}`,
+    `Blocked: ${counts.get("blocked") ?? 0}`,
+    `Unchanged: ${counts.get("unchanged") ?? 0}`
+  ].join("\n")}\n`;
 }
 
 function formatSnapshotSummary(snapshot: Snapshot, warnings: string[], suggestedNextCommands: string[]): string {
