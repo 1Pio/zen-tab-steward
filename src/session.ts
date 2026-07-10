@@ -103,7 +103,14 @@ export async function loadSessionSummary(source: SessionFileSource): Promise<Ses
 
 export async function loadSession(source: SessionFileSource): Promise<RawZenSession> {
   const decoded = await readJsonLz4(source.path);
-  return assertRawSession(decoded);
+  return defineRawSession(decoded);
+}
+
+export function defineRawSession(value: unknown): RawZenSession {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Zen session JSON is not an object");
+  }
+  return value as RawZenSession;
 }
 
 export function summarizeSession(session: RawZenSession, source: SessionFileSource): SessionSummary {
@@ -219,13 +226,6 @@ export function listTabs(session: RawZenSession, summary: SessionSummary, worksp
       if (!lookup) return true;
       return normalizeName(tab.workspaceId ?? "") === lookup || normalizeName(tab.workspaceName ?? "") === lookup;
     });
-}
-
-function assertRawSession(value: unknown): RawZenSession {
-  if (!value || typeof value !== "object") {
-    throw new Error("Zen session JSON is not an object");
-  }
-  return value as RawZenSession;
 }
 
 function selectedEntry(tab: RawTab) {

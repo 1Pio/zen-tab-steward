@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { listTabs, summarizeSession, withWorkspacePolicy } from "../dist/session.js";
+import { defineRawSession, listTabs, summarizeSession, withWorkspacePolicy } from "../dist/session.js";
 
 const source = {
   kind: "zen-sessions",
@@ -9,6 +9,11 @@ const source = {
   size: 100,
   modifiedMs: 123
 };
+
+test("raw Zen session validator rejects non-object roots", () => {
+  assert.throws(() => defineRawSession(null), /not an object/);
+  assert.throws(() => defineRawSession([]), /not an object/);
+});
 
 test("summarizes workspaces, pinned tabs, essentials, folders, and groups", () => {
   const summary = summarizeSession(
