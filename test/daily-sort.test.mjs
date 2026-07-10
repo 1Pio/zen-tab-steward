@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { encodeLiteralJsonLz4ForFixture } from "../dist/mozlz4.js";
+import { encodeLiteralJsonLz4ForFixture, readJsonLz4, writeJsonLz4 } from "../dist/mozlz4.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -81,6 +81,76 @@ test("all-workspace preview and dry-run reuse one protected state-bound Plan", a
   assert.ok(latestJson.suggestedNextCommands.includes("zts sort --all --engine rules --dry-run"));
 });
 
+test("dry-run preserves the previewed Plan and fails closed after Snapshot Drift", async () => {
+  const fixture = await makeDailySortFixture();
+  const env = {
+    ...process.env,
+    HOME: fixture.temp,
+    PATH: `${fixture.binDir}:${process.env.PATH ?? ""}`,
+    ZTS_ZEN_APP_SUPPORT_DIR: fixture.appSupportDir,
+    ZTS_STATE_DIR: fixture.stateDir,
+    ZTS_CONFIG_PATH: fixture.configPath
+  };
+  const command = ["dist/cli.js", "sort", "--all", "--engine", "rules"];
+  const preview = spawnSync("node", [...command, "--preview", "--json"], { env, encoding: "utf8" });
+  assert.equal(preview.status, 0, `${preview.stdout}\n${preview.stderr}`);
+  const previewJson = JSON.parse(preview.stdout);
+
+  const changedSession = await readJsonLz4(fixture.sessionPath);
+  changedSession.tabs.push({
+    zenSyncId: "tab-after-preview",
+    zenWorkspace: "w-space",
+    pinned: false,
+    entries: [{ url: "https://github.com/1Pio/new", title: "Opened after preview" }]
+  });
+  await writeJsonLz4(fixture.sessionPath, changedSession);
+
+  const dryRun = spawnSync("node", [...command, "--dry-run", "--json"], { env, encoding: "utf8" });
+  assert.equal(dryRun.status, 2, `${dryRun.stdout}\n${dryRun.stderr}`);
+  const dryRunJson = JSON.parse(dryRun.stdout);
+  assert.equal(dryRunJson.ok, false);
+  assert.equal(dryRunJson.data.plan.digest, previewJson.data.plan.digest);
+  assert.equal(dryRunJson.data.planResolution, "blocked_snapshot_drift");
+  assert.match(dryRunJson.blockers.join("\n"), /Snapshot Drift/);
+
+  const latest = await execFileAsync("node", ["dist/cli.js", "plan", "show", "latest", "--json"], { env });
+  assert.equal(JSON.parse(latest.stdout).data.plan.digest, previewJson.data.plan.digest);
+});
+
+test("explicit pinned and essential inclusion creates Protection-bound move Operations", async () => {
+  const fixture = await makeDailySortFixture();
+  const env = {
+    ...process.env,
+    HOME: fixture.temp,
+    PATH: `${fixture.binDir}:${process.env.PATH ?? ""}`,
+    ZTS_ZEN_APP_SUPPORT_DIR: fixture.appSupportDir,
+    ZTS_STATE_DIR: fixture.stateDir,
+    ZTS_CONFIG_PATH: fixture.configPath
+  };
+  const base = ["dist/cli.js", "sort", "--all", "--engine", "rules", "--preview", "--json"];
+  const defaultPreview = spawnSync("node", base, { env, encoding: "utf8" });
+  assert.equal(defaultPreview.status, 0, `${defaultPreview.stdout}\n${defaultPreview.stderr}`);
+  const defaultJson = JSON.parse(defaultPreview.stdout);
+  const pinnedRef = defaultJson.data.snapshot.entities.find((entity) => entity.nativeId === "tab-pinned-github").ref;
+  const essentialRef = defaultJson.data.snapshot.entities.find((entity) => entity.nativeId === "tab-essential-framer").ref;
+  assert.equal(actionFor(defaultJson.data.plan, pinnedRef).disposition, "protected");
+  assert.equal(actionFor(defaultJson.data.plan, essentialRef).disposition, "protected");
+
+  const includedPreview = spawnSync(
+    "node",
+    [...base.slice(0, -1), "--include-pinned", "--include-essentials", "--json"],
+    { env, encoding: "utf8" }
+  );
+  assert.equal(includedPreview.status, 0, `${includedPreview.stdout}\n${includedPreview.stderr}`);
+  const includedJson = JSON.parse(includedPreview.stdout);
+  for (const ref of [pinnedRef, essentialRef]) {
+    const action = actionFor(includedJson.data.plan, ref);
+    assert.equal(action.disposition, "move");
+    assert.equal(action.operation.precondition.entityProtection.protected, true);
+    assert.match(action.operation.precondition.entityProtection.requiredGrantId, /^grant:/);
+  }
+});
+
 async function makeDailySortFixture() {
   const temp = await mkdtemp(join(tmpdir(), "zts-daily-sort-"));
   const appSupportDir = join(temp, "zen");
@@ -150,6 +220,8 @@ async function makeDailySortFixture() {
       { zenSyncId: "tab-stash-github", zenWorkspace: "w-stash", pinned: false, entries: [{ url: "https://github.com/1Pio/private", title: "Protected Stash tab" }] },
       { zenSyncId: "tab-portfolio-github", zenWorkspace: "w-portfolio", pinned: false, entries: [{ url: "https://github.com/1Pio/zen-tab-steward", title: "Cross-workspace rule" }] },
       { zenSyncId: "tab-tools-framer", zenWorkspace: "w-tools", pinned: false, entries: [{ url: "https://framer.com/templates", title: "Another cross-workspace rule" }] }
+      ,{ zenSyncId: "tab-pinned-github", zenWorkspace: "w-space", pinned: true, entries: [{ url: "https://github.com/1Pio/pinned", title: "Pinned development tab" }] }
+      ,{ zenSyncId: "tab-essential-framer", zenWorkspace: "w-space", pinned: false, zenEssential: true, entries: [{ url: "https://framer.com/essential", title: "Essential portfolio tab" }] }
     ],
     folders: [],
     groups: [],
@@ -159,4 +231,10 @@ async function makeDailySortFixture() {
   await writeFile(join(profilePath, "sessionstore-backups", "recovery.jsonlz4"), "recovery");
   await writeFile(join(profilePath, "sessionstore-backups", "previous.jsonlz4"), "previous");
   return { temp, appSupportDir, profilePath, sessionPath, stateDir, binDir, configPath };
+}
+
+function actionFor(plan, entityRef) {
+  return plan.actions.find((action) =>
+    (action.disposition === "move" ? action.operation.entityRef : action.entityRef) === entityRef
+  );
 }

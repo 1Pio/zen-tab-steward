@@ -34,11 +34,33 @@ export interface ResolvedPlan extends StoredPlan {
   readonly resolution: "created" | "reused_latest";
 }
 
+export type PlanReuseErrorCode = "PLAN_PREVIEW_REQUIRED" | "PLAN_SNAPSHOT_DRIFT" | "PLAN_EXPIRED";
+
+export class PlanReuseError extends Error {
+  readonly code: PlanReuseErrorCode;
+  readonly storedPlan: StoredPlan | null;
+  readonly currentSnapshotRevision: Sha256Digest;
+
+  constructor(
+    code: PlanReuseErrorCode,
+    message: string,
+    currentSnapshotRevision: Sha256Digest,
+    storedPlan: StoredPlan | null
+  ) {
+    super(message);
+    this.name = "PlanReuseError";
+    this.code = code;
+    this.currentSnapshotRevision = currentSnapshotRevision;
+    this.storedPlan = storedPlan;
+  }
+}
+
 export async function resolveOrCreatePlan(
   snapshot: Snapshot,
   requestRevision: Sha256Digest,
   create: () => Plan,
-  now = new Date()
+  now = new Date(),
+  policy: "create_or_reuse" | "require_existing" = "create_or_reuse"
 ): Promise<ResolvedPlan> {
   assertDigest(requestRevision, "Plan request revision");
   const layout = await planLayout(snapshot.profile.id);
@@ -46,15 +68,44 @@ export async function resolveOrCreatePlan(
   const existing = await readPointerIfPresent(requestPointerPath);
   if (existing && existing.requestRevision === requestRevision) {
     const stored = await readStoredPlan(layout, existing.planDigest);
+    if (stored.requestRevision !== requestRevision || stored.plan.profileId !== snapshot.profile.id) {
+      throw new Error("Stored Plan request or Profile binding does not match its pointer");
+    }
     if (
-      stored.requestRevision === requestRevision
-      && stored.plan.profileId === snapshot.profile.id
-      && stored.plan.snapshotRevision === snapshot.revision
-      && Date.parse(stored.plan.expiresAt) > now.getTime()
+      stored.plan.snapshotRevision !== snapshot.revision
+      || stored.plan.snapshotAuthority !== snapshot.authority
+      || stored.plan.snapshotFreshness !== snapshot.freshness
     ) {
+      if (policy === "require_existing") {
+        throw new PlanReuseError(
+          "PLAN_SNAPSHOT_DRIFT",
+          `Snapshot Drift: reviewed Plan ${stored.plan.digest} binds ${stored.plan.snapshotRevision}, current Snapshot is ${snapshot.revision}`,
+          snapshot.revision,
+          stored
+        );
+      }
+    } else if (Date.parse(stored.plan.expiresAt) <= now.getTime()) {
+      if (policy === "require_existing") {
+        throw new PlanReuseError(
+          "PLAN_EXPIRED",
+          `Reviewed Plan ${stored.plan.digest} expired at ${stored.plan.expiresAt}; create a fresh preview`,
+          snapshot.revision,
+          stored
+        );
+      }
+    } else {
       definePlanForSnapshot(snapshot, stored.plan);
       return { ...stored, resolution: "reused_latest" };
     }
+  }
+
+  if (policy === "require_existing") {
+    throw new PlanReuseError(
+      "PLAN_PREVIEW_REQUIRED",
+      "No matching reviewed Plan exists; create a preview before requesting dry-run or apply",
+      snapshot.revision,
+      null
+    );
   }
 
   const plan = definePlanForSnapshot(snapshot, create());

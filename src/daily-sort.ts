@@ -21,6 +21,7 @@ export interface DailySortRequest {
   readonly includePinned: boolean;
   readonly includeEssentials: boolean;
   readonly autoApplyRequested: boolean;
+  readonly planMode: "create_or_reuse" | "require_existing";
 }
 
 export interface DailySortPlanResult {
@@ -83,7 +84,8 @@ export async function planDailySort(
     snapshot,
     requestRevision,
     () => createRulesPlan(snapshot, { ...rulesOptions, now }),
-    now
+    now,
+    request.planMode
   );
   return {
     snapshot,

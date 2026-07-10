@@ -1,5 +1,5 @@
-import { constants } from "node:fs";
-import { chmod, link, lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { constants, type Stats } from "node:fs";
+import { chmod, link, lstat, mkdir, open, rename, rm } from "node:fs/promises";
 import { dirname, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -103,23 +103,39 @@ async function writeSyncedTemporary(path: string, contents: string): Promise<voi
 }
 
 async function readPrivateText(path: string, maxBytes: number): Promise<string> {
-  const metadata = await lstat(path);
-  if (metadata.isSymbolicLink() || !metadata.isFile()) {
-    throw new Error(`Private artifact is not a regular file: ${path}`);
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error("Private artifact read limit must be a positive integer");
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const before = await handle.stat();
+    assertPrivateFileMetadata(before, path);
+    if (before.size > maxBytes) throw new Error(`Private artifact exceeds the ${maxBytes}-byte read limit: ${path}`);
+    await handle.chmod(FILE_MODE);
+    const contents = await handle.readFile("utf8");
+    const after = await handle.stat();
+    assertPrivateFileMetadata(after, path);
+    if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || Buffer.byteLength(contents) !== after.size) {
+      throw new Error(`Private artifact changed while it was being read: ${path}`);
+    }
+    return contents;
+  } finally {
+    await handle.close();
   }
-  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || metadata.size > maxBytes) {
-    throw new Error(`Private artifact exceeds the ${maxBytes}-byte read limit: ${path}`);
-  }
-  await chmod(path, FILE_MODE);
-  return readFile(path, "utf8");
 }
 
 async function enforcePrivateFile(path: string): Promise<void> {
-  const metadata = await lstat(path);
-  if (metadata.isSymbolicLink() || !metadata.isFile()) {
-    throw new Error(`Private artifact is not a regular file: ${path}`);
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    assertPrivateFileMetadata(await handle.stat(), path);
+    await handle.chmod(FILE_MODE);
+    assertPrivateFileMetadata(await handle.stat(), path);
+  } finally {
+    await handle.close();
   }
-  await chmod(path, FILE_MODE);
+}
+
+function assertPrivateFileMetadata(metadata: Stats, path: string): void {
+  if (!metadata.isFile()) throw new Error(`Private artifact is not a regular file: ${path}`);
+  if (metadata.nlink !== 1) throw new Error(`Private artifact has an unexpected hardlink count: ${path}`);
 }
 
 async function syncDirectory(path: string): Promise<void> {

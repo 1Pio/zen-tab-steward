@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readdir, stat, symlink } from "node:fs/promises";
+import { link, mkdtemp, mkdir, readdir, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -23,6 +23,11 @@ test("private JSON artifacts enforce owner-only durable publication and reject s
   assert.equal((await stat(objectPath)).mode & 0o777, 0o600);
   assert.equal((await stat(pointerPath)).mode & 0o777, 0o600);
   assert.equal((await readdir(plans)).some((entry) => entry.startsWith(".tmp-")), false);
+
+  const hardlinkPath = join(temp, "artifact-hardlink.json");
+  await link(objectPath, hardlinkPath);
+  await assert.rejects(() => readPrivateJson(objectPath), /unexpected hardlink count/);
+  await rm(hardlinkPath);
 
   const outside = join(temp, "outside");
   const linkedRoot = join(temp, "linked-state");
