@@ -87,7 +87,7 @@ Plain `zts sort [workspace]`, `--preview`, and `--dry-run` are read-only. Previe
 ~/.config/zen-tab-steward/config.toml
 ```
 
-Supported keys include `defaults.inbox`, `defaults.min_confidence`, `defaults.include_pinned`, `defaults.include_essentials`, `defaults.apply_backend`, `sort.from`, `sort.to`, `sort.not_to`, `sort.only`, `sort.except`, `protect.workspaces.from`, `protect.workspaces.to`, and `protect.domains.never_move`.
+Supported keys include `defaults.inbox`, `defaults.min_confidence`, `defaults.include_pinned`, `defaults.include_essentials`, `defaults.apply_backend`, `sort.from`, `sort.to`, `sort.not_to`, `sort.only`, `sort.except`, `semantic.enabled`, `semantic.engine`, `semantic.suggestion_threshold`, `semantic.auto_apply`, `semantic.auto_apply_threshold`, `semantic.minimum_margin`, `semantic.max_moves`, `protect.workspaces.from`, `protect.workspaces.to`, and `protect.domains.never_move`.
 
 `zts rules` manages deterministic domain routing rules:
 

@@ -25,6 +25,15 @@ not_to = ["Stash"]
 only = ["github.com"]
 except = ["youtube.com"]
 
+[semantic]
+enabled = true
+engine = "hybrid"
+suggestion_threshold = 0.75
+auto_apply = true
+auto_apply_threshold = 0.93
+minimum_margin = 0.21
+max_moves = 3
+
 [rules.domains]
 "example.com" = "Portfolio"
 `);
@@ -38,8 +47,17 @@ except = ["youtube.com"]
   assert.deepEqual(config.sort.notTo, ["Stash"]);
   assert.deepEqual(config.sort.only, ["github.com"]);
   assert.deepEqual(config.sort.except, ["youtube.com"]);
+  assert.equal(config.semantic.enabled, true);
+  assert.equal(config.semantic.engine, "hybrid");
+  assert.equal(config.semantic.suggestionThreshold, 0.75);
+  assert.equal(config.semantic.autoApply, true);
+  assert.equal(config.semantic.autoApplyThreshold, 0.93);
+  assert.equal(config.semantic.minimumMargin, 0.21);
+  assert.equal(config.semantic.maxMoves, 3);
   assert.equal(config.rules.domains["example.com"], "Portfolio");
   assert.match(formatConfig(config), /from = \["Space"]/);
+  assert.match(formatConfig(config), /\[semantic]/);
+  assert.match(formatConfig(config), /auto_apply_threshold = 0.93/);
   assert.match(formatConfig(config), /"example.com" = "Portfolio"/);
 });
 
@@ -47,11 +65,13 @@ test("gets, sets, and adds supported config values", () => {
   const withInbox = setConfigValue(parseConfig(""), "defaults.inbox", "Inbox");
   const withConfidence = setConfigValue(withInbox, "defaults.min_confidence", "0.7");
   const withSourceAllowlist = setConfigValue(withConfidence, "sort.from", "Space,Inbox");
-  const withRule = addDomainRule(withSourceAllowlist, "docs.example.com", "Research");
+  const withSemantic = setConfigValue(withSourceAllowlist, "semantic.auto_apply_threshold", "0.94");
+  const withRule = addDomainRule(withSemantic, "docs.example.com", "Research");
 
   assert.equal(getConfigValue(withRule, "defaults.inbox"), "Inbox");
   assert.equal(getConfigValue(withRule, "defaults.min_confidence"), 0.7);
   assert.deepEqual(getConfigValue(withRule, "sort.from"), ["Space", "Inbox"]);
+  assert.equal(getConfigValue(withRule, "semantic.auto_apply_threshold"), 0.94);
   assert.equal(getConfigValue(withRule, "rules.domains.docs.example.com"), "Research");
 });
 
@@ -64,6 +84,9 @@ test("patches supported values without dropping comments or unknown sections", (
     "[sort]",
     "from = [\"Space\"]",
     "to = [\"Portfolio\"]",
+    "",
+    "[semantic]",
+    "auto_apply = false # gated",
     "",
     "[rules.domains]",
     "\"github.com\" = \"Tool Development\"",
@@ -78,6 +101,8 @@ test("patches supported values without dropping comments or unknown sections", (
   assert.match(withRule, /from = \["Space"]/);
   assert.match(withRule, /to = \["Portfolio"]/);
   assert.match(withRule, /min_confidence = 0.9/);
+  const withSemantic = setConfigValueInContents(withRule, "semantic.auto_apply", "true");
+  assert.match(withSemantic, /auto_apply = true # gated/);
   assert.match(withRule, /"docs.example.com" = "Research"/);
 });
 

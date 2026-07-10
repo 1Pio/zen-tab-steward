@@ -17,6 +17,15 @@ export interface ZtsConfig {
     only: string[];
     except: string[];
   };
+  semantic: {
+    enabled: boolean;
+    engine: "lexical" | "bge_small" | "hybrid";
+    suggestionThreshold: number;
+    autoApply: boolean;
+    autoApplyThreshold: number;
+    minimumMargin: number;
+    maxMoves: number;
+  };
   protect: {
     workspaces: {
       from: string[];
@@ -52,6 +61,15 @@ export const DEFAULT_CONFIG: ZtsConfig = {
     notTo: [],
     only: [],
     except: []
+  },
+  semantic: {
+    enabled: false,
+    engine: "bge_small",
+    suggestionThreshold: 0.72,
+    autoApply: false,
+    autoApplyThreshold: 0.92,
+    minimumMargin: 0.18,
+    maxMoves: 5
   },
   protect: {
     workspaces: {
@@ -115,6 +133,7 @@ export function parseConfig(contents: string): ZtsConfig {
 
     if (section === "defaults") setDefault(config, key, value);
     if (section === "sort") setSort(config, key, value);
+    if (section === "semantic") setSemantic(config, key, value);
     if (section === "protect.workspaces") setProtectWorkspace(config, key, value);
     if (section === "protect.domains") setProtectDomain(config, key, value);
     if (section === "rules.domains" && typeof value === "string") config.rules.domains[key] = value;
@@ -138,6 +157,15 @@ export function formatConfig(config: ZtsConfig): string {
     `not_to = ${formatArray(config.sort.notTo)}`,
     `only = ${formatArray(config.sort.only)}`,
     `except = ${formatArray(config.sort.except)}`,
+    "",
+    "[semantic]",
+    `enabled = ${formatPrimitive(config.semantic.enabled)}`,
+    `engine = ${quote(config.semantic.engine)}`,
+    `suggestion_threshold = ${formatPrimitive(config.semantic.suggestionThreshold)}`,
+    `auto_apply = ${formatPrimitive(config.semantic.autoApply)}`,
+    `auto_apply_threshold = ${formatPrimitive(config.semantic.autoApplyThreshold)}`,
+    `minimum_margin = ${formatPrimitive(config.semantic.minimumMargin)}`,
+    `max_moves = ${formatPrimitive(config.semantic.maxMoves)}`,
     "",
     "[protect.workspaces]",
     `from = ${formatArray(config.protect.workspaces.from)}`,
@@ -167,6 +195,13 @@ export function getConfigValue(config: ZtsConfig, keyPath: string): unknown {
   if (keyPath === "sort.not_to") return config.sort.notTo;
   if (keyPath === "sort.only") return config.sort.only;
   if (keyPath === "sort.except") return config.sort.except;
+  if (keyPath === "semantic.enabled") return config.semantic.enabled;
+  if (keyPath === "semantic.engine") return config.semantic.engine;
+  if (keyPath === "semantic.suggestion_threshold") return config.semantic.suggestionThreshold;
+  if (keyPath === "semantic.auto_apply") return config.semantic.autoApply;
+  if (keyPath === "semantic.auto_apply_threshold") return config.semantic.autoApplyThreshold;
+  if (keyPath === "semantic.minimum_margin") return config.semantic.minimumMargin;
+  if (keyPath === "semantic.max_moves") return config.semantic.maxMoves;
   if (keyPath === "protect.workspaces.from") return config.protect.workspaces.from;
   if (keyPath === "protect.workspaces.to") return config.protect.workspaces.to;
   if (keyPath === "protect.domains.never_move") return config.protect.domains.neverMove;
@@ -188,6 +223,13 @@ export function setConfigValue(config: ZtsConfig, keyPath: string, rawValue: str
   else if (keyPath === "sort.not_to") next.sort.notTo = parseStringArray(rawValue);
   else if (keyPath === "sort.only") next.sort.only = parseStringArray(rawValue);
   else if (keyPath === "sort.except") next.sort.except = parseStringArray(rawValue);
+  else if (keyPath === "semantic.enabled") next.semantic.enabled = parseBoolean(rawValue);
+  else if (keyPath === "semantic.engine") next.semantic.engine = parseSemanticEngine(rawValue);
+  else if (keyPath === "semantic.suggestion_threshold") next.semantic.suggestionThreshold = parseConfidence(rawValue);
+  else if (keyPath === "semantic.auto_apply") next.semantic.autoApply = parseBoolean(rawValue);
+  else if (keyPath === "semantic.auto_apply_threshold") next.semantic.autoApplyThreshold = parseConfidence(rawValue);
+  else if (keyPath === "semantic.minimum_margin") next.semantic.minimumMargin = parseConfidence(rawValue);
+  else if (keyPath === "semantic.max_moves") next.semantic.maxMoves = parseMoveCap(rawValue);
   else if (keyPath === "protect.workspaces.from") next.protect.workspaces.from = parseStringArray(rawValue);
   else if (keyPath === "protect.workspaces.to") next.protect.workspaces.to = parseStringArray(rawValue);
   else if (keyPath === "protect.domains.never_move") next.protect.domains.neverMove = parseStringArray(rawValue);
@@ -223,6 +265,13 @@ function configPatchForSet(keyPath: string, rawValue: string): { section: string
   if (keyPath === "sort.not_to") return { section: "sort", key: "not_to", value: formatArray(parseStringArray(rawValue)) };
   if (keyPath === "sort.only") return { section: "sort", key: "only", value: formatArray(parseStringArray(rawValue)) };
   if (keyPath === "sort.except") return { section: "sort", key: "except", value: formatArray(parseStringArray(rawValue)) };
+  if (keyPath === "semantic.enabled") return { section: "semantic", key: "enabled", value: formatPrimitive(parseBoolean(rawValue)) };
+  if (keyPath === "semantic.engine") return { section: "semantic", key: "engine", value: quote(parseSemanticEngine(rawValue)) };
+  if (keyPath === "semantic.suggestion_threshold") return { section: "semantic", key: "suggestion_threshold", value: formatPrimitive(parseConfidence(rawValue)) };
+  if (keyPath === "semantic.auto_apply") return { section: "semantic", key: "auto_apply", value: formatPrimitive(parseBoolean(rawValue)) };
+  if (keyPath === "semantic.auto_apply_threshold") return { section: "semantic", key: "auto_apply_threshold", value: formatPrimitive(parseConfidence(rawValue)) };
+  if (keyPath === "semantic.minimum_margin") return { section: "semantic", key: "minimum_margin", value: formatPrimitive(parseConfidence(rawValue)) };
+  if (keyPath === "semantic.max_moves") return { section: "semantic", key: "max_moves", value: formatPrimitive(parseMoveCap(rawValue)) };
   if (keyPath === "protect.workspaces.from") return { section: "protect.workspaces", key: "from", value: formatArray(parseStringArray(rawValue)) };
   if (keyPath === "protect.workspaces.to") return { section: "protect.workspaces", key: "to", value: formatArray(parseStringArray(rawValue)) };
   if (keyPath === "protect.domains.never_move") return { section: "protect.domains", key: "never_move", value: formatArray(parseStringArray(rawValue)) };
@@ -286,6 +335,16 @@ function setSort(config: ZtsConfig, key: string, value: unknown): void {
   if (key === "not_to") config.sort.notTo = parseStringArray(value);
   if (key === "only") config.sort.only = parseStringArray(value);
   if (key === "except") config.sort.except = parseStringArray(value);
+}
+
+function setSemantic(config: ZtsConfig, key: string, value: unknown): void {
+  if (key === "enabled") config.semantic.enabled = parseBoolean(String(value));
+  if (key === "engine" && typeof value === "string") config.semantic.engine = parseSemanticEngine(value);
+  if (key === "suggestion_threshold") config.semantic.suggestionThreshold = parseConfidence(String(value));
+  if (key === "auto_apply") config.semantic.autoApply = parseBoolean(String(value));
+  if (key === "auto_apply_threshold") config.semantic.autoApplyThreshold = parseConfidence(String(value));
+  if (key === "minimum_margin") config.semantic.minimumMargin = parseConfidence(String(value));
+  if (key === "max_moves") config.semantic.maxMoves = parseMoveCap(String(value));
 }
 
 function setProtectWorkspace(config: ZtsConfig, key: string, value: unknown): void {
@@ -386,6 +445,17 @@ function parseStringArray(value: unknown): string[] {
 function parseBackend(value: string): ZtsConfig["defaults"]["applyBackend"] {
   if (value === "auto" || value === "live" || value === "session") return value;
   throw new Error("apply_backend must be one of: auto, live, session");
+}
+
+function parseSemanticEngine(value: string): ZtsConfig["semantic"]["engine"] {
+  if (value === "lexical" || value === "bge_small" || value === "hybrid") return value;
+  throw new Error("semantic.engine must be one of: lexical, bge_small, hybrid");
+}
+
+function parseMoveCap(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) throw new Error("semantic.max_moves must be a whole number greater than or equal to 0");
+  return parsed;
 }
 
 function formatPrimitive(value: number | boolean): string {

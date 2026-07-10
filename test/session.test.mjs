@@ -85,6 +85,15 @@ test("adds workspace policy status from config", () => {
       only: [],
       except: []
     },
+    semantic: {
+      enabled: false,
+      engine: "bge_small",
+      suggestionThreshold: 0.72,
+      autoApply: false,
+      autoApplyThreshold: 0.92,
+      minimumMargin: 0.18,
+      maxMoves: 5
+    },
     protect: {
       workspaces: {
         from: ["Stash"],
