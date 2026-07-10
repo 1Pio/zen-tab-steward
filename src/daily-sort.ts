@@ -76,6 +76,8 @@ export async function planDailySort(
     only: request.only,
     except: request.except,
     protectedDomains: config.protect.domains.neverMove,
+    includePinned: request.includePinned,
+    includeEssentials: request.includeEssentials,
     limit: request.limit,
     autoApplyRequested: request.autoApplyRequested
   };

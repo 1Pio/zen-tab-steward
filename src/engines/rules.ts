@@ -35,6 +35,8 @@ export interface RulesPlanOptions {
   readonly only: readonly string[];
   readonly except: readonly string[];
   readonly protectedDomains: readonly string[];
+  readonly includePinned: boolean;
+  readonly includeEssentials: boolean;
   readonly limit: number | null;
   readonly autoApplyRequested: boolean;
   readonly now?: Date;
@@ -53,6 +55,8 @@ export function rulesPlanRequestRevision(options: Omit<RulesPlanOptions, "now">)
     only: [...options.only],
     except: [...options.except],
     protectedDomains: [...options.protectedDomains],
+    includePinned: options.includePinned,
+    includeEssentials: options.includeEssentials,
     limit: options.limit,
     autoApplyRequested: options.autoApplyRequested
   });
@@ -91,7 +95,7 @@ export function createRulesPlan(snapshot: Snapshot, options: RulesPlanOptions): 
       )));
       continue;
     }
-    if (entity.protection.protected) {
+    if (entity.protection.protected && !includedEntityProtection(entity.protection, options)) {
       actions.push(nonMoveAction(actionIdBase, entity, "protected", null, unknownDecision(
         entity,
         `Entity is protected: ${entity.protection.reasons.join(", ")}`,
@@ -372,6 +376,14 @@ function workspaceNames(workspaces: readonly Workspace[]): ReadonlyMap<string, W
 
 function entityMatchesAny(entity: Entity, patterns: readonly string[]): boolean {
   return entity.members.some((member) => matchesAny(member.url, patterns));
+}
+
+function includedEntityProtection(protection: Protection, options: Pick<RulesPlanOptions, "includePinned" | "includeEssentials">): boolean {
+  if (!protection.protected) return true;
+  return protection.reasons.every((reason) =>
+    (reason === "pinned" && options.includePinned)
+    || (reason === "essential" && options.includeEssentials)
+  );
 }
 
 function matchesAny(url: string, patterns: readonly string[]): boolean {
