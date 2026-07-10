@@ -99,6 +99,60 @@ test("CLI smokes cover help, version, status, workspaces, tabs, backup, and offl
   assert.equal(tabsJson.data.tabs.length, 3);
   assert.equal(tabsJson.data.tabs[0].workspaceName, "Space");
 
+  const snapshot = await execFileAsync("node", ["dist/cli.js", "snapshot", "--json"], { env });
+  const snapshotJson = JSON.parse(snapshot.stdout);
+  assert.equal(snapshotJson.ok, true);
+  assert.equal(snapshotJson.data.snapshot.authority, "authoritative");
+  const spaceWorkspace = snapshotJson.data.snapshot.workspaces.find((workspace) => workspace.name === "Space");
+  const portfolioWorkspace = snapshotJson.data.snapshot.workspaces.find((workspace) => workspace.name === "Portfolio");
+  assert.ok(spaceWorkspace);
+  assert.ok(portfolioWorkspace);
+  const manualEntity = snapshotJson.data.snapshot.entities.find((entity) =>
+    entity.kind === "tab" && entity.workspaceId === spaceWorkspace.id && !entity.protection.protected
+  );
+  assert.ok(manualEntity);
+  const manualPatch = {
+    operations: [
+      {
+        op: "move",
+        entityRef: manualEntity.ref,
+        expectedSourceWorkspaceId: spaceWorkspace.id,
+        destinationWorkspaceId: portfolioWorkspace.id,
+        reason: {
+          value: "Manual exact move from CLI smoke",
+          provenance: "caller_untrusted",
+          interpretation: "data_only",
+          referencedEntityRefs: [manualEntity.ref]
+        }
+      }
+    ]
+  };
+  const manualPlan = spawnSync("node", ["dist/cli.js", "patch", "plan", "-", "--json"], {
+    env,
+    input: JSON.stringify(manualPatch),
+    encoding: "utf8"
+  });
+  assert.equal(manualPlan.status, 0);
+  const manualPlanJson = JSON.parse(manualPlan.stdout);
+  assert.equal(manualPlanJson.ok, true);
+  assert.equal(manualPlanJson.data.summary.moveCount, 1);
+  assert.equal(manualPlanJson.data.plan.source.kind, "manual_patch");
+  assert.equal(manualPlanJson.data.plan.actions[0].operation.entityRef, manualEntity.ref);
+  assert.equal(manualPlanJson.data.plan.actions[0].operation.expectedPostState.workspaceId, portfolioWorkspace.id);
+
+  const stalePatch = {
+    schemaVersion: "zts.patch.provisional-1",
+    snapshotRevision: "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    operations: manualPatch.operations
+  };
+  const stalePlan = spawnSync("node", ["dist/cli.js", "patch", "plan", "-", "--json"], {
+    env,
+    input: JSON.stringify(stalePatch),
+    encoding: "utf8"
+  });
+  assert.equal(stalePlan.status, 1);
+  assert.match(JSON.parse(stalePlan.stdout).blockers.join("\n"), /exact Snapshot/);
+
   const backup = await execFileAsync("node", ["dist/cli.js", "backup", "--json"], { env });
   const backupJson = JSON.parse(backup.stdout);
   assert.equal(backupJson.ok, true);

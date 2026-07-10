@@ -6,10 +6,14 @@ import { createBackup, listBackups, pruneBackups, restoreBackup } from "./backup
 import { inspectBridge, inspectLiveAttachment, runBridgeLiveMoveProof, runBridgeLiveReadProof, runBridgeProbe } from "./bridge.js";
 import { addDomainRuleInContents, getConfigValue, loadConfig, saveConfigContents, setConfigValueInContents, ZtsConfig } from "./config.js";
 import { envelope, formatApplyReceiptList, formatApplyVerification, formatBackup, formatBackupList, formatBackupPrune, formatBridge, formatBridgeLiveAttachment, formatBridgeLiveMove, formatBridgeLiveRead, formatBridgeProbe, formatRestore, formatReview, formatSortDryRun, formatSortPreview, formatStatus, formatTabs, formatWorkspaces, printJson } from "./output.js";
+import { createManualPlanFromInput, readPatchInput, snapshotFromSession } from "./manual.js";
 import { discoverProfileContext } from "./profile.js";
 import { listTabs, loadSession, loadSessionSummary, summarizeSession, withWorkspacePolicy } from "./session.js";
 import { classifyDomainForWorkspace, planSortPreview, SortInputs } from "./sort.js";
 import { VERSION } from "./version.js";
+
+import type { ManualPlanResult } from "./manual.js";
+import type { Snapshot } from "./domain/snapshot.js";
 
 interface JsonOption {
   json?: boolean;
@@ -296,6 +300,82 @@ program
         printJson(envelope("tabs", { profile: context.profile, zenRunning: context.running, workspace: workspace ?? null, tabs }));
       } else {
         process.stdout.write(`${formatTabs(tabs)}\n`);
+      }
+    });
+  });
+
+program
+  .command("snapshot")
+  .description("Print the normalized domain Snapshot used for exact manual Patch planning")
+  .option("--json", "print stable JSON output")
+  .action(async (options: JsonOption) => {
+    await runCommand("snapshot", options, async () => {
+      const context = await discoverProfileContext();
+      const loadedConfig = await loadConfig();
+      const session = await loadSession(context.sessionFile);
+      const summary = withWorkspacePolicy(summarizeSession(session, context.sessionFile), loadedConfig.config);
+      const snapshot = snapshotFromSession(context, session, summary);
+      const data = {
+        profile: context.profile,
+        zenRunning: context.running,
+        snapshot
+      };
+      const warnings = context.running
+        ? ["Zen is running; this Snapshot is a persisted observation and cannot be used for apply"]
+        : [];
+      const suggestedNextCommands = ["zts patch plan patch.json --json", "zts tabs --json"];
+      if (options.json) {
+        printJson(envelope("snapshot", data, { warnings, suggestedNextCommands }));
+      } else {
+        process.stdout.write(formatSnapshotSummary(snapshot, warnings, suggestedNextCommands));
+      }
+    });
+  });
+
+program
+  .command("patch")
+  .description("Plan exact manual tab moves from a Patch JSON file")
+  .argument("[action]", "plan")
+  .argument("[patch-file]", "Patch JSON path, or - for stdin")
+  .option("--json", "print stable JSON output")
+  .action(async (action: string | undefined, patchFile: string | undefined, options: JsonOption) => {
+    const selectedAction = action ?? "plan";
+    if (selectedAction !== "plan") {
+      const message = `unknown patch action '${selectedAction}'`;
+      if (options.json) {
+        printJson(envelope("patch", { action: selectedAction }, { ok: false, blockers: [message], suggestedNextCommands: ["zts patch plan <patch-file> --json"] }));
+      } else {
+        process.stderr.write(`zts: ${message}\n`);
+      }
+      process.exitCode = 1;
+      return;
+    }
+
+    await runCommand("patch plan", options, async () => {
+      if (!patchFile) throw new Error("Patch file is required; use - to read JSON from stdin");
+      const context = await discoverProfileContext();
+      const loadedConfig = await loadConfig();
+      const session = await loadSession(context.sessionFile);
+      const summary = withWorkspacePolicy(summarizeSession(session, context.sessionFile), loadedConfig.config);
+      const snapshot = snapshotFromSession(context, session, summary);
+      const patchInput = await readPatchInput(patchFile);
+      const result = createManualPlanFromInput(snapshot, patchInput);
+      const blockers = result.plan.snapshotAuthority === "authoritative" && result.plan.snapshotFreshness === "current"
+        ? []
+        : ["Patch Plan was created from a persisted observation and is not executable for apply"];
+      const suggestedNextCommands = blockers.length > 0
+        ? ["Quit Zen, then rerun zts snapshot --json and zts patch plan <patch-file> --json"]
+        : ["zts patch apply <patch-file> --yes", "zts snapshot --json"];
+      if (options.json) {
+        printJson(envelope("patch plan", { profile: context.profile, zenRunning: context.running, ...result }, {
+          ok: blockers.length === 0,
+          blockers,
+          suggestedNextCommands
+        }));
+        process.exitCode = blockers.length === 0 ? 0 : 2;
+      } else {
+        process.stdout.write(formatManualPlanSummary(result, blockers, suggestedNextCommands));
+        process.exitCode = blockers.length === 0 ? 0 : 2;
       }
     });
   });
@@ -837,6 +917,59 @@ function normalizeBackend(backend?: string): SortInputs["backend"] {
     return backend ?? "auto";
   }
   return backend as SortInputs["backend"];
+}
+
+function formatSnapshotSummary(snapshot: Snapshot, warnings: string[], suggestedNextCommands: string[]): string {
+  const lines = [
+    "Domain Snapshot",
+    `Profile: ${snapshot.profile.name} (${snapshot.profile.id})`,
+    `Revision: ${snapshot.revision}`,
+    `Authority: ${snapshot.authority}`,
+    `Freshness: ${snapshot.freshness}`,
+    `Control route: ${snapshot.provenance.route}`,
+    `Workspaces: ${snapshot.workspaces.length}`,
+    `Entities: ${snapshot.entities.length}`,
+    "",
+    "First entities:",
+    ...snapshot.entities.slice(0, 8).map((entity) => `  - ${entity.ref} -> ${entity.workspaceId} (${entity.kind}) ${terminalData(entity.title)}`)
+  ];
+  if (snapshot.entities.length > 8) lines.push(`  ... ${snapshot.entities.length - 8} more`);
+  if (warnings.length > 0) lines.push("", "Warnings:", ...warnings.map((warning) => `  - ${warning}`));
+  if (suggestedNextCommands.length > 0) lines.push("", "Next:", ...suggestedNextCommands.map((command) => `  ${command}`));
+  return `${lines.join("\n")}\n`;
+}
+
+function formatManualPlanSummary(result: ManualPlanResult, blockers: string[], suggestedNextCommands: string[]): string {
+  const lines = [
+    "Manual Patch Plan",
+    `Plan: ${result.plan.id}`,
+    `Digest: ${result.plan.digest}`,
+    `Snapshot: ${result.plan.snapshotRevision}`,
+    `Authority: ${result.plan.snapshotAuthority}`,
+    `Freshness: ${result.plan.snapshotFreshness}`,
+    `Moves: ${result.summary.moveCount}`,
+    `Protected: ${result.summary.protectedCount}`,
+    `Blocked: ${result.summary.blockedCount}`,
+    `Unchanged: ${result.summary.unchangedCount}`
+  ];
+  for (const action of result.plan.actions.slice(0, 12)) {
+    if (action.disposition === "move") {
+      lines.push(`  - move ${action.operation.entityRef} -> ${action.operation.expectedPostState.workspaceId}`);
+    } else {
+      lines.push(`  - ${action.disposition} ${action.entityRef} -> ${action.candidateDestinationWorkspaceId ?? "(none)"}`);
+    }
+  }
+  if (result.plan.actions.length > 12) lines.push(`  ... ${result.plan.actions.length - 12} more`);
+  if (blockers.length > 0) lines.push("", "Blockers:", ...blockers.map((blocker) => `  - ${blocker}`));
+  if (suggestedNextCommands.length > 0) lines.push("", "Next:", ...suggestedNextCommands.map((command) => `  ${command}`));
+  return `${lines.join("\n")}\n`;
+}
+
+function terminalData(value: string): string {
+  return value.replace(/[\u001B\u009B][[()\]#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, "")
+    .replace(/[\u0000-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function formatDomainRules(domainRules: Record<string, string>): string {
