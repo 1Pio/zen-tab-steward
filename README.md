@@ -79,6 +79,12 @@ Plain `zts sort [workspace]`, `--preview`, and `--dry-run` are read-only. Previe
 
 `zts review [workspace]` lists only the sort-plan items that need attention, including low-confidence items, move-limit overflow, and grouped/foldered aggregate entities. It is read-only and supports the same policy/filter flags as `zts sort`.
 
+`zts snapshot --json` prints the normalized domain Snapshot with stable `entity:root:*` references for exact manual Patch planning. If Zen is running, the Snapshot is marked as a persisted observation and is not executable for apply.
+
+`zts patch plan <patch-file|-> --json` validates a caller-authored Patch against the current Snapshot and returns a digest-bound manual Plan. A Patch can be a draft with only `operations`, or a full Patch with `schemaVersion` and `snapshotRevision`; stale full Patches are refused. Patch reasons remain `caller_untrusted` data and referenced Entity refs must exist in the Snapshot.
+
+`zts patch apply <patch-file|-> --yes --json` applies executable manual Patch moves through the closed-session route only. It requires Zen to be closed, creates a backup and pre-mutation journal, verifies the moved tab state, and writes a typed domain Receipt. `zts patch receipts --json` lists those manual Patch apply receipts.
+
 `zts apply list` lists sort-apply receipts for the discovered profile. Session receipts are reverified against the current selected session file with `zts apply verify <receipt-id>`, which exits with status `2` if recorded moves no longer match. Live receipts are reverified through a read-only live bridge check when the live attachment gate passes; if the current Zen process is not attachable, verification refuses with the live-check blockers instead of reading stale session files.
 
 `zts config` inspects and updates the user config at:
