@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawnSync } from "node:child_process";
-import { chmod, mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -313,6 +313,155 @@ test("exact confirmed subset Plan applies only its selected Operations and write
   assert.equal(verifyJson.data.report.verification.mismatchCount, 0);
 });
 
+test("saved Plan apply requires exact digest consent before creating a transaction", async () => {
+  const fixture = await makeDailySortFixture();
+  const env = dailySortEnv(fixture);
+  const preview = spawnSync(
+    "node",
+    ["dist/cli.js", "sort", "--all", "--engine", "rules", "--preview", "--json"],
+    { env, encoding: "utf8" }
+  );
+  assert.equal(preview.status, 0, `${preview.stdout}\n${preview.stderr}`);
+  const before = await readFile(fixture.sessionPath);
+
+  const missing = spawnSync("node", ["dist/cli.js", "apply", "latest", "--yes", "--json"], {
+    env,
+    encoding: "utf8"
+  });
+  assert.equal(missing.status, 1, `${missing.stdout}\n${missing.stderr}`);
+  assert.match(JSON.parse(missing.stdout).blockers.join("\n"), /requires --expect-digest/);
+
+  const wrong = spawnSync(
+    "node",
+    ["dist/cli.js", "apply", "latest", "--yes", "--expect-digest", `sha256:${"0".repeat(64)}`, "--json"],
+    { env, encoding: "utf8" }
+  );
+  assert.equal(wrong.status, 1, `${wrong.stdout}\n${wrong.stderr}`);
+  assert.match(JSON.parse(wrong.stdout).blockers.join("\n"), /does not match selected Plan/);
+  assert.deepEqual(await readFile(fixture.sessionPath), before);
+  await assert.rejects(() => readdir(join(fixture.stateDir, "apply-transactions")), /ENOENT/);
+});
+
+test("confirmed saved Plan apply fails the whole Plan on Snapshot Drift", async () => {
+  const fixture = await makeDailySortFixture();
+  const env = dailySortEnv(fixture);
+  const preview = spawnSync(
+    "node",
+    ["dist/cli.js", "sort", "--all", "--engine", "rules", "--preview", "--json"],
+    { env, encoding: "utf8" }
+  );
+  assert.equal(preview.status, 0, `${preview.stdout}\n${preview.stderr}`);
+  const previewJson = JSON.parse(preview.stdout);
+  const selected = previewJson.data.plan.actions.filter((action) => action.disposition === "move").slice(0, 2);
+  const derive = spawnSync(
+    "node",
+    ["dist/cli.js", "apply", "latest", "--actions", selected.map((action) => action.actionId).join(","), "--json"],
+    { env, encoding: "utf8" }
+  );
+  assert.equal(derive.status, 2, `${derive.stdout}\n${derive.stderr}`);
+  const derivedPlan = JSON.parse(derive.stdout).data.plan;
+
+  const drifted = await readJsonLz4(fixture.sessionPath);
+  const firstNativeId = previewJson.data.snapshot.entities.find(
+    (entity) => entity.ref === selected[0].operation.entityRef
+  ).nativeId;
+  drifted.tabs.find((tab) => tab.zenSyncId === firstNativeId).zenWorkspace = "w-stash";
+  await writeJsonLz4(fixture.sessionPath, drifted);
+  const beforeApply = await readFile(fixture.sessionPath);
+
+  const apply = spawnSync(
+    "node",
+    ["dist/cli.js", "apply", derivedPlan.id, "--yes", "--expect-digest", derivedPlan.digest, "--json"],
+    { env, encoding: "utf8" }
+  );
+  assert.equal(apply.status, 2, `${apply.stdout}\n${apply.stderr}`);
+  assert.match(JSON.parse(apply.stdout).blockers.join("\n"), /exact Snapshot|bound to the supplied exact Snapshot/);
+  assert.deepEqual(await readFile(fixture.sessionPath), beforeApply);
+});
+
+test("closed-session transaction refuses when Zen starts before confirmed apply", async () => {
+  const fixture = await makeDailySortFixture();
+  const env = dailySortEnv(fixture);
+  const preview = spawnSync(
+    "node",
+    ["dist/cli.js", "sort", "--all", "--engine", "rules", "--preview", "--json"],
+    { env, encoding: "utf8" }
+  );
+  assert.equal(preview.status, 0, `${preview.stdout}\n${preview.stderr}`);
+  const plan = JSON.parse(preview.stdout).data.plan;
+  const before = await readFile(fixture.sessionPath);
+  await writeFile(
+    join(fixture.binDir, "ps"),
+    `#!/bin/sh\nprintf '%s\\n' '4242 /Applications/Zen.app/Contents/MacOS/zen --profile ${fixture.profilePath}'\n`
+  );
+
+  const apply = spawnSync(
+    "node",
+    ["dist/cli.js", "apply", plan.id, "--yes", "--expect-digest", plan.digest, "--json"],
+    { env, encoding: "utf8" }
+  );
+  assert.equal(apply.status, 2, `${apply.stdout}\n${apply.stderr}`);
+  assert.match(JSON.parse(apply.stdout).blockers.join("\n"), /Zen owns or may own the target Profile/);
+  assert.deepEqual(await readFile(fixture.sessionPath), before);
+});
+
+test("post-commit failure writes an interrupted Receipt with durable recovery evidence", async () => {
+  const fixture = await makeDailySortFixture();
+  const env = dailySortEnv(fixture);
+  const preview = spawnSync(
+    "node",
+    ["dist/cli.js", "sort", "--all", "--engine", "rules", "--preview", "--json"],
+    { env, encoding: "utf8" }
+  );
+  assert.equal(preview.status, 0, `${preview.stdout}\n${preview.stderr}`);
+  const plan = JSON.parse(preview.stdout).data.plan;
+  const script = [
+    'import { discoverProfileContext } from "./dist/profile.js";',
+    'import { loadStoredPlan } from "./dist/plans.js";',
+    'import { applyStoredPlanClosedSession } from "./dist/apply-transaction.js";',
+    "const context = await discoverProfileContext();",
+    `const stored = await loadStoredPlan(context.profile.id, ${JSON.stringify(plan.id)});`,
+    "const outcome = await applyStoredPlanClosedSession(context, stored, {",
+    `  expectedDigest: ${JSON.stringify(plan.digest)},`,
+    '  command: "fixture post-commit failure",',
+    '  afterCommit: () => { throw new Error("fixture failure after durable rename"); }',
+    "});",
+    "process.stdout.write(JSON.stringify(outcome));"
+  ].join("\n");
+  const run = spawnSync("node", ["--input-type=module", "--eval", script], {
+    cwd: process.cwd(),
+    env,
+    encoding: "utf8"
+  });
+  assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
+  const outcome = JSON.parse(run.stdout);
+  assert.equal(outcome.applied, false);
+  assert.match(outcome.blocker, /fixture failure after durable rename/);
+  assert.equal(outcome.receipt.outcome, "interrupted");
+  assert.equal(outcome.receipt.mutationAttempted, true);
+  assert.equal(outcome.receipt.netChanged, null);
+  assert.ok(outcome.receipt.backupArtifact);
+  assert.ok(outcome.receipt.recoveryArtifact);
+  assert.ok(outcome.receipt.operations.every((operation) =>
+    operation.status === "failed" && operation.mutationAttempted === true && operation.netChanged === null
+  ));
+
+  const list = await execFileAsync("node", ["dist/cli.js", "apply", "list", "--json"], { env });
+  const interrupted = JSON.parse(list.stdout).data.domainReceipts.find((receipt) => receipt.id === outcome.receipt.id);
+  assert.equal(interrupted.outcome, "interrupted");
+
+  const verify = spawnSync(
+    "node",
+    ["dist/cli.js", "apply", "verify", outcome.receipt.id, "--json"],
+    { env, encoding: "utf8" }
+  );
+  assert.equal(verify.status, 2, `${verify.stdout}\n${verify.stderr}`);
+  const verifyJson = JSON.parse(verify.stdout);
+  assert.equal(verifyJson.ok, false);
+  assert.equal(verifyJson.data.report.verification.checkedOperations, 0);
+  assert.match(verifyJson.blockers.join("\n"), /interrupted.+not a verified successful final state/);
+});
+
 async function makeDailySortFixture() {
   const temp = await mkdtemp(join(tmpdir(), "zts-daily-sort-"));
   const appSupportDir = join(temp, "zen");
@@ -393,6 +542,17 @@ async function makeDailySortFixture() {
   await writeFile(join(profilePath, "sessionstore-backups", "recovery.jsonlz4"), "recovery");
   await writeFile(join(profilePath, "sessionstore-backups", "previous.jsonlz4"), "previous");
   return { temp, appSupportDir, profilePath, sessionPath, stateDir, binDir, configPath };
+}
+
+function dailySortEnv(fixture) {
+  return {
+    ...process.env,
+    HOME: fixture.temp,
+    PATH: `${fixture.binDir}:${process.env.PATH ?? ""}`,
+    ZTS_ZEN_APP_SUPPORT_DIR: fixture.appSupportDir,
+    ZTS_STATE_DIR: fixture.stateDir,
+    ZTS_CONFIG_PATH: fixture.configPath
+  };
 }
 
 function actionFor(plan, entityRef) {

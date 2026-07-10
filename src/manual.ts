@@ -91,7 +91,11 @@ export async function listManualApplyReceipts(profileId: string): Promise<Manual
       const receipt = JSON.parse(await readFile(receiptPath, "utf8")) as Receipt;
       receipts.push({
         id: receipt.id,
-        kind: receipt.id.startsWith("receipt:manual:") ? "manual_patch" : receipt.id.startsWith("receipt:plan:") ? "saved_plan" : "unknown",
+        kind: receipt.id.startsWith("receipt:manual:")
+          ? "manual_patch"
+          : receipt.id.startsWith("receipt:plan:") || receipt.id.startsWith("receipt:apply:")
+            ? "saved_plan"
+            : "unknown",
         outcome: receipt.outcome,
         planId: receipt.planId,
         planDigest: receipt.planDigest,

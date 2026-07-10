@@ -855,6 +855,49 @@ test("Receipt constructor rejects false success and ungranted managed lifecycle"
   assert.throws(() => defineReceipt(snapshot, plan, authorization, expiredBeforeStart), /within the Authorization window/);
 });
 
+test("closed-session batch interruption records every simultaneously attempted Operation", () => {
+  const multi = multiActionPlanFixture(2);
+  const snapshot = multi.snapshot;
+  const plan = createPlan(snapshot, multi.plan);
+  const authorization = createApplyAuthorization(snapshot, plan, authorizationFixture(plan));
+  const receipt = blockedReceiptFixture(plan, authorization);
+  receipt.id = "receipt-closed-batch-interrupted";
+  receipt.outcome = "interrupted";
+  receipt.mutationAttempted = true;
+  receipt.netChanged = null;
+  receipt.control.exclusiveControlReleased = "verified";
+  receipt.backupArtifact = artifact("backup:closed-batch", "c");
+  receipt.recoveryArtifact = artifact("recovery:closed-batch", "d");
+  receipt.operations = plan.actions.map((action) => ({
+    actionId: action.actionId,
+    entityRef: action.operation.entityRef,
+    status: "failed",
+    mutationAttempted: true,
+    netChanged: null,
+    observedWorkspaceId: null,
+    issueCodes: ["atomic_batch_verification_unknown"]
+  }));
+  receipt.issues = [{
+    code: "atomic_batch_verification_unknown",
+    severity: "error",
+    message: ztsMessage("Closed-session batch committed but verification was interrupted"),
+    actionId: null
+  }];
+  assert.equal(defineReceipt(snapshot, plan, authorization, receipt).outcome, "interrupted");
+
+  const liveShape = structuredClone(receipt);
+  liveShape.control = {
+    route: "privileged_live",
+    proof: artifact("control:live-batch", "e"),
+    sessionBinding: "verified",
+    listenerShutdown: "verified"
+  };
+  assert.throws(
+    () => defineReceipt(snapshot, plan, authorization, liveShape),
+    /attempted after execution stopped/
+  );
+});
+
 test("Compensated Receipts preserve compensated, failed, and unattempted truth", () => {
   const multi = multiActionPlanFixture(3);
   const snapshot = multi.snapshot;

@@ -83,7 +83,17 @@ zts sort --all --engine rules --dry-run
 zts plan show latest
 ```
 
-Preview saves one owner-private, content-addressed domain Plan. Dry-run reuses that exact Plan and digest. If the Snapshot changes between the two commands, dry-run reports Snapshot Drift and preserves the reviewed Plan instead of silently regenerating it. Workspace Protection is directional, so a Workspace can remain usable as a source while protected as a destination. `--include-pinned` and `--include-essentials` may place those entities into the Plan, but their Operations retain Protection preconditions for later explicit grants. Engine Plan apply is not enabled yet; the current checkpoint is read-only for this new path.
+Preview saves one owner-private, content-addressed domain Plan. Dry-run reuses that exact Plan and digest. If the Snapshot changes between the two commands, dry-run reports Snapshot Drift and preserves the reviewed Plan instead of silently regenerating it. Workspace Protection is directional, so a Workspace can remain usable as a source while protected as a destination. `--include-pinned` and `--include-essentials` may place those entities into the Plan, but their Operations retain Protection preconditions for explicit authorization.
+
+Apply always targets one saved Plan. Calling `apply` without consent displays the exact digest and confirmation command. Selecting Operations first creates a new derived Plan with its own digest, which must be reviewed separately:
+
+```bash
+zts apply <plan-id>
+zts apply <plan-id> --actions <action-id>,<action-id>
+zts apply <derived-plan-id> --yes --expect-digest sha256:<exact-digest>
+```
+
+The production apply path currently uses the authoritative closed-Zen route for tab Operations. It acquires a per-Profile transaction lock, reacquires and preflights the whole Snapshot, publishes an owner-private backup and recovery descriptor, checks the source fingerprint immediately before an fsynced atomic write, rereads independently, and publishes a typed Receipt. Snapshot Drift, a running Zen process, or any unavailable capability blocks the whole Plan before mutation. A failure after the file commit produces an `interrupted` Receipt with recovery evidence rather than claiming success.
 
 Plain `zts sort [workspace]`, `--preview`, and `--dry-run` are read-only. Preview is glance-oriented; dry-run prints the full action list with reasons and explanations. Use `--limit <count>` to cap planned move actions for a controlled proof; eligible overflow actions are kept in review with reason `over_move_limit`. Mutation requires explicit `--apply`. Interactive terminal use asks for confirmation; JSON and other unattended use also requires `--yes`. The session backend applies only when Zen is closed and `zen-sessions.jsonlz4` is the selected session source. The live backend applies only when Zen is running, the live attachment gate passes, and every planned tab move passes exact URL/workspace protection checks.
 

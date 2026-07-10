@@ -1388,7 +1388,12 @@ function validateReceipt(plan: Plan, authorization: ApplyAuthorization, receipt:
       throw new Error(`Receipt Operation ${operation.actionId} does not match the Plan`);
     }
     validateOperationResult(operation, action);
-    if (executionStopped && operation.status !== "not_attempted") {
+    // Closed-session publication commits one complete session-file image, so
+    // every Operation in that image is attempted together before independent
+    // verification. Other routes remain strictly stop-after-first-failure.
+    const closedSessionBatchUncertain = receipt.control.route === "closed_session"
+      && (receipt.outcome === "interrupted" || receipt.outcome === "verification_failed");
+    if (executionStopped && operation.status !== "not_attempted" && !closedSessionBatchUncertain) {
       throw new Error(`Receipt Operation ${operation.actionId} was attempted after execution stopped`);
     }
     if (operation.status === "failed" || operation.status === "not_attempted") {

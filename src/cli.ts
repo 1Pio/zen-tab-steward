@@ -8,7 +8,11 @@ import { addDomainRuleInContents, getConfigValue, loadConfig, saveConfigContents
 import { planDailySort } from "./daily-sort.js";
 import { envelope, formatApplyReceiptList, formatApplyVerification, formatBackup, formatBackupList, formatBackupPrune, formatBridge, formatBridgeLiveAttachment, formatBridgeLiveMove, formatBridgeLiveRead, formatBridgeProbe, formatRestore, formatReview, formatSortDryRun, formatSortPreview, formatStatus, formatTabs, formatWorkspaces, printJson } from "./output.js";
 import { applyManualPatchOffline, createManualPlanFromInput, listManualApplyReceipts, readPatchInput, verifyDomainApplyReceipt } from "./manual.js";
-import { applySavedPlanWithProfileLock } from "./plan-apply.js";
+import {
+  applyStoredPlanClosedSession,
+  listTransactionReceipts,
+  verifyTransactionReceipt
+} from "./apply-transaction.js";
 import { deriveAndStoreSubsetPlan, loadStoredPlan, PlanReuseError } from "./plans.js";
 import { discoverProfileContext } from "./profile.js";
 import { listTabs, loadSession, loadSessionSummary, summarizeSession, withWorkspacePolicy } from "./session.js";
@@ -17,7 +21,7 @@ import { classifyDomainForWorkspace, planSortPreview, SortInputs } from "./sort.
 import { VERSION } from "./version.js";
 
 import type { DomainApplyVerificationReport, ManualApplyReceiptSummary, ManualApplyResult, ManualPlanResult } from "./manual.js";
-import type { SavedPlanApplyResult } from "./plan-apply.js";
+import type { ApplyTransactionResult } from "./apply-transaction.js";
 import type { DailySortPlanResult } from "./daily-sort.js";
 import type { Plan } from "./domain/change.js";
 import type { Entity, EntityRef, Snapshot } from "./domain/snapshot.js";
@@ -469,7 +473,10 @@ program
       await runCommand("apply list", options, async () => {
         const context = await discoverProfileContext();
         const receipts = await listApplyReceipts(context.profile.id);
-        const domainReceipts = await listManualApplyReceipts(context.profile.id);
+        const domainReceipts = [
+          ...await listTransactionReceipts(context.profile.id),
+          ...await listManualApplyReceipts(context.profile.id)
+        ];
         if (options.json) {
           printJson(envelope("apply list", { profile: context.profile, receipts, domainReceipts }));
         } else {
@@ -491,7 +498,15 @@ program
           const loadedConfig = await loadConfig();
           const session = await loadSession(context.sessionFile);
           const summary = withWorkspacePolicy(summarizeSession(session, context.sessionFile), loadedConfig.config);
-          const domainReport = await verifyDomainApplyReceipt(context, session, summary, receiptId);
+          let domainReport;
+          try {
+            domainReport = await verifyTransactionReceipt(context, session, summary, receiptId);
+          } catch (transactionError) {
+            if (!(transactionError instanceof Error) || !/Transaction apply receipt not found/.test(transactionError.message)) {
+              throw transactionError;
+            }
+            domainReport = await verifyDomainApplyReceipt(context, session, summary, receiptId);
+          }
           const ok = domainReport.verification.ok;
           if (options.json) {
             printJson(envelope("apply verify", { profile: context.profile, report: domainReport }, { ok, blockers: domainReport.verification.blockers }));
@@ -532,7 +547,10 @@ program
         if (options.expectDigest !== selected.plan.digest) {
           throw new Error(`Expected Plan digest ${options.expectDigest} does not match selected Plan ${selected.plan.digest}`);
         }
-        const result = await applySavedPlanWithProfileLock(context, selected.plan, applyPlanCommandForReceipt(selectedAction, options));
+        const result = await applyStoredPlanClosedSession(context, selected, {
+          expectedDigest: options.expectDigest,
+          command: applyPlanCommandForReceipt(selectedAction, options)
+        });
         const data = {
           profile: context.profile,
           originalPlan: original.plan,
@@ -541,10 +559,34 @@ program
           receipt: result.receipt,
           receiptPath: result.receiptPath,
           summary: result.summary,
-          applied: true
+          artifacts: result.artifacts,
+          applied: result.applied
         };
+        if (!result.applied) {
+          const suggestedNextCommands = [
+            "zts apply list --json",
+            "zts status --json",
+            "zts sort --all --engine rules --preview --json"
+          ];
+          if (options.json) {
+            printJson(envelope("apply plan", data, {
+              ok: false,
+              blockers: [result.blocker],
+              suggestedNextCommands
+            }));
+          } else {
+            process.stderr.write(`Saved Plan Apply blocked\n- ${result.blocker}\nReceipt: ${result.receipt.id}\n`);
+          }
+          process.exitCode = 2;
+          return;
+        }
         if (options.json) {
-          printJson(envelope("apply plan", data, { suggestedNextCommands: ["zts backup list --json", "zts plan show latest --json"] }));
+          printJson(envelope("apply plan", data, {
+            suggestedNextCommands: [
+              `zts apply verify ${shellQuote(result.receipt.id)} --json`,
+              "zts apply list --json"
+            ]
+          }));
         } else {
           process.stdout.write(formatSavedPlanApply(result));
         }
@@ -1220,7 +1262,7 @@ function dailySortNextCommands(
     commands.push(`Quit Zen, then rerun ${sortFollowUpCommand(options, sourceWorkspace, "--preview")}`);
     return commands;
   }
-  commands.push("Plan apply is not enabled for Engine Plans yet; use zts patch apply for exact manual Patch apply");
+  commands.push(`zts apply ${shellQuote(plan.id)}`);
   return commands;
 }
 
@@ -1360,7 +1402,7 @@ function formatManualApplySummary(result: ManualApplyResult, suggestedNextComman
   return `${lines.join("\n")}\n`;
 }
 
-function formatSavedPlanApply(result: SavedPlanApplyResult): string {
+function formatSavedPlanApply(result: ApplyTransactionResult): string {
   return `${[
     "Saved Plan Apply",
     `Receipt: ${result.receipt.id}`,

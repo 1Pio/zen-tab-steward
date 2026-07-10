@@ -33,6 +33,7 @@ export interface DurableJsonLz4WriteOptions {
     readonly temporaryPath: string;
     readonly encodedDigest: Sha256Digest;
   }) => Promise<void>;
+  readonly onCommitted?: () => void;
 }
 
 export function decodeJsonLz4Buffer(buffer: Buffer): unknown {
@@ -161,6 +162,7 @@ export async function writeJsonLz4Durable(
   try {
     await options.beforeCommit?.({ temporaryPath: tempPath, encodedDigest: sha256Bytes(encoded) });
     await rename(tempPath, path);
+    options.onCommitted?.();
     const directory = await open(parent, constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
       await directory.sync();
