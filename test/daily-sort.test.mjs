@@ -90,6 +90,71 @@ test("all-workspace preview and dry-run reuse one protected state-bound Plan", a
   assert.ok(latestJson.suggestedNextCommands.includes("zts sort --all --engine rules --dry-run"));
 });
 
+test("an authoritative multi-move Plan applies through one managed quit and relaunch Receipt", async () => {
+  const fixture = await makeDailySortFixture();
+  const env = dailySortEnv(fixture);
+  const plan = previewDailyPlan(env);
+  const moveCount = plan.actions.filter((action) => action.disposition === "move").length;
+  assert.ok(moveCount >= 2);
+  const script = managedApplyEvalScript(fixture, plan);
+  const applied = spawnSync("node", ["--input-type=module", "--eval", script], {
+    cwd: process.cwd(), env, encoding: "utf8"
+  });
+  assert.equal(applied.status, 0, `${applied.stdout}\n${applied.stderr}`);
+  const document = JSON.parse(applied.stdout);
+  assert.equal(document.authorization.lifecycle.kind, "managed_zen");
+  assert.match(document.authorization.lifecycle.grantRevision, /^sha256:[a-f0-9]{64}$/u);
+  assert.equal(document.receipt.outcome, "applied");
+  assert.equal(document.receipt.control.route, "managed_zen");
+  assert.equal(document.receipt.control.quit, "verified");
+  assert.equal(document.receipt.control.stateFlush, "verified");
+  assert.equal(document.receipt.control.profileRestoration, "verified");
+  assert.equal(document.receipt.control.relaunch, "verified");
+  assert.equal(document.receipt.control.windowRestoration, "verified");
+  assert.equal(document.receipt.operations.length, moveCount);
+  assert.ok(document.receipt.operations.every((operation) => operation.status === "verified"));
+});
+
+test("managed Apply refuses whole-Plan Drift before mutation and still restores Zen", async () => {
+  const fixture = await makeDailySortFixture();
+  const env = dailySortEnv(fixture);
+  const plan = previewDailyPlan(env);
+  const moveActions = plan.actions.filter((action) => action.disposition === "move");
+  assert.ok(moveActions.length >= 2);
+  const shown = spawnSync("node", ["dist/cli.js", "plan", "show", plan.id, "--json"], { env, encoding: "utf8" });
+  assert.equal(shown.status, 0, `${shown.stdout}\n${shown.stderr}`);
+  const planSnapshot = JSON.parse(shown.stdout).data.snapshot;
+  const sourceByNativeId = new Map(moveActions.map((action) => {
+    const entity = planSnapshot.entities.find((candidate) => candidate.ref === action.operation.entityRef);
+    assert.ok(entity?.nativeId);
+    return [entity.nativeId, action.operation.precondition.sourceWorkspace.workspaceId];
+  }));
+  const drifted = await readJsonLz4(fixture.sessionPath);
+  const unrelated = drifted.tabs.find((tab) => !sourceByNativeId.has(tab.zenSyncId));
+  assert.ok(unrelated);
+  unrelated.entries[0].title = `${unrelated.entries[0].title} drifted`;
+  await writeJsonLz4(fixture.sessionPath, drifted);
+
+  const blocked = spawnSync("node", ["--input-type=module", "--eval", managedApplyEvalScript(fixture, plan)], {
+    cwd: process.cwd(), env, encoding: "utf8"
+  });
+  assert.equal(blocked.status, 0, `${blocked.stdout}\n${blocked.stderr}`);
+  const document = JSON.parse(blocked.stdout);
+  assert.equal(document.receipt.outcome, "blocked");
+  assert.equal(document.receipt.control.route, "managed_zen");
+  assert.equal(document.receipt.control.quit, "verified");
+  assert.equal(document.receipt.control.stateFlush, "verified");
+  assert.equal(document.receipt.control.profileRestoration, "verified");
+  assert.equal(document.receipt.control.relaunch, "verified");
+  assert.equal(document.receipt.control.windowRestoration, "verified");
+  assert.ok(document.receipt.operations.every((operation) => operation.status === "not_attempted"));
+  const after = await readJsonLz4(fixture.sessionPath);
+  for (const [nativeId, sourceWorkspaceId] of sourceByNativeId) {
+    assert.equal(after.tabs.find((tab) => tab.zenSyncId === nativeId)?.zenWorkspace, sourceWorkspaceId);
+  }
+  assert.match(after.tabs.find((tab) => tab.zenSyncId === unrelated.zenSyncId).entries[0].title, /drifted$/u);
+});
+
 test("lexical all-workspace preview persists one reviewable Plan reused by dry-run", async () => {
   const fixture = await makeLexicalSortFixture();
   const env = dailySortEnv(fixture);
@@ -3006,7 +3071,7 @@ test("a crash immediately after Profile lock acquisition remains discoverable an
   assert.equal(list.status, 0, `${list.stdout}\n${list.stderr}`);
   const candidate = JSON.parse(list.stdout).data.recoveries[0];
   assert.equal(candidate.journalStage, "initialized");
-  assert.equal(candidate.classification, "unclassified");
+  assert.equal(candidate.classification, "before_state_present");
   assert.equal(candidate.lock.status, "stale");
   assert.equal(candidate.lock.transactionId, candidate.transactionId);
 
@@ -3432,7 +3497,7 @@ test("unfinished index recovers a crash before the transaction journal pointer e
   );
   assert.equal(candidate.journalStage, "initialized");
   assert.equal(candidate.lock.status, "absent");
-  assert.equal(candidate.classification, "unclassified");
+  assert.equal(candidate.classification, "before_state_present");
   const execute = executeRecovery(env, candidate);
   assert.equal(execute.status, 0, `${execute.stdout}\n${execute.stderr}`);
   const data = JSON.parse(execute.stdout).data;
@@ -4560,6 +4625,51 @@ async function planAndApplyManualMove(fixture, env, nativeId, destinationWorkspa
   ], { env, encoding: "utf8" });
   assert.equal(applied.status, 0, `${applied.stdout}\n${applied.stderr}`);
   return JSON.parse(applied.stdout).data.receipt;
+}
+
+function managedApplyEvalScript(fixture, plan) {
+  const executablePath = "/Applications/Zen.app/Contents/MacOS/zen";
+  return [
+    'import { applyStoredPlanClosedSession } from "./dist/apply-transaction.js";',
+    'import { parseZenProcessInventory } from "./dist/managed-zen-lifecycle.js";',
+    'import { discoverProfileContext } from "./dist/profile.js";',
+    'import { loadStoredPlan } from "./dist/plans.js";',
+    'let phase = "initial";',
+    `const profilePath = ${JSON.stringify(fixture.profilePath)};`,
+    `const executablePath = ${JSON.stringify(executablePath)};`,
+    'const inventory = (rootPid, childPid, second) => parseZenProcessInventory(`',
+    '${rootPid} 1 501 Sat Jul 11 16:${second}:24 2026 ${executablePath}',
+    '${childPid} ${rootPid} 501 Sat Jul 11 16:${second}:24 2026 /Applications/Zen.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container -profile ${profilePath} org.mozilla.machname.1 1 socket',
+    '`);',
+    'const platform = {',
+    '  async listProcesses() {',
+    '    if (phase === "closed") return [];',
+    '    return phase === "initial" ? inventory(100, 101, "27") : inventory(200, 201, "28");',
+    '  },',
+    '  async inspectApplication(pid) { return {',
+    '    pid, bundleIdentifier: "app.zen-browser.zen", executablePath, bundlePath: "/Applications/Zen.app",',
+    '    version: "1.19.3b", bundleVersion: "126.3.15", teamIdentifier: "9V5K9TP787",',
+    '    codeDirectoryHash: "8533af", executableDevice: 1, executableInode: 2, executableSize: 3, executableModifiedMs: 4',
+    '  }; },',
+    '  async inspectWindows() { return [{ visible: true, miniaturized: false, bounds: { x: 10, y: 10, width: 1000, height: 800 } }]; },',
+    '  async requestGracefulQuit() { phase = "closed"; return true; },',
+    '  async launch() { phase = "relaunched"; },',
+    '  async wait() {}',
+    '};',
+    'const discovered = await discoverProfileContext();',
+    'const context = { ...discovered, running: true };',
+    `const stored = await loadStoredPlan(context.profile.id, ${JSON.stringify(plan.id)});`,
+    'const result = await applyStoredPlanClosedSession(context, stored, {',
+    `  expectedDigest: ${JSON.stringify(plan.digest)},`,
+    '  command: "fixture managed multi-move Apply",',
+    '  managedLifecycle: {',
+    '    platform,',
+    '    request: { profilePath, executablePath, uid: 501, bundleIdentifier: "app.zen-browser.zen" },',
+    '    waitOptions: { timeoutMs: 100, pollMs: 1 }',
+    '  }',
+    '});',
+    'console.log(JSON.stringify({ authorization: result.authorization, receipt: result.receipt }));'
+  ].join("\n");
 }
 
 async function makeDailySortFixture() {

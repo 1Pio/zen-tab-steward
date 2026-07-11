@@ -13,6 +13,10 @@ import { safeArtifactSegment } from "./apply-artifacts.js";
 import { defineApplyJournal } from "./apply-journal.js";
 import { sha256Canonical } from "./domain/digest.js";
 import { defineInvocationConsent } from "./invocation-consent.js";
+import {
+  defineManagedZenLifecycleBinding,
+  managedZenGrantRevision
+} from "./managed-zen-lifecycle.js";
 
 import type { ApplyArtifactLayout } from "./apply-artifacts.js";
 import type { ApplyJournal } from "./apply-journal.js";
@@ -21,9 +25,11 @@ import type { Plan } from "./domain/change.js";
 import type { ArtifactReference } from "./domain/snapshot.js";
 import type { InvocationConsent } from "./invocation-consent.js";
 import type { PrivatePublicationHooks } from "./private-store.js";
+import type { ManagedZenLifecycleBinding } from "./managed-zen-lifecycle.js";
 
 const INDEX_SCHEMA = "zts.apply-unfinished-index.provisional-1" as const;
-const MARKER_SCHEMA = "zts.apply-unfinished-marker.provisional-2" as const;
+const LEGACY_MARKER_SCHEMA = "zts.apply-unfinished-marker.provisional-2" as const;
+const MARKER_SCHEMA = "zts.apply-unfinished-marker.provisional-3" as const;
 const INDEX_FILENAME = "index.json";
 const INDEX_MAX_BYTES = 8 * 1024;
 const MAX_UNFINISHED_ENTRIES = 256;
@@ -37,7 +43,7 @@ interface ApplyUnfinishedIndex {
 }
 
 export interface ApplyUnfinishedMarker {
-  readonly schemaVersion: typeof MARKER_SCHEMA;
+  readonly schemaVersion: typeof LEGACY_MARKER_SCHEMA | typeof MARKER_SCHEMA;
   readonly journal: ApplyJournal;
   readonly bootstrap: ApplyUnfinishedBootstrap;
 }
@@ -47,7 +53,17 @@ export interface ApplyUnfinishedBootstrap {
   readonly consentArtifact: ArtifactReference;
   readonly authorization: ApplyAuthorization;
   readonly authorizationArtifact: ArtifactReference;
+  readonly lifecycle:
+    | { readonly kind: "none" }
+    | {
+        readonly kind: "managed_zen";
+        readonly binding: ManagedZenLifecycleBinding;
+      };
 }
+
+export type ApplyUnfinishedBootstrapInput = Omit<ApplyUnfinishedBootstrap, "lifecycle"> & {
+  readonly lifecycle?: ApplyUnfinishedBootstrap["lifecycle"];
+};
 
 export interface PreparedApplyUnfinishedMarker {
   readonly transactionId: string;
@@ -99,7 +115,7 @@ export async function reconcileApplyUnfinishedIndexPublication(
 
 export function prepareApplyUnfinishedMarker(
   journal: ApplyJournal,
-  bootstrap: ApplyUnfinishedBootstrap,
+  bootstrap: ApplyUnfinishedBootstrapInput,
   plan: Plan
 ): PreparedApplyUnfinishedMarker {
   const initial = defineApplyJournal(structuredClone(journal));
@@ -109,7 +125,11 @@ export function prepareApplyUnfinishedMarker(
   if (plan.id !== initial.planId || plan.digest !== initial.planDigest) {
     throw new Error("Apply unfinished marker Plan does not match its initial journal");
   }
-  const marker = defineMarker({ schemaVersion: MARKER_SCHEMA, journal: initial, bootstrap }, plan);
+  const marker = defineMarker({
+    schemaVersion: MARKER_SCHEMA,
+    journal: initial,
+    bootstrap: { ...bootstrap, lifecycle: bootstrap.lifecycle ?? { kind: "none" } }
+  }, plan);
   const encoded = `${JSON.stringify(marker, null, 2)}\n`;
   const byteLength = Buffer.byteLength(encoded, "utf8");
   if (byteLength > APPLY_UNFINISHED_MARKER_MAX_BYTES) {
@@ -289,7 +309,9 @@ function defineMarker(value: unknown, plan?: Plan): ApplyUnfinishedMarker {
     throw new Error("Apply unfinished marker contains unknown or missing fields");
   }
   const marker = value as ApplyUnfinishedMarker;
-  if (marker.schemaVersion !== MARKER_SCHEMA) throw new Error("Unsupported Apply unfinished marker schema");
+  if (marker.schemaVersion !== MARKER_SCHEMA && marker.schemaVersion !== LEGACY_MARKER_SCHEMA) {
+    throw new Error("Unsupported Apply unfinished marker schema");
+  }
   const journal = defineApplyJournal(marker.journal);
   if (journal.stage !== "initialized" || journal.history.length !== 1) {
     throw new Error("Apply unfinished marker does not contain an initial journal");
@@ -299,20 +321,36 @@ function defineMarker(value: unknown, plan?: Plan): ApplyUnfinishedMarker {
     || plan.profileId !== journal.profileId)) {
     throw new Error("Apply unfinished marker does not match its bound Plan");
   }
-  const bootstrap = defineBootstrap(marker.bootstrap, journal, plan);
+  const bootstrap = defineBootstrap(marker.bootstrap, journal, marker.schemaVersion, plan);
   return { schemaVersion: MARKER_SCHEMA, journal, bootstrap };
 }
 
-function defineBootstrap(value: unknown, journal: ApplyJournal, plan?: Plan): ApplyUnfinishedBootstrap {
+function defineBootstrap(
+  value: unknown,
+  journal: ApplyJournal,
+  schemaVersion: ApplyUnfinishedMarker["schemaVersion"],
+  plan?: Plan
+): ApplyUnfinishedBootstrap {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("Apply unfinished bootstrap must be an object");
   }
   const keys = Object.keys(value).sort();
-  const expected = ["authorization", "authorizationArtifact", "consent", "consentArtifact"].sort();
+  const legacy = schemaVersion === LEGACY_MARKER_SCHEMA;
+  const expected = [
+    "authorization",
+    "authorizationArtifact",
+    "consent",
+    "consentArtifact",
+    ...(legacy ? [] : ["lifecycle"])
+  ].sort();
   if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
     throw new Error("Apply unfinished bootstrap contains unknown or missing fields");
   }
-  const bootstrap = value as ApplyUnfinishedBootstrap;
+  const input = value as ApplyUnfinishedBootstrapInput;
+  const bootstrap: ApplyUnfinishedBootstrap = {
+    ...input,
+    lifecycle: input.lifecycle ?? { kind: "none" }
+  };
   const consent = defineInvocationConsent(bootstrap.consent, {
     transactionId: journal.transactionId,
     planId: journal.planId,
@@ -346,6 +384,24 @@ function defineBootstrap(value: unknown, journal: ApplyJournal, plan?: Plan): Ap
     || authorizationConsent.id !== bootstrap.consentArtifact.id
     || authorizationConsent.digest !== bootstrap.consentArtifact.digest) {
     throw new Error("Apply unfinished bootstrap Authorization does not bind its exact invocation consent");
+  }
+  if (bootstrap.lifecycle.kind === "none") {
+    if (bootstrap.authorization.lifecycle.kind !== "none") {
+      throw new Error("Apply unfinished bootstrap omits the managed lifecycle binding required by Authorization");
+    }
+  } else {
+    const binding = defineManagedZenLifecycleBinding(bootstrap.lifecycle.binding);
+    if (bootstrap.authorization.lifecycle.kind !== "managed_zen") {
+      throw new Error("Apply unfinished bootstrap managed lifecycle lacks managed Authorization");
+    }
+    const expectedGrant = managedZenGrantRevision(
+      binding,
+      journal.planDigest,
+      bootstrap.consentArtifact.digest
+    );
+    if (bootstrap.authorization.lifecycle.grantRevision !== expectedGrant) {
+      throw new Error("Apply unfinished bootstrap managed lifecycle grant is invalid");
+    }
   }
   return { ...bootstrap, consent };
 }

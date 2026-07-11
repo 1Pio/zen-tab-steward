@@ -87,6 +87,13 @@ import {
 } from "./profile-lock.js";
 import { findZenProcesses } from "./processes.js";
 import { captureControlledSessionSnapshot } from "./session-snapshot.js";
+import {
+  assertManagedZenRelaunchBinding,
+  captureManagedZenLifecycleBinding,
+  defineManagedZenLifecycleBinding,
+  ensureManagedZenRelaunched,
+  quitManagedZen
+} from "./managed-zen-lifecycle.js";
 
 import type { ApplyAuthorization, Plan, PlanAction, Receipt, ZtsMessage } from "./domain/change.js";
 import type { Sha256Digest } from "./domain/digest.js";
@@ -102,6 +109,11 @@ import type { StoredPlan } from "./plans.js";
 import type { ExclusiveFileControl } from "./exclusive-control.js";
 import type { NativeProfileControl } from "./closed-session-control.js";
 import type { InterruptedAtomicReplaceResult } from "./atomic-file-cas.js";
+import type {
+  ManagedZenLifecycleBinding,
+  ManagedZenLifecycleWaitOptions,
+  ManagedZenPlatform
+} from "./managed-zen-lifecycle.js";
 
 const RECOVERY_SCHEMA = "zts.apply-recovery.provisional-1" as const;
 const RECOVERY_CONTROL_SCHEMA = "zts.closed-session-recovery-control.provisional-1" as const;
@@ -161,11 +173,11 @@ interface RecoveryDescriptorArtifact {
   readonly createdAt: string;
 }
 
-interface RecoveryControlProofArtifact {
+interface RecoveryControlProofBase {
   readonly schemaVersion: typeof RECOVERY_CONTROL_SCHEMA;
   readonly transactionId: string;
   readonly profileId: string;
-  readonly route: "closed_session";
+  readonly route: "closed_session" | "managed_zen";
   readonly recoveredAt: string;
   readonly journalStageBeforeClosure: ApplyJournalStage;
   readonly lockStatusAtInspection: ProfileLockInspection["status"];
@@ -190,6 +202,15 @@ interface RecoveryControlProofArtifact {
   readonly preparedTemporaryCompleteness: PreparedTemporaryReconciliation["completeness"] | null;
   readonly preparedTemporaryDisposition: PreparedTemporaryReconciliation["disposition"] | null;
 }
+
+type RecoveryControlProofArtifact = RecoveryControlProofBase & (
+  | { readonly route: "closed_session" }
+  | {
+      readonly route: "managed_zen";
+      readonly lifecycleBinding: ManagedZenLifecycleBinding;
+      readonly relaunchedBinding: ManagedZenLifecycleBinding;
+    }
+);
 
 type RecoveryReceiptTemplate = Receipt extends infer Candidate
   ? Candidate extends Receipt
@@ -284,6 +305,12 @@ export interface ApplyRecoveryInspection {
 
 export interface ApplyRecoveryOptions {
   readonly expectedRecoveryRevision: string;
+  readonly managedLifecycle?: {
+    readonly platform: ManagedZenPlatform;
+    readonly waitOptions: ManagedZenLifecycleWaitOptions;
+  };
+  /** Internal hard-crash hook after stable managed relaunch but before terminal recovery evidence. */
+  readonly afterManagedRecoveryRelaunch?: () => void | Promise<void>;
   /** Internal race hook after revision-bound inspection but before recovery kernel ownership. */
   readonly afterInitialInspection?: () => void | Promise<void>;
   /** Internal orchestration hook used by crash-recovery acceptance harnesses. */
@@ -548,6 +575,19 @@ async function inspectApplyRecoveryInternal(
               : beforeFingerprint || preparedDigest
                 ? "external_drift"
                 : "unclassified";
+          if (!beforeFingerprint && !preparedDigest) {
+            const stored = await loadStoredPlan(context.profile.id, journal.planDigest);
+            const loadedConfig = await loadConfig();
+            const captured = await captureControlledSessionSnapshot(
+              refreshed,
+              control,
+              loadedConfig.config
+            );
+            currentFingerprint = captured.state.fingerprint;
+            classification = captured.snapshot.revision === stored.snapshot.revision
+              ? "before_state_present"
+              : "external_drift";
+          }
           if (classification === "external_drift" && !commitStageSeen) {
             const recoverableAtomicEvidence = await journalHasRecoverableAtomicEvidence(
               journal,
@@ -594,6 +634,8 @@ async function inspectApplyRecoveryInternal(
     terminalIntentRevision: terminalIntent?.intentBindingRevision ?? null
   });
 
+  const managedRunningRecoverable = selected.bootstrap?.lifecycle.kind === "managed_zen"
+    && classification === "blocked_zen_running";
   return {
     transactionId: journal.transactionId,
     receiptId,
@@ -611,9 +653,9 @@ async function inspectApplyRecoveryInternal(
     recoveryClaim,
     terminalReceipt: foundReceipt?.receipt ?? null,
     blockers,
-    recoverable: blockers.length === 0 && (terminalIntent
+    recoverable: managedRunningRecoverable || (blockers.length === 0 && (terminalIntent
       ? lock.status === "absent"
-      : !foundReceipt || lock.status === "stale" || lock.status === "absent")
+      : !foundReceipt || lock.status === "stale" || lock.status === "absent"))
   };
 }
 
@@ -625,13 +667,27 @@ export async function recoverApplyTransaction(
   assertDigest(options.expectedRecoveryRevision, "Expected Apply recovery revision");
   const selected = await findRecoveryJournal(context.profile.id, selector);
   if (!selected) throw new Error(`Apply recovery transaction not found: ${selector}`);
-  const initial = await inspectApplyRecoveryInternal(context, selector, selected);
+  const managedLifecycleBinding = selected.bootstrap?.lifecycle.kind === "managed_zen"
+    ? defineManagedZenLifecycleBinding(selected.bootstrap.lifecycle.binding)
+    : null;
+  if (managedLifecycleBinding && !options.managedLifecycle) {
+    throw new ApplyRecoveryBlockedError(
+      "Managed Zen Apply recovery requires the managed lifecycle adapter bound by its unfinished marker"
+    );
+  }
+  let initial = await inspectApplyRecoveryInternal(context, selector, selected);
   if (initial.recoveryRevision !== options.expectedRecoveryRevision) {
     throw new ApplyRecoveryBlockedError(
       `Expected Apply recovery revision ${options.expectedRecoveryRevision} does not match current inspection ${initial.recoveryRevision}`
     );
   }
   await options.afterInitialInspection?.();
+  let recoveryRevisionBound = initial.recoveryRevision;
+  const managedRunningRetry = Boolean(
+    managedLifecycleBinding
+    && options.managedLifecycle
+    && initial.classification === "blocked_zen_running"
+  );
   const terminalCleanupOnly = Boolean(
     initial.terminalReceipt
     && initial.lock.status === "absent"
@@ -644,7 +700,7 @@ export async function recoverApplyTransaction(
         : `Terminal Receipt ${initial.terminalReceipt.id} does not prove closed-session control release; its unfinished marker was retained for explicit repair`
     );
   }
-  if (!initial.recoverable && !terminalCleanupOnly) {
+  if (!initial.recoverable && !terminalCleanupOnly && !managedRunningRetry) {
     throw new ApplyRecoveryBlockedError(initial.blockers.join("; ") || "Apply transaction is not recoverable");
   }
 
@@ -733,6 +789,27 @@ export async function recoverApplyTransaction(
   };
 
   try {
+    if (managedRunningRetry && managedLifecycleBinding && options.managedLifecycle) {
+      const current = await captureManagedZenLifecycleBinding(options.managedLifecycle.platform, {
+        profilePath: managedLifecycleBinding.profilePath,
+        executablePath: managedLifecycleBinding.executablePath,
+        uid: managedLifecycleBinding.uid,
+        bundleIdentifier: managedLifecycleBinding.bundleIdentifier
+      });
+      assertManagedZenRelaunchBinding(managedLifecycleBinding, current);
+      await quitManagedZen(
+        options.managedLifecycle.platform,
+        current,
+        options.managedLifecycle.waitOptions
+      );
+      initial = await inspectApplyRecoveryInternal(context, selector, selected, true);
+      if (!initial.recoverable) {
+        throw new ApplyRecoveryBlockedError(
+          initial.blockers.join("; ") || "Managed Apply recovery remained blocked after exact replacement closure"
+        );
+      }
+      recoveryRevisionBound = initial.recoveryRevision;
+    }
     if (bootstrapLayout) {
       await materializeRecoveryBootstrap(
         context.profile.id,
@@ -872,9 +949,9 @@ export async function recoverApplyTransaction(
       recoveryProfileLock?.artifactRevision ?? null,
       nativeControl
     );
-    if (inspection.recoveryRevision !== options.expectedRecoveryRevision) {
+    if (inspection.recoveryRevision !== recoveryRevisionBound) {
       throw new ApplyRecoveryBlockedError(
-        `Apply recovery inspection changed before finalization: expected ${options.expectedRecoveryRevision}, observed ${inspection.recoveryRevision}`
+        `Apply recovery inspection changed before finalization: expected ${recoveryRevisionBound}, observed ${inspection.recoveryRevision}`
       );
     }
     if (!inspection.recoverable && !terminalCleanupOnly) {
@@ -1214,15 +1291,26 @@ export async function recoverApplyTransaction(
     await options.afterControlReleased?.();
     await assertRecoveryClaimOwned(claimPath, claim);
 
+    let managedRelaunchedBinding: ManagedZenLifecycleBinding | null = null;
+    if (managedLifecycleBinding && options.managedLifecycle) {
+      managedRelaunchedBinding = await ensureManagedZenRelaunched(
+        options.managedLifecycle.platform,
+        managedLifecycleBinding,
+        options.managedLifecycle.waitOptions
+      );
+      assertManagedZenRelaunchBinding(managedLifecycleBinding, managedRelaunchedBinding);
+      await options.afterManagedRecoveryRelaunch?.();
+    }
+
     const preparedAt = new Date(Math.max(
       Date.now(),
       Date.parse(selected.journal.history.at(-1)!.at)
     )).toISOString();
-    const controlProof: RecoveryControlProofArtifact = {
+    const commonControlProof: RecoveryControlProofBase = {
       schemaVersion: RECOVERY_CONTROL_SCHEMA,
       transactionId: selected.journal.transactionId,
       profileId: plan.profileId,
-      route: "closed_session" as const,
+      route: managedLifecycleBinding ? "managed_zen" : "closed_session",
       recoveredAt: preparedAt,
       journalStageBeforeClosure: selected.journal.stage,
       lockStatusAtInspection: inspection.lock.status,
@@ -1254,6 +1342,14 @@ export async function recoverApplyTransaction(
       preparedTemporaryCompleteness: preparedTemporary?.completeness ?? null,
       preparedTemporaryDisposition: preparedTemporary?.disposition ?? null
     };
+    const controlProof: RecoveryControlProofArtifact = managedLifecycleBinding && managedRelaunchedBinding
+      ? {
+          ...commonControlProof,
+          route: "managed_zen",
+          lifecycleBinding: managedLifecycleBinding,
+          relaunchedBinding: managedRelaunchedBinding
+        }
+      : { ...commonControlProof, route: "closed_session" };
     const controlArtifact = artifactReference(
       `control:recovery:${selected.journal.transactionId}`,
       sha256Canonical(controlProof)
@@ -1284,12 +1380,27 @@ export async function recoverApplyTransaction(
         message: ztsMessage(issueMessage),
         actionId: null
       }],
-      control: {
-        route: "closed_session" as const,
-        proof: controlArtifact,
-        exclusiveControlReleased: "verified" as const
-      }
+      control: managedLifecycleBinding
+        ? {
+            route: "managed_zen" as const,
+            proof: controlArtifact,
+            quit: "verified" as const,
+            stateFlush: "verified" as const,
+            profileRestoration: "verified" as const,
+            relaunch: "verified" as const,
+            windowRestoration: "verified" as const
+          }
+        : {
+            route: "closed_session" as const,
+            proof: controlArtifact,
+            exclusiveControlReleased: "verified" as const
+          }
     };
+    if (authorization.lifecycle.kind === "managed_zen" && receiptBase.control.route !== "managed_zen") {
+      throw new Error(
+        `Managed Apply recovery lost its lifecycle binding before Receipt publication (${selected.bootstrap?.lifecycle.kind ?? "missing"})`
+      );
+    }
     let receipt: Receipt;
     if (allVerified && mutationAttempted && netChanged === true) {
       if (!backupArtifact || !inversePlanArtifact) {
@@ -1924,13 +2035,16 @@ function defineRecoveryControlProof(
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("Recovery terminal control proof must be an object");
   }
-  assertObjectKeys(value as Record<string, unknown>, [
+  const candidate = value as Record<string, unknown>;
+  const managed = candidate.route === "managed_zen";
+  assertObjectKeys(candidate, [
     "schemaVersion", "transactionId", "profileId", "route", "recoveredAt",
     "journalStageBeforeClosure", "lockStatusAtInspection", "currentFingerprint",
     "beforeFingerprint", "preparedDigest", "classification", "mutationAttempted",
     "allOperationsVerified", "atomicCommitReconciliation", "exclusiveControlReleased",
     "nativeProfileControl", "ztsProfileControl", "preparedTemporaryArtifact",
-    "preparedTemporaryCompleteness", "preparedTemporaryDisposition"
+    "preparedTemporaryCompleteness", "preparedTemporaryDisposition",
+    ...(managed ? ["lifecycleBinding", "relaunchedBinding"] : [])
   ], "Recovery terminal control proof");
   const proof = value as RecoveryControlProofArtifact;
   const expectedBeforeFingerprint = journalBeforeFingerprint(journal);
@@ -1938,7 +2052,7 @@ function defineRecoveryControlProof(
   if (proof.schemaVersion !== RECOVERY_CONTROL_SCHEMA
     || proof.transactionId !== journal.transactionId
     || proof.profileId !== journal.profileId
-    || proof.route !== "closed_session"
+    || !["closed_session", "managed_zen"].includes(proof.route)
     || proof.journalStageBeforeClosure !== journal.stage
     || proof.exclusiveControlReleased !== "verified"
     || typeof proof.mutationAttempted !== "boolean"
@@ -1959,6 +2073,11 @@ function defineRecoveryControlProof(
     ] as readonly string[]).includes(proof.classification)
     || !(["absent", "active", "stale", "invalid"] as readonly string[]).includes(proof.lockStatusAtInspection)) {
     throw new Error("Recovery terminal control proof identity is invalid");
+  }
+  if (proof.route === "managed_zen") {
+    const lifecycleBinding = defineManagedZenLifecycleBinding(proof.lifecycleBinding);
+    const relaunchedBinding = defineManagedZenLifecycleBinding(proof.relaunchedBinding);
+    assertManagedZenRelaunchBinding(lifecycleBinding, relaunchedBinding);
   }
   canonicalTimestamp(proof.recoveredAt, "Recovery terminal control proof timestamp");
   if (!proof.nativeProfileControl || typeof proof.nativeProfileControl !== "object"
@@ -2457,11 +2576,14 @@ async function findRecoveryJournal(
       if (journal.transactionId !== exactTransactionId || journal.profileId !== profileId) {
         throw new Error("Apply recovery journal does not match its direct selector");
       }
+      const markers = await readApplyUnfinishedMarkers(layout, profileId, loadUnfinishedRecoveryPlan);
+      const marker = markers?.find((candidate) => candidate.journal.transactionId === exactTransactionId) ?? null;
+      if (marker) assertJournalMatchesUnfinishedMarker(marker, journal);
       return {
         journal,
         journalPath,
-        fromUnfinishedIndex: false,
-        bootstrap: null,
+        fromUnfinishedIndex: marker !== null,
+        bootstrap: marker?.bootstrap ?? null,
         bootstrapOnly: false
       };
     } catch (error) {
@@ -3007,6 +3129,13 @@ function assertExactRecoveredInversePlan(
 }
 
 function terminalReceiptProvesSafeCleanup(receipt: Receipt): boolean {
+  if (receipt.control.route === "managed_zen") {
+    return receipt.control.quit === "verified"
+      && receipt.control.stateFlush === "verified"
+      && receipt.control.profileRestoration === "verified"
+      && receipt.control.relaunch === "verified"
+      && receipt.control.windowRestoration === "verified";
+  }
   if (receipt.control.route !== "closed_session") return false;
   if (receipt.control.exclusiveControlReleased === "verified") return true;
   return receipt.outcome === "blocked"

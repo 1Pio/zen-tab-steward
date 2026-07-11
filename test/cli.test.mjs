@@ -23,6 +23,10 @@ test("CLI smokes cover reads, backup preview, and exact saved-Plan sort apply", 
   const help = await execFileAsync("node", ["dist/cli.js", "--help"], { env });
   assert.match(help.stdout, /Zen Tab Steward/);
 
+  const applyHelp = await execFileAsync("node", ["dist/cli.js", "apply", "--help"], { env });
+  assert.match(applyHelp.stdout, /--manage-zen/);
+  assert.match(applyHelp.stdout, /graceful Zen\s+quit and exact relaunch/);
+
   const version = await execFileAsync("node", ["dist/cli.js", "--version"], { env });
   assert.match(version.stdout, /^0\.1\.0/);
 
@@ -88,9 +92,16 @@ test("CLI smokes cover reads, backup preview, and exact saved-Plan sort apply", 
   assert.match(workspaces.stdout, /Stash/);
   assert.match(workspaces.stdout, /sortable from/);
 
+  const workspacesJsonResult = await execFileAsync("node", ["dist/cli.js", "workspaces", "--json"], { env });
+  const workspacesJson = JSON.parse(workspacesJsonResult.stdout);
+  assert.match(workspacesJson.data.capturedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(workspacesJson.data.controlRoute, "closed_session");
+
   const tabs = await execFileAsync("node", ["dist/cli.js", "tabs", "Space", "--json"], { env });
   const tabsJson = JSON.parse(tabs.stdout);
   assert.equal(tabsJson.ok, true);
+  assert.match(tabsJson.data.capturedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(tabsJson.data.controlRoute, "closed_session");
   assert.equal(tabsJson.data.tabs.length, 3);
   assert.equal(tabsJson.data.tabs[0].workspace.name, "Space");
   assert.equal(tabsJson.data.tabs[0].workspace.contentTrust, "browser_untrusted");

@@ -77,7 +77,7 @@ import {
 } from "./inverse-plan-store.js";
 import { defineInvocationConsent, INVOCATION_CONSENT_SCHEMA } from "./invocation-consent.js";
 import { deriveExactPlannedAfterSnapshot } from "./planned-after-snapshot.js";
-import { discoverLegacyProfileIdentities, findSessionFile, zenProcessMayOwnProfile } from "./profile.js";
+import { discoverLegacyProfileIdentities, findSessionFile, profilePathsMatch, zenProcessMayOwnProfile } from "./profile.js";
 import {
   acquireProfileTransactionLock,
   inspectProfileTransactionLock,
@@ -100,6 +100,12 @@ import {
   SessionSnapshotDriftError,
   sessionTabBindings
 } from "./session-snapshot.js";
+import {
+  captureManagedZenLifecycleBinding,
+  managedZenGrantRevision,
+  quitManagedZen,
+  relaunchManagedZen
+} from "./managed-zen-lifecycle.js";
 
 import type {
   ApplyAuthorization,
@@ -117,6 +123,13 @@ import type { JsonLz4Fingerprint } from "./mozlz4.js";
 import type { ApplyArtifactLayout as ApplyLayout } from "./apply-artifacts.js";
 import type { ApplyJournalEvidenceByStage, ApplyJournalStage } from "./apply-journal.js";
 import type { ApplyReceiptSummary } from "./apply-receipt-store.js";
+import type {
+  ManagedZenClosedEvidence,
+  ManagedZenLifecycleBinding,
+  ManagedZenLifecycleRequest,
+  ManagedZenLifecycleWaitOptions,
+  ManagedZenPlatform
+} from "./managed-zen-lifecycle.js";
 import { loadStoredPlan, type StoredPlan } from "./plans.js";
 import { applyUndoWindowExpiresAt } from "./apply-policy.js";
 import {
@@ -267,6 +280,11 @@ export interface ApplyStoredPlanOptions {
         readonly sourceReceiptId: string;
         readonly sourceReceiptDigest: Sha256Digest;
       };
+  readonly managedLifecycle?: {
+    readonly platform: ManagedZenPlatform;
+    readonly request: ManagedZenLifecycleRequest;
+    readonly waitOptions: ManagedZenLifecycleWaitOptions;
+  };
   readonly now?: Date;
   /** Internal/test clock used for mutation-boundary expiry checks. */
   readonly clock?: () => Date;
@@ -276,6 +294,8 @@ export interface ApplyStoredPlanOptions {
   readonly afterStoreReservation?: () => void | Promise<void>;
   /** Internal orchestration hook used by crash/failure acceptance harnesses. */
   readonly afterUnfinishedMarker?: () => void | Promise<void>;
+  /** Internal hard-crash hook after exact managed closure but before native Profile control. */
+  readonly afterManagedQuit?: () => void | Promise<void>;
   /** Internal orchestration hook used by crash/failure acceptance harnesses. */
   readonly afterJournal?: () => void | Promise<void>;
   /** Internal orchestration hook used by crash/failure acceptance harnesses. */
@@ -433,6 +453,16 @@ export async function applyStoredPlanClosedSession(
     );
   }
   if (moveActions.length > 0) preflightApplyReceiptCapacity(moveActions.length);
+  let managedLifecycleBinding: ManagedZenLifecycleBinding | null = null;
+  if (options.managedLifecycle) {
+    managedLifecycleBinding = await captureManagedZenLifecycleBinding(
+      options.managedLifecycle.platform,
+      options.managedLifecycle.request
+    );
+    if (!profilePathsMatch(managedLifecycleBinding.profilePath, initialContext.profile.path)) {
+      throw new ApplyTransactionSafetyError("Managed Zen lifecycle binding belongs to a different Profile path");
+    }
+  }
   const layout = await applyLayout(plan.profileId);
   await ensureApplyReceiptSummaryHistory(layout, plan.profileId, {
     bootstrapAt: new Date(authorizedAt)
@@ -491,7 +521,8 @@ export async function applyStoredPlanClosedSession(
       moveActions,
       consentArtifact,
       transactionId,
-      authorizedAt
+      authorizedAt,
+      managedLifecycleBinding
     );
     const authorizationArtifact = artifact(authorization.id, authorization.revision);
     const journal = createApplyJournal({
@@ -508,7 +539,10 @@ export async function applyStoredPlanClosedSession(
         consent,
         consentArtifact,
         authorization,
-        authorizationArtifact
+        authorizationArtifact,
+        lifecycle: managedLifecycleBinding
+          ? { kind: "managed_zen", binding: managedLifecycleBinding }
+          : { kind: "none" }
       }, plan);
     } catch (error) {
       if (!(error instanceof ApplyUnfinishedMarkerLimitError)) throw error;
@@ -688,6 +722,7 @@ export async function applyStoredPlanClosedSession(
   let lockReleased = false;
   let lockReleaseAttempted = false;
   let nativeControl: NativeProfileControl | null = null;
+  let nativeProfileControlVerified = false;
   let nativeControlReleased = false;
   let nativeControlReleaseAttempted = false;
   let mutationCommitted = false;
@@ -698,11 +733,24 @@ export async function applyStoredPlanClosedSession(
   let recoveryArtifact: ArtifactReference | null = null;
   let inversePlanArtifact: ArtifactReference | null = null;
   let expectedAfterSnapshot: Snapshot | null = null;
+  let managedClosedEvidence: ManagedZenClosedEvidence | null = null;
+  let managedRelaunchedBinding: ManagedZenLifecycleBinding | null = null;
+  let managedQuitAttempted = false;
   const processChecks: Array<Readonly<Record<string, unknown>>> = [];
   try {
     await assertNoUnfinishedApplyTransactions(plan.profileId, transactionId);
+    if (managedLifecycleBinding && options.managedLifecycle) {
+      managedQuitAttempted = true;
+      managedClosedEvidence = await quitManagedZen(
+        options.managedLifecycle.platform,
+        managedLifecycleBinding,
+        options.managedLifecycle.waitOptions
+      );
+      await options.afterManagedQuit?.();
+    }
     nativeControl = await acquireNativeProfileControl(initialContext, 0);
     await nativeControl.assertHeld();
+    nativeProfileControlVerified = true;
     await options.afterLock?.();
     await updateJournal("locked", {
       lockRevision: lock.artifactRevision,
@@ -872,7 +920,36 @@ export async function applyStoredPlanClosedSession(
     const released = await lock.release();
     lockReleased = true;
     await options.afterRelease?.();
-    const controlProof = {
+    if (managedLifecycleBinding && options.managedLifecycle) {
+      managedRelaunchedBinding = await relaunchManagedZen(
+        options.managedLifecycle.platform,
+        managedLifecycleBinding,
+        options.managedLifecycle.waitOptions
+      );
+    }
+    const controlProof = managedLifecycleBinding && managedClosedEvidence && managedRelaunchedBinding
+      ? {
+          schemaVersion: CONTROL_SCHEMA,
+          transactionId,
+          profileId: plan.profileId,
+          route: "managed_zen" as const,
+          lifecycleBinding: managedLifecycleBinding,
+          closedEvidence: managedClosedEvidence,
+          relaunchedBinding: managedRelaunchedBinding,
+          lockRevision: lock.artifactRevision,
+          lockAcquiredAt: lock.acquiredAt,
+          lockReleasedAt: released.releasedAt,
+          beforeSnapshotRevision: beforeSnapshot.revision,
+          afterSnapshotRevision: afterSnapshot.revision,
+          beforeSourceFingerprint: beforeState.fingerprint,
+          afterSourceFingerprint: afterState.fingerprint,
+          nativeProfileControl: {
+            proof: nativeControl.proof,
+            released: nativeControlReleased
+          },
+          zenProcessChecks: processChecks
+        }
+      : {
       schemaVersion: CONTROL_SCHEMA,
       transactionId,
       profileId: plan.profileId,
@@ -889,7 +966,7 @@ export async function applyStoredPlanClosedSession(
         released: nativeControlReleased
       },
       zenProcessChecks: processChecks
-    };
+        };
     const controlArtifact = artifact(`control:${transactionId}`, sha256Canonical(controlProof));
     await publishPrivateJson(objectPath(layout.controls, controlArtifact.digest, "json"), controlProof);
 
@@ -924,11 +1001,21 @@ export async function applyStoredPlanClosedSession(
       mutationAttempted: true,
       netChanged: true,
       afterSnapshotRevision: afterSnapshot.revision,
-      control: {
-        route: "closed_session",
-        proof: controlArtifact,
-        exclusiveControlReleased: "verified"
-      },
+      control: managedLifecycleBinding
+        ? {
+            route: "managed_zen",
+            proof: controlArtifact,
+            quit: "verified",
+            stateFlush: "verified",
+            profileRestoration: "verified",
+            relaunch: "verified",
+            windowRestoration: "verified"
+          }
+        : {
+            route: "closed_session",
+            proof: controlArtifact,
+            exclusiveControlReleased: "verified"
+          },
       backupArtifact,
       inversePlanArtifact,
       recoveryArtifact: null,
@@ -1053,23 +1140,74 @@ export async function applyStoredPlanClosedSession(
       }
       releaseStatus = lockReleased && (!nativeControl || nativeControlReleased) ? "verified" : "unknown";
       const lifecycleReleasedAt = releaseStatus === "verified" ? releasedAt : null;
-      const controlProof = {
-        schemaVersion: CONTROL_SCHEMA,
-        transactionId,
-        profileId: plan.profileId,
-        route: "closed_session" as const,
-        lockRevision: lock.artifactRevision,
-        lockAcquiredAt: lock.acquiredAt,
-        lockReleasedAt: releasedAt,
-        releaseStatus,
-        beforeSnapshotRevision: plan.snapshotRevision,
-        observedSnapshotRevision: observedSnapshot.revision,
-        nativeProfileControl: nativeControl
-          ? { proof: nativeControl.proof, released: nativeControlReleased }
-          : null,
-        zenProcessChecks: processChecks,
-        failure: { issueCode, message: blocker, mutationStatus }
-      };
+      let managedRelaunchFailure: string | null = null;
+      const safeToRelaunch = mutationStatus !== "uncertain"
+        && !(mutationCommitted && !verifiedFailureOperations);
+      if (managedLifecycleBinding
+        && managedClosedEvidence
+        && !managedRelaunchedBinding
+        && options.managedLifecycle
+        && safeToRelaunch
+        && releaseStatus === "verified") {
+        try {
+          managedRelaunchedBinding = await relaunchManagedZen(
+            options.managedLifecycle.platform,
+            managedLifecycleBinding,
+            options.managedLifecycle.waitOptions
+          );
+        } catch (relaunchError) {
+          managedRelaunchFailure = relaunchError instanceof Error ? relaunchError.message : String(relaunchError);
+        }
+      }
+      const managedControl = managedLifecycleBinding
+        ? {
+            route: "managed_zen" as const,
+            quit: managedClosedEvidence ? "verified" as const : "failed" as const,
+            stateFlush: nativeProfileControlVerified ? "verified" as const : managedClosedEvidence ? "failed" as const : "not_started" as const,
+            profileRestoration: managedRelaunchedBinding ? "verified" as const : managedClosedEvidence ? "failed" as const : "not_started" as const,
+            relaunch: managedRelaunchedBinding ? "verified" as const : managedClosedEvidence ? "failed" as const : "not_started" as const,
+            windowRestoration: managedRelaunchedBinding ? "verified" as const : managedClosedEvidence ? "failed" as const : "not_started" as const
+          }
+        : null;
+      const controlProof = managedLifecycleBinding
+        ? {
+            schemaVersion: CONTROL_SCHEMA,
+            transactionId,
+            profileId: plan.profileId,
+            route: "managed_zen" as const,
+            lifecycleBinding: managedLifecycleBinding,
+            closedEvidence: managedClosedEvidence,
+            relaunchedBinding: managedRelaunchedBinding,
+            relaunchFailure: managedRelaunchFailure,
+            lockRevision: lock.artifactRevision,
+            lockAcquiredAt: lock.acquiredAt,
+            lockReleasedAt: releasedAt,
+            releaseStatus,
+            beforeSnapshotRevision: plan.snapshotRevision,
+            observedSnapshotRevision: observedSnapshot.revision,
+            nativeProfileControl: nativeControl
+              ? { proof: nativeControl.proof, released: nativeControlReleased }
+              : null,
+            zenProcessChecks: processChecks,
+            failure: { issueCode, message: blocker, mutationStatus }
+          }
+        : {
+            schemaVersion: CONTROL_SCHEMA,
+            transactionId,
+            profileId: plan.profileId,
+            route: "closed_session" as const,
+            lockRevision: lock.artifactRevision,
+            lockAcquiredAt: lock.acquiredAt,
+            lockReleasedAt: releasedAt,
+            releaseStatus,
+            beforeSnapshotRevision: plan.snapshotRevision,
+            observedSnapshotRevision: observedSnapshot.revision,
+            nativeProfileControl: nativeControl
+              ? { proof: nativeControl.proof, released: nativeControlReleased }
+              : null,
+            zenProcessChecks: processChecks,
+            failure: { issueCode, message: blocker, mutationStatus }
+          };
       const controlArtifact = artifact(`control:${transactionId}`, sha256Canonical(controlProof));
       await publishPrivateJson(objectPath(layout.controls, controlArtifact.digest, "json"), controlProof);
       await updateJournal("failure_recorded", {
@@ -1088,6 +1226,11 @@ export async function applyStoredPlanClosedSession(
           `Apply control release is uncertain after ${issueCode}; no terminal Receipt was published and ${transactionId} requires zts apply recover`
         );
       }
+      if (managedLifecycleBinding && managedQuitAttempted && !managedClosedEvidence) {
+        throw new ApplyControlReleaseUncertainError(
+          `Managed Zen quit outcome is uncertain after ${issueCode}; no terminal Receipt was published and ${transactionId} requires zts apply recover`
+        );
+      }
       if (mutationStatus === "uncertain") {
         // The journal-bound target and prepared path are the only authority
         // after an indeterminate atomic helper outcome. A terminal Receipt
@@ -1099,6 +1242,11 @@ export async function applyStoredPlanClosedSession(
       if (mutationCommitted && !verifiedFailureOperations) {
         throw new ApplyTransactionUncertainError(
           `Apply committed but its final state could not be verified; no terminal Receipt was published and ${transactionId} requires zts apply recover`
+        );
+      }
+      if (managedLifecycleBinding && managedClosedEvidence && !managedRelaunchedBinding) {
+        throw new ApplyControlReleaseUncertainError(
+          `Managed Zen lifecycle restoration is incomplete after ${issueCode}; no terminal Receipt was published and ${transactionId} requires zts apply recover${managedRelaunchFailure ? `: ${managedRelaunchFailure}` : ""}`
         );
       }
       const finalJournal = structuredClone(journal);
@@ -1135,16 +1283,34 @@ export async function applyStoredPlanClosedSession(
           message: ztsMessage(blocker),
           actionId: null
         }],
-        control: {
-          route: "closed_session" as const,
-          proof: controlArtifact,
-          exclusiveControlReleased: releaseStatus
-        }
+        control: managedControl
+          ? { ...managedControl, proof: controlArtifact }
+          : {
+              route: "closed_session" as const,
+              proof: controlArtifact,
+              exclusiveControlReleased: releaseStatus
+            }
       };
       let receipt: Receipt;
       if (verifiedFailureOperations) {
+        const appliedControl = managedLifecycleBinding
+          ? {
+              route: "managed_zen" as const,
+              proof: controlArtifact,
+              quit: "verified" as const,
+              stateFlush: "verified" as const,
+              profileRestoration: "verified" as const,
+              relaunch: "verified" as const,
+              windowRestoration: "verified" as const
+            }
+          : {
+              route: "closed_session" as const,
+              proof: controlArtifact,
+              exclusiveControlReleased: "verified" as const
+            };
         receipt = defineReceipt(stored.snapshot, plan, authorization, {
             ...common,
+            control: appliedControl,
             outcome: "applied",
             mutationAttempted: true,
             netChanged: true,
@@ -1772,7 +1938,8 @@ function createAuthorization(
   moveActions: readonly MoveAction[],
   consentArtifact: ArtifactReference,
   transactionId: string,
-  authorizedAt: string
+  authorizedAt: string,
+  managedLifecycleBinding: ManagedZenLifecycleBinding | null
 ): ApplyAuthorization {
   const trustClasses = uniqueTrustClasses(moveActions);
   const protectionGrants = moveActions.flatMap((action) => protectionGrantsForAction(plan, action));
@@ -1788,7 +1955,18 @@ function createAuthorization(
     authorizedActionIds: moveActions.map((action) => action.actionId) as [string, ...string[]],
     allowedTrustClasses: trustClasses,
     protectionGrants,
-    lifecycle: { kind: "none" },
+    lifecycle: managedLifecycleBinding
+      ? {
+          kind: "managed_zen",
+          grantRevision: managedZenGrantRevision(
+            managedLifecycleBinding,
+            plan.digest,
+            consentArtifact.digest
+          ),
+          relaunchRequired: true,
+          restoreWindowsRequired: true
+        }
+      : { kind: "none" },
     wholePlanPreflight: true
   });
 }

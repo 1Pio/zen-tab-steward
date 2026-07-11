@@ -68,6 +68,10 @@ import { terminalJson, terminalText } from "./terminal.js";
 import { ambiguousWorkspaceMessage, resolveWorkspaceSelector, tabListing, workspaceViews } from "./views.js";
 import { applyUndo, inspectUndo, UndoBlockedError, UndoSelectionError } from "./undo.js";
 import { createPatchFromAgentDiff } from "./agent-diff.js";
+import {
+  createDarwinManagedZenPlatform,
+  discoverDarwinManagedZenRequest
+} from "./darwin-managed-zen.js";
 
 import type { ManualPlanResult } from "./manual.js";
 import type {
@@ -380,6 +384,8 @@ program
           snapshotRevision: captured.snapshot.revision,
           authority: captured.snapshot.authority,
           freshness: captured.snapshot.freshness,
+          capturedAt: captured.snapshot.capturedAt,
+          controlRoute: captured.snapshot.provenance.route,
           workspaces
         }, { warnings: snapshotObservationWarnings(observation) }));
       } else {
@@ -430,6 +436,8 @@ program
           snapshotRevision: captured.snapshot.revision,
           authority: captured.snapshot.authority,
           freshness: captured.snapshot.freshness,
+          capturedAt: captured.snapshot.capturedAt,
+          controlRoute: captured.snapshot.provenance.route,
           workspace: workspaceSelectors.length === 1 ? workspaceSelectors[0] : null,
           workspaceScope: listing.workspaceScope,
           tabs: listing.tabs
@@ -702,6 +710,7 @@ program
   .option("--expect-digest <digest>", "required exact Plan digest for unattended mutation")
   .option("--expect-recovery-digest <digest>", "required exact inspected recovery revision for recovery finalization")
   .option("--backend <backend>", "apply route preference: auto, live, or session")
+  .option("--manage-zen", "separately authorize a bounded graceful Zen quit and exact relaunch when Zen is open")
   .option("--limit <count>", "maximum saved-Plan Receipts to list (default 50, maximum 500)")
   .option("--cursor <cursor>", "opaque saved-Plan Receipt history cursor")
   .option("--json", "print stable JSON output")
@@ -853,7 +862,15 @@ program
         let result: ApplyRecoveryResult;
         try {
           result = await recoverApplyTransaction(context, receiptId, {
-            expectedRecoveryRevision: options.expectRecoveryDigest!
+            expectedRecoveryRevision: options.expectRecoveryDigest!,
+            ...(process.platform === "darwin"
+              ? {
+                  managedLifecycle: {
+                    platform: createDarwinManagedZenPlatform(),
+                    waitOptions: { timeoutMs: 30_000, pollMs: 250 }
+                  }
+                }
+              : {})
           });
         } catch (error) {
           const data = { profile: context.profile, inspection: readiness, recoveryRecorded: false, sessionMutated: false };
@@ -956,10 +973,14 @@ program
         }
         let result: Awaited<ReturnType<typeof applyStoredPlanClosedSession>>;
         try {
+          const managedLifecycle = options.manageZen && context.running
+            ? await managedLifecycleOptions(context)
+            : undefined;
           result = await applyStoredPlanClosedSession(context, selected, {
             expectedDigest: options.expectDigest,
             command: applyPlanCommandForReceipt(selectedAction, options),
-            routePreference
+            routePreference,
+            ...(managedLifecycle ? { managedLifecycle } : {})
           });
         } catch (error) {
           emitApplyExecutionFailure(
@@ -986,7 +1007,10 @@ program
         emitApplyTransactionOutcome("apply plan", options, "Saved Plan Apply", data, result);
         return;
       }
-      const exactCommand = `zts apply ${shellQuote(selected.plan.id)} --yes --expect-digest ${selected.plan.digest}`;
+      const exactCommand = [
+        `zts apply ${shellQuote(selected.plan.id)} --yes --expect-digest ${selected.plan.digest}`,
+        ...(options.manageZen ? ["--manage-zen"] : [])
+      ].join(" ");
       const blocker = selected.plan.derivation.kind === "subset"
         ? `Review and confirm the exact derived Plan ${selected.plan.digest} before mutation`
         : `Confirm the exact saved Plan ${selected.plan.digest} before mutation`;
@@ -1715,6 +1739,7 @@ interface ApplyPlanOptions {
   limit?: string;
   cursor?: string;
   backend?: string;
+  manageZen?: boolean;
 }
 
 interface BackupOptions {
@@ -1791,7 +1816,18 @@ function applyPlanCommandForReceipt(selector: string, options: ApplyPlanOptions)
   if (options.yes) parts.push("--yes");
   if (options.expectDigest) parts.push("--expect-digest", options.expectDigest);
   if (options.backend) parts.push("--backend", options.backend);
+  if (options.manageZen) parts.push("--manage-zen");
   return parts.join(" ");
+}
+
+async function managedLifecycleOptions(context: Awaited<ReturnType<typeof discoverProfileContext>>) {
+  const platform = createDarwinManagedZenPlatform();
+  const request = await discoverDarwinManagedZenRequest(platform, context.profile.path);
+  return {
+    platform,
+    request,
+    waitOptions: { timeoutMs: 30_000, pollMs: 250 }
+  } as const;
 }
 
 function pruneCutoff(options: BackupOptions): Date {
