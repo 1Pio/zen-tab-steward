@@ -65,8 +65,9 @@ import { classifyRuleForUrl, resolveRuleWorkspace } from "./engines/rules.js";
 import { canonicalUrlPattern } from "./url-pattern.js";
 import { VERSION } from "./version.js";
 import { terminalJson, terminalText } from "./terminal.js";
-import { ambiguousWorkspaceMessage, resolveWorkspaceSelector, tabViews, workspaceViews } from "./views.js";
+import { ambiguousWorkspaceMessage, resolveWorkspaceSelector, tabListing, workspaceViews } from "./views.js";
 import { applyUndo, inspectUndo, UndoBlockedError, UndoSelectionError } from "./undo.js";
+import { createPatchFromAgentDiff } from "./agent-diff.js";
 
 import type { ManualPlanResult } from "./manual.js";
 import type {
@@ -392,14 +393,35 @@ program
   .description("List Zen tabs with workspace and protection metadata")
   .argument("[workspace]", "optional workspace name or id filter")
   .option("--workspace <workspace>", "workspace name or id filter")
+  .option("--workspaces <workspaces>", "comma-separated workspace names or ids")
+  .option("--all", "list tabs from every workspace")
   .option("--json", "print stable JSON output")
-  .action(async (workspaceArgument: string | undefined, options: JsonOption & { workspace?: string }) => {
+  .action(async (
+    workspaceArgument: string | undefined,
+    options: JsonOption & { workspace?: string; workspaces?: string; all?: boolean }
+  ) => {
     await runCommand("tabs", options, async () => {
+      const requestedScopes = [
+        workspaceArgument === undefined ? null : "workspace argument",
+        options.workspace === undefined ? null : "--workspace",
+        options.workspaces === undefined ? null : "--workspaces",
+        options.all ? "--all" : null
+      ].filter((scope): scope is string => scope !== null);
+      if (requestedScopes.length > 1) {
+        throw new CliInvocationError(
+          `Choose one tab scope: workspace argument, --workspace, --workspaces, or --all (received ${requestedScopes.join(", ")})`
+        );
+      }
+      const workspaceSelectors = options.workspaces === undefined
+        ? (options.all ? [] : [options.workspace ?? workspaceArgument].filter((value): value is string => value !== undefined))
+        : splitCsv(options.workspaces);
+      if (options.workspaces !== undefined && workspaceSelectors.length === 0) {
+        throw new CliInvocationError("--workspaces requires at least one workspace name or id");
+      }
       const context = await discoverProfileContext();
       const loadedConfig = await loadConfig();
-      const workspace = options.workspace ?? workspaceArgument;
       const captured = await captureSessionSnapshot(context, loadedConfig.config);
-      const tabs = validatedCliInput(() => tabViews(captured.snapshot, workspace));
+      const listing = validatedCliInput(() => tabListing(captured.snapshot, workspaceSelectors));
       const observation = snapshotObservationPresentation(captured.snapshot, captured.context.running);
       if (options.json) {
         printJson(envelope("tabs", {
@@ -408,11 +430,12 @@ program
           snapshotRevision: captured.snapshot.revision,
           authority: captured.snapshot.authority,
           freshness: captured.snapshot.freshness,
-          workspace: workspace ?? null,
-          tabs
+          workspace: workspaceSelectors.length === 1 ? workspaceSelectors[0] : null,
+          workspaceScope: listing.workspaceScope,
+          tabs: listing.tabs
         }, { warnings: snapshotObservationWarnings(observation) }));
       } else {
-        process.stdout.write(`${formatTabs(tabs, observation)}\n`);
+        process.stdout.write(`${formatTabs(listing.tabs, observation)}\n`);
       }
     });
   });
@@ -472,6 +495,60 @@ program
         }));
       } else {
         process.stdout.write(formatSavedPlan(stored.snapshot, stored.plan, expired));
+      }
+    });
+  });
+
+program
+  .command("diff")
+  .description("Plan a revision-bound bulk tab movement diff")
+  .argument("[action]", "plan")
+  .argument("[input]", "Diff JSON path, or - for stdin")
+  .option("--stdin", "read Diff JSON from stdin")
+  .option("--json", "print stable JSON output")
+  .action(async (
+    action: string | undefined,
+    input: string | undefined,
+    options: JsonOption & { stdin?: boolean }
+  ) => {
+    const selectedAction = action ?? "plan";
+    await runCommand(`diff ${selectedAction}`, options, async () => {
+      if (selectedAction !== "plan") {
+        throw new CliInvocationError("Usage: zts diff plan (--stdin | <diff-file>)");
+      }
+      if (options.stdin && input !== undefined) {
+        throw new CliInvocationError("Choose one Diff input: --stdin or a file path");
+      }
+      const inputPath = options.stdin ? "-" : input;
+      if (!inputPath) throw new CliInvocationError("Diff input is required; use --stdin or provide a JSON file path");
+      const context = await discoverProfileContext();
+      const loadedConfig = await loadConfig();
+      const captured = await captureSessionSnapshot(context, loadedConfig.config);
+      const rawInput = await readPatchInput(inputPath);
+      let patch;
+      try {
+        patch = createPatchFromAgentDiff(captured.snapshot, rawInput);
+      } catch (error) {
+        throw new PatchInputValidationError(error instanceof Error ? error.message : String(error), error);
+      }
+      const result = await resolveManualPlanFromInput(captured.snapshot, patch, loadedConfig.config);
+      const warnings = result.plan.snapshotAuthority === "authoritative" && result.plan.snapshotFreshness === "current"
+        ? []
+        : ["Diff Plan was created from a persisted observation and is not executable for apply"];
+      const suggestedNextCommands = warnings.length > 0
+        ? ["Quit Zen, then rerun the list and Diff Plan journey against a current authoritative Snapshot"]
+        : [
+            `zts apply ${shellQuote(result.plan.id)} --yes --expect-digest ${shellQuote(result.plan.digest)}`,
+            `zts plan show ${shellQuote(result.plan.id)} --json`
+          ];
+      if (options.json) {
+        printJson(envelope("diff plan", {
+          profile: captured.context.profile,
+          zenRunning: captured.context.running,
+          ...result
+        }, { warnings, suggestedNextCommands }));
+      } else {
+        process.stdout.write(formatManualPlanSummary(result, warnings, suggestedNextCommands));
       }
     });
   });

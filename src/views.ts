@@ -27,6 +27,24 @@ export interface TabView {
   readonly member: EntityMember;
 }
 
+export type TabWorkspaceScope =
+  | {
+      readonly kind: "all";
+      readonly workspaces: readonly [];
+    }
+  | {
+      readonly kind: "selected";
+      readonly workspaces: readonly {
+        readonly id: string;
+        readonly name: string;
+      }[];
+    };
+
+export interface TabListing {
+  readonly workspaceScope: TabWorkspaceScope;
+  readonly tabs: readonly TabView[];
+}
+
 export type WorkspaceSelectorResolution<T extends { readonly id: string; readonly name: string }> =
   | { readonly status: "resolved"; readonly workspace: T }
   | { readonly status: "missing" }
@@ -63,19 +81,24 @@ export function workspaceViews(
   });
 }
 
-export function tabViews(snapshot: Snapshot, workspaceSelector?: string): readonly TabView[] {
-  const resolution = workspaceSelector
-    ? resolveWorkspaceSelector(snapshot.workspaces, workspaceSelector)
-    : null;
-  if (resolution?.status === "missing") throw new Error(`Workspace not found: ${workspaceSelector}`);
-  if (resolution?.status === "ambiguous") {
-    throw new Error(ambiguousWorkspaceMessage(workspaceSelector!, resolution.matches));
+export function tabListing(snapshot: Snapshot, workspaceSelectors: readonly string[] = []): TabListing {
+  const selectedWorkspaces: Workspace[] = [];
+  const selectedWorkspaceIds = new Set<string>();
+  for (const selector of workspaceSelectors) {
+    const resolution = resolveWorkspaceSelector(snapshot.workspaces, selector);
+    if (resolution.status === "missing") throw new Error(`Workspace not found: ${selector}`);
+    if (resolution.status === "ambiguous") {
+      throw new Error(ambiguousWorkspaceMessage(selector, resolution.matches));
+    }
+    if (!selectedWorkspaceIds.has(resolution.workspace.id)) {
+      selectedWorkspaceIds.add(resolution.workspace.id);
+      selectedWorkspaces.push(resolution.workspace);
+    }
   }
-  const workspace = resolution?.status === "resolved" ? resolution.workspace : null;
   const workspaces = new Map(snapshot.workspaces.map((candidate) => [candidate.id, candidate]));
   const result: TabView[] = [];
   for (const entity of snapshot.entities) {
-    if (workspace && entity.workspaceId !== workspace.id) continue;
+    if (workspaceSelectors.length > 0 && !selectedWorkspaceIds.has(entity.workspaceId)) continue;
     const entityWorkspace = workspaces.get(entity.workspaceId);
     if (!entityWorkspace) throw new Error(`Entity ${entity.ref} references a missing Workspace`);
     for (const member of entity.members) {
@@ -92,7 +115,19 @@ export function tabViews(snapshot: Snapshot, workspaceSelector?: string): readon
       });
     }
   }
-  return result;
+  return {
+    workspaceScope: workspaceSelectors.length === 0
+      ? { kind: "all", workspaces: [] }
+      : {
+          kind: "selected",
+          workspaces: selectedWorkspaces.map((workspace) => ({ id: workspace.id, name: workspace.name }))
+        },
+    tabs: result
+  };
+}
+
+export function tabViews(snapshot: Snapshot, workspaceSelector?: string): readonly TabView[] {
+  return tabListing(snapshot, workspaceSelector === undefined ? [] : [workspaceSelector]).tabs;
 }
 
 export function resolveWorkspaceSelector<T extends { readonly id: string; readonly name: string }>(

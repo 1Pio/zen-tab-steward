@@ -97,6 +97,38 @@ test("CLI smokes cover reads, backup preview, and exact saved-Plan sort apply", 
   assert.equal(tabsJson.data.tabs[0].member.contentTrust, "browser_untrusted");
   assert.equal(tabsJson.data.tabs[0].contentTrust, "browser_untrusted");
 
+  const selectedTabs = await execFileAsync("node", [
+    "dist/cli.js", "tabs", "--workspaces", "Space,Stash", "--json"
+  ], { env });
+  const selectedTabsJson = JSON.parse(selectedTabs.stdout);
+  assert.equal(selectedTabsJson.ok, true);
+  assert.deepEqual(selectedTabsJson.data.workspaceScope, {
+    kind: "selected",
+    workspaces: [
+      { id: "w1", name: "Space" },
+      { id: "w2", name: "Stash" }
+    ]
+  });
+  assert.equal(selectedTabsJson.data.tabs.length, 4);
+  assert.equal(selectedTabsJson.data.tabs.every((tab) => ["w1", "w2"].includes(tab.workspace.id)), true);
+  assert.equal(selectedTabsJson.data.tabs.every((tab) =>
+    typeof tab.entityRef === "string"
+      && typeof tab.entityRevision === "string"
+      && typeof tab.structuralRootRef === "string"
+  ), true);
+
+  const allTabs = await execFileAsync("node", ["dist/cli.js", "tabs", "--all", "--json"], { env });
+  const allTabsJson = JSON.parse(allTabs.stdout);
+  assert.equal(allTabsJson.ok, true);
+  assert.deepEqual(allTabsJson.data.workspaceScope, { kind: "all", workspaces: [] });
+  assert.equal(allTabsJson.data.tabs.length, 4);
+
+  const conflictingTabScope = spawnSync("node", [
+    "dist/cli.js", "tabs", "Space", "--all", "--json"
+  ], { env, encoding: "utf8" });
+  assert.equal(conflictingTabScope.status, 1, `${conflictingTabScope.stdout}\n${conflictingTabScope.stderr}`);
+  assert.match(JSON.parse(conflictingTabScope.stdout).blockers.join("\n"), /choose one tab scope/iu);
+
   const snapshot = await execFileAsync("node", ["dist/cli.js", "snapshot", "--json"], { env });
   const snapshotJson = JSON.parse(snapshot.stdout);
   assert.equal(snapshotJson.ok, true);
@@ -109,6 +141,55 @@ test("CLI smokes cover reads, backup preview, and exact saved-Plan sort apply", 
     entity.kind === "tab" && entity.workspaceId === spaceWorkspace.id && !entity.protection.protected
   );
   assert.ok(manualEntity);
+  const listedManualTab = allTabsJson.data.tabs.find((tab) => tab.entityRef === manualEntity.ref);
+  assert.ok(listedManualTab);
+  const agentDiff = {
+    schemaVersion: "zts.diff.provisional-1",
+    snapshotRevision: allTabsJson.data.snapshotRevision,
+    moves: [
+      {
+        entityRef: listedManualTab.entityRef,
+        fromWorkspaceId: listedManualTab.workspace.id,
+        toWorkspaceId: portfolioWorkspace.id,
+        reason: "Move the listed Framer project tab into Portfolio"
+      }
+    ]
+  };
+  const diffPlan = spawnSync("node", ["dist/cli.js", "diff", "plan", "--stdin", "--json"], {
+    env,
+    input: JSON.stringify(agentDiff),
+    encoding: "utf8"
+  });
+  assert.equal(diffPlan.status, 0, `${diffPlan.stdout}\n${diffPlan.stderr}`);
+  const diffPlanJson = JSON.parse(diffPlan.stdout);
+  assert.equal(diffPlanJson.ok, true);
+  assert.equal(diffPlanJson.data.patch.snapshotRevision, allTabsJson.data.snapshotRevision);
+  assert.equal(diffPlanJson.data.plan.snapshotRevision, allTabsJson.data.snapshotRevision);
+  assert.equal(diffPlanJson.data.plan.actions[0].operation.entityRef, listedManualTab.entityRef);
+  assert.equal(diffPlanJson.data.plan.actions[0].operation.precondition.sourceWorkspace.workspaceId, listedManualTab.workspace.id);
+  assert.equal(diffPlanJson.data.plan.actions[0].operation.expectedPostState.workspaceId, portfolioWorkspace.id);
+  assert.match(diffPlanJson.data.plan.digest, /^sha256:[a-f0-9]{64}$/u);
+  assert.match(diffPlanJson.suggestedNextCommands[0], /zts apply/iu);
+
+  const staleAgentDiff = spawnSync("node", ["dist/cli.js", "diff", "plan", "--stdin", "--json"], {
+    env,
+    input: JSON.stringify({
+      ...agentDiff,
+      snapshotRevision: "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }),
+    encoding: "utf8"
+  });
+  assert.equal(staleAgentDiff.status, 1, `${staleAgentDiff.stdout}\n${staleAgentDiff.stderr}`);
+  assert.match(JSON.parse(staleAgentDiff.stdout).blockers.join("\n"), /listed Snapshot revision.+does not match current Snapshot/iu);
+
+  const unboundAgentDiff = spawnSync("node", ["dist/cli.js", "diff", "plan", "--stdin", "--json"], {
+    env,
+    input: JSON.stringify({ schemaVersion: agentDiff.schemaVersion, moves: agentDiff.moves }),
+    encoding: "utf8"
+  });
+  assert.equal(unboundAgentDiff.status, 1, `${unboundAgentDiff.stdout}\n${unboundAgentDiff.stderr}`);
+  assert.match(JSON.parse(unboundAgentDiff.stdout).blockers.join("\n"), /snapshotRevision/iu);
+
   const manualPatch = {
     operations: [
       {
