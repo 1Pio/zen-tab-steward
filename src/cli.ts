@@ -67,11 +67,13 @@ import { VERSION } from "./version.js";
 import { terminalJson, terminalText } from "./terminal.js";
 import { ambiguousWorkspaceMessage, resolveWorkspaceSelector, tabListing, workspaceViews } from "./views.js";
 import { applyUndo, inspectUndo, UndoBlockedError, UndoSelectionError } from "./undo.js";
-import { createPatchFromAgentDiff } from "./agent-diff.js";
+import { createPatchFromAgentDiff, defineAgentDiff } from "./agent-diff.js";
 import {
   createDarwinManagedZenPlatform,
   discoverDarwinManagedZenRequest
 } from "./darwin-managed-zen.js";
+import { runManagedAuthoritativeCapture } from "./managed-authoritative-capture.js";
+import type { ManagedCaptureEvidence } from "./managed-authoritative-capture.js";
 
 import type { ManualPlanResult } from "./manual.js";
 import type {
@@ -513,11 +515,12 @@ program
   .argument("[action]", "plan")
   .argument("[input]", "Diff JSON path, or - for stdin")
   .option("--stdin", "read Diff JSON from stdin")
+  .option("--manage-zen", "gracefully restart Zen to create a current authoritative Diff Plan")
   .option("--json", "print stable JSON output")
   .action(async (
     action: string | undefined,
     input: string | undefined,
-    options: JsonOption & { stdin?: boolean }
+    options: JsonOption & { stdin?: boolean; manageZen?: boolean }
   ) => {
     const selectedAction = action ?? "plan";
     await runCommand(`diff ${selectedAction}`, options, async () => {
@@ -529,30 +532,77 @@ program
       }
       const inputPath = options.stdin ? "-" : input;
       if (!inputPath) throw new CliInvocationError("Diff input is required; use --stdin or provide a JSON file path");
-      const context = await discoverProfileContext();
-      const loadedConfig = await loadConfig();
-      const captured = await captureSessionSnapshot(context, loadedConfig.config);
       const rawInput = await readPatchInput(inputPath);
-      let patch;
       try {
-        patch = createPatchFromAgentDiff(captured.snapshot, rawInput);
+        defineAgentDiff(rawInput);
       } catch (error) {
         throw new PatchInputValidationError(error instanceof Error ? error.message : String(error), error);
       }
-      const result = await resolveManualPlanFromInput(captured.snapshot, patch, loadedConfig.config);
+      const context = await discoverProfileContext();
+      const loadedConfig = await loadConfig();
+      let captured;
+      let result;
+      let managedLifecycle: ManagedCaptureEvidence = {
+        requested: Boolean(options.manageZen),
+        performed: false,
+        quit: "not_needed" as const,
+        relaunch: "not_needed" as const,
+        lifecycleBindingRevision: null,
+        relaunchedBindingRevision: null
+      };
+      if (options.manageZen) {
+        const lifecycleOptions = context.running
+          ? await managedLifecycleOptions(context)
+          : {
+              platform: createDarwinManagedZenPlatform(),
+              waitOptions: { timeoutMs: 30_000, pollMs: 250 }
+            } as const;
+        const managed = await runManagedAuthoritativeCapture(
+          context,
+          loadedConfig.config,
+          lifecycleOptions,
+          async (authoritative) => {
+            let patch;
+            try {
+              patch = createPatchFromAgentDiff(authoritative.snapshot, rawInput);
+            } catch (error) {
+              throw new PatchInputValidationError(error instanceof Error ? error.message : String(error), error);
+            }
+            return resolveManualPlanFromInput(authoritative.snapshot, patch, loadedConfig.config);
+          }
+        );
+        captured = managed.captured;
+        result = managed.value;
+        managedLifecycle = managed.lifecycle;
+      } else {
+        captured = await captureSessionSnapshot(
+          context,
+          loadedConfig.config,
+          options.manageZen ? { requireAuthoritative: true } : undefined
+        );
+        let patch;
+        try {
+          patch = createPatchFromAgentDiff(captured.snapshot, rawInput);
+        } catch (error) {
+          throw new PatchInputValidationError(error instanceof Error ? error.message : String(error), error);
+        }
+        result = await resolveManualPlanFromInput(captured.snapshot, patch, loadedConfig.config);
+      }
       const warnings = result.plan.snapshotAuthority === "authoritative" && result.plan.snapshotFreshness === "current"
         ? []
         : ["Diff Plan was created from a persisted observation and is not executable for apply"];
       const suggestedNextCommands = warnings.length > 0
         ? ["Quit Zen, then rerun the list and Diff Plan journey against a current authoritative Snapshot"]
         : [
-            `zts apply ${shellQuote(result.plan.id)} --yes --expect-digest ${shellQuote(result.plan.digest)}`,
+            `zts apply ${shellQuote(result.plan.id)} --yes --expect-digest ${shellQuote(result.plan.digest)}${options.manageZen ? " --manage-zen" : ""}`,
             `zts plan show ${shellQuote(result.plan.id)} --json`
           ];
       if (options.json) {
         printJson(envelope("diff plan", {
           profile: captured.context.profile,
-          zenRunning: captured.context.running,
+          captureZenRunning: captured.context.running,
+          zenRunning: managedLifecycle.relaunch === "verified" ? true : captured.context.running,
+          managedLifecycle,
           ...result
         }, { warnings, suggestedNextCommands }));
       } else {

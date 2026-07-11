@@ -166,7 +166,7 @@ test("CLI smokes cover reads, backup preview, and exact saved-Plan sort apply", 
       }
     ]
   };
-  const diffPlan = spawnSync("node", ["dist/cli.js", "diff", "plan", "--stdin", "--json"], {
+  const diffPlan = spawnSync("node", ["dist/cli.js", "diff", "plan", "--stdin", "--manage-zen", "--json"], {
     env,
     input: JSON.stringify(agentDiff),
     encoding: "utf8"
@@ -174,12 +174,21 @@ test("CLI smokes cover reads, backup preview, and exact saved-Plan sort apply", 
   assert.equal(diffPlan.status, 0, `${diffPlan.stdout}\n${diffPlan.stderr}`);
   const diffPlanJson = JSON.parse(diffPlan.stdout);
   assert.equal(diffPlanJson.ok, true);
+  assert.deepEqual(diffPlanJson.data.managedLifecycle, {
+    requested: true,
+    performed: false,
+    quit: "not_needed",
+    relaunch: "not_needed",
+    lifecycleBindingRevision: null,
+    relaunchedBindingRevision: null
+  });
   assert.equal(diffPlanJson.data.patch.snapshotRevision, allTabsJson.data.snapshotRevision);
   assert.equal(diffPlanJson.data.plan.snapshotRevision, allTabsJson.data.snapshotRevision);
   assert.equal(diffPlanJson.data.plan.actions[0].operation.entityRef, listedManualTab.entityRef);
   assert.equal(diffPlanJson.data.plan.actions[0].operation.precondition.sourceWorkspace.workspaceId, listedManualTab.workspace.id);
   assert.equal(diffPlanJson.data.plan.actions[0].operation.expectedPostState.workspaceId, portfolioWorkspace.id);
   assert.match(diffPlanJson.data.plan.digest, /^sha256:[a-f0-9]{64}$/u);
+  assert.match(diffPlanJson.suggestedNextCommands[0], /--manage-zen/iu);
   assert.match(diffPlanJson.suggestedNextCommands[0], /zts apply/iu);
 
   const staleAgentDiff = spawnSync("node", ["dist/cli.js", "diff", "plan", "--stdin", "--json"], {

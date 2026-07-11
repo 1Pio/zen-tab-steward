@@ -217,3 +217,30 @@ test("managed Zen does not claim closure while an originally bound profileless d
   assert.equal(closed.quit, "verified");
   assert.equal(read, 4, "closure must wait for every originally bound process identity");
 });
+
+test("managed Zen restores changed semantic window geometry before accepting relaunch", async () => {
+  const profilePath = "/tmp/zts-managed-window-restore-profile";
+  const executablePath = "/Applications/Zen.app/Contents/MacOS/zen";
+  let phase = "initial";
+  let restored = false;
+  const inventory = (rootPid, childPid, second) => parseZenProcessInventory(`
+${rootPid} 1 501 Sat Jul 11 16:${second}:24 2026 ${executablePath}
+${childPid} ${rootPid} 501 Sat Jul 11 16:${second}:24 2026 /Applications/Zen.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container -profile ${profilePath} org.mozilla.socket
+  `);
+  const platform = {
+    async listProcesses() { return phase === "closed" ? [] : phase === "initial" ? inventory(100, 101, "27") : inventory(200, 201, "28"); },
+    async inspectApplication(pid) { return { pid, bundleIdentifier: "app.zen-browser.zen", executablePath, bundlePath: "/Applications/Zen.app", version: "1.19.3b", bundleVersion: "126.3.15", teamIdentifier: "9V5K9TP787", codeDirectoryHash: "8533af", executableDevice: 1, executableInode: 2, executableSize: 3, executableModifiedMs: 4 }; },
+    async inspectWindows() { return [{ visible: true, miniaturized: false, bounds: { x: 10, y: 10, width: phase === "initial" || restored ? 1200 : 900, height: 800 } }]; },
+    async restoreWindows(_pid, windows) { assert.equal(windows[0].bounds.width, 1200); restored = true; },
+    async requestGracefulQuit() { phase = "closed"; return true; },
+    async launch() { phase = "relaunched"; },
+    async wait() {}
+  };
+  const request = { profilePath, executablePath, uid: 501, bundleIdentifier: "app.zen-browser.zen" };
+  const before = await captureManagedZenLifecycleBinding(platform, request);
+  await quitManagedZen(platform, before, { timeoutMs: 100, pollMs: 1 });
+  const after = await relaunchManagedZen(platform, before, { timeoutMs: 100, pollMs: 1 });
+
+  assert.equal(restored, true);
+  assert.equal(after.windowState.revision, before.windowState.revision);
+});

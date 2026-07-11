@@ -208,6 +208,9 @@ type RecoveryControlProofArtifact = RecoveryControlProofBase & (
   | {
       readonly route: "managed_zen";
       readonly lifecycleBinding: ManagedZenLifecycleBinding;
+      readonly persistenceRelaunchedBinding: ManagedZenLifecycleBinding | null;
+      readonly persistenceClosedEvidence: Awaited<ReturnType<typeof quitManagedZen>> | null;
+      readonly persistenceSnapshotRevision: Sha256Digest | null;
       readonly relaunchedBinding: ManagedZenLifecycleBinding;
     }
 );
@@ -1099,11 +1102,11 @@ export async function recoverApplyTransaction(
       config.config
     );
     refreshed = captured.context;
-    const state = captured.state;
+    let state = captured.state;
     if (!sameJsonLz4Fingerprint(expectedCurrentFingerprint, state.fingerprint)) {
       throw new ApplyRecoveryBlockedError("Apply recovery session evidence changed after the digest-bound inspection");
     }
-    const observedSnapshot = captured.snapshot;
+    let observedSnapshot = captured.snapshot;
     const preparedDigest = journalPreparedDigest(selected.journal);
     const commitStageSeen = journalCommitStageSeen(selected.journal);
     if (atomicBoundary?.classification === "not_committed" && commitStageSeen) {
@@ -1129,7 +1132,7 @@ export async function recoverApplyTransaction(
         && atomicBoundary.reason === "external_drift_before_commit"
         ? "hard_crash_external_drift_before_commit"
         : "hard_crash_before_mutation";
-    const operations = recoveredOperations(
+    let operations = recoveredOperations(
       observedSnapshot,
       moveActions,
       mutationAttempted,
@@ -1139,7 +1142,7 @@ export async function recoverApplyTransaction(
     const netChanged = operationNetChanged(operations);
     const expectedAfterSnapshot = deriveExactPlannedAfterSnapshot(stored.snapshot, moveActions);
     const currentMatchesExactPlannedAfter = observedSnapshot.revision === expectedAfterSnapshot.revision;
-    const allVerified = effectiveClassification === "planned_after_present"
+    let allVerified = effectiveClassification === "planned_after_present"
       && currentMatchesExactPlannedAfter
       && operations.every((operation) => operation.status === "verified");
 
@@ -1277,6 +1280,48 @@ export async function recoverApplyTransaction(
     nativeControlReleaseAttempted = true;
     await nativeControl!.release();
     nativeControlReleased = true;
+    let managedPersistenceRelaunchedBinding: ManagedZenLifecycleBinding | null = null;
+    let managedPersistenceClosedEvidence: Awaited<ReturnType<typeof quitManagedZen>> | null = null;
+    if (managedLifecycleBinding && options.managedLifecycle && allVerified && mutationAttempted) {
+      managedPersistenceRelaunchedBinding = await ensureManagedZenRelaunched(
+        options.managedLifecycle.platform,
+        managedLifecycleBinding,
+        options.managedLifecycle.waitOptions
+      );
+      managedPersistenceClosedEvidence = await quitManagedZen(
+        options.managedLifecycle.platform,
+        managedPersistenceRelaunchedBinding,
+        options.managedLifecycle.waitOptions
+      );
+      refreshed = await refreshTargetContext(context);
+      nativeControl = await acquireNativeProfileControl(refreshed, 0);
+      nativeControlReleaseAttempted = false;
+      nativeControlReleased = false;
+      await nativeControl.assertHeld();
+      const persisted = await captureControlledSessionSnapshot(
+        refreshed,
+        nativeControl,
+        config.config
+      );
+      if (persisted.snapshot.revision !== expectedAfterSnapshot.revision) {
+        throw new ApplyRecoveryBlockedError(
+          "Managed Apply recovery persistence check did not match the exact planned after-Snapshot"
+        );
+      }
+      observedSnapshot = persisted.snapshot;
+      state = persisted.state;
+      operations = recoveredOperations(
+        persisted.snapshot,
+        moveActions,
+        true,
+        "planned_after_present",
+        notAttemptedOperationIssueCode
+      );
+      allVerified = operations.every((operation) => operation.status === "verified");
+      nativeControlReleaseAttempted = true;
+      await nativeControl.release();
+      nativeControlReleased = true;
+    }
     const staleLockReleased = recoveryProfileLock
       ? false
       : await releaseMatchingStaleLock(refreshed, selected.journal, inspection.lock);
@@ -1295,7 +1340,7 @@ export async function recoverApplyTransaction(
     if (managedLifecycleBinding && options.managedLifecycle) {
       managedRelaunchedBinding = await ensureManagedZenRelaunched(
         options.managedLifecycle.platform,
-        managedLifecycleBinding,
+        managedPersistenceRelaunchedBinding ?? managedLifecycleBinding,
         options.managedLifecycle.waitOptions
       );
       assertManagedZenRelaunchBinding(managedLifecycleBinding, managedRelaunchedBinding);
@@ -1347,6 +1392,9 @@ export async function recoverApplyTransaction(
           ...commonControlProof,
           route: "managed_zen",
           lifecycleBinding: managedLifecycleBinding,
+          persistenceRelaunchedBinding: managedPersistenceRelaunchedBinding,
+          persistenceClosedEvidence: managedPersistenceClosedEvidence,
+          persistenceSnapshotRevision: managedPersistenceRelaunchedBinding ? observedSnapshot.revision : null,
           relaunchedBinding: managedRelaunchedBinding
         }
       : { ...commonControlProof, route: "closed_session" };
@@ -2044,7 +2092,13 @@ function defineRecoveryControlProof(
     "allOperationsVerified", "atomicCommitReconciliation", "exclusiveControlReleased",
     "nativeProfileControl", "ztsProfileControl", "preparedTemporaryArtifact",
     "preparedTemporaryCompleteness", "preparedTemporaryDisposition",
-    ...(managed ? ["lifecycleBinding", "relaunchedBinding"] : [])
+    ...(managed ? [
+      "lifecycleBinding",
+      "persistenceRelaunchedBinding",
+      "persistenceClosedEvidence",
+      "persistenceSnapshotRevision",
+      "relaunchedBinding"
+    ] : [])
   ], "Recovery terminal control proof");
   const proof = value as RecoveryControlProofArtifact;
   const expectedBeforeFingerprint = journalBeforeFingerprint(journal);
@@ -2077,7 +2131,22 @@ function defineRecoveryControlProof(
   if (proof.route === "managed_zen") {
     const lifecycleBinding = defineManagedZenLifecycleBinding(proof.lifecycleBinding);
     const relaunchedBinding = defineManagedZenLifecycleBinding(proof.relaunchedBinding);
-    assertManagedZenRelaunchBinding(lifecycleBinding, relaunchedBinding);
+    if (proof.persistenceRelaunchedBinding === null) {
+      if (proof.persistenceClosedEvidence !== null || proof.persistenceSnapshotRevision !== null) {
+        throw new Error("Managed recovery persistence evidence is incomplete");
+      }
+      assertManagedZenRelaunchBinding(lifecycleBinding, relaunchedBinding);
+    } else {
+      const persistenceBinding = defineManagedZenLifecycleBinding(proof.persistenceRelaunchedBinding);
+      assertManagedZenRelaunchBinding(lifecycleBinding, persistenceBinding);
+      assertManagedZenRelaunchBinding(persistenceBinding, relaunchedBinding);
+      if (!proof.persistenceClosedEvidence
+        || proof.persistenceClosedEvidence.quit !== "verified"
+        || proof.persistenceClosedEvidence.stateFlush !== "pending_native_profile_control"
+        || !isDigest(proof.persistenceSnapshotRevision)) {
+        throw new Error("Managed recovery persistence verification evidence is invalid");
+      }
+    }
   }
   canonicalTimestamp(proof.recoveredAt, "Recovery terminal control proof timestamp");
   if (!proof.nativeProfileControl || typeof proof.nativeProfileControl !== "object"

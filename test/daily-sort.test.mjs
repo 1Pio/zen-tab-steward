@@ -90,7 +90,43 @@ test("all-workspace preview and dry-run reuse one protected state-bound Plan", a
   assert.ok(latestJson.suggestedNextCommands.includes("zts sort --all --engine rules --dry-run"));
 });
 
-test("an authoritative multi-move Plan applies through one managed quit and relaunch Receipt", async () => {
+test("managed authoritative capture creates one executable revision-bound Diff Plan and restores Zen", async () => {
+  const fixture = await makeDailySortFixture();
+  const env = dailySortEnv(fixture);
+  const listed = spawnSync("node", ["dist/cli.js", "tabs", "--all", "--json"], { env, encoding: "utf8" });
+  assert.equal(listed.status, 0, `${listed.stdout}\n${listed.stderr}`);
+  const listing = JSON.parse(listed.stdout).data;
+  const tab = listing.tabs.find((candidate) => candidate.workspace.id === "w-space" && !candidate.protection.protected);
+  assert.ok(tab);
+  const diff = {
+    schemaVersion: "zts.diff.provisional-1",
+    snapshotRevision: listing.snapshotRevision,
+    moves: [{
+      entityRef: tab.entityRef,
+      fromWorkspaceId: tab.workspace.id,
+      toWorkspaceId: "w-portfolio",
+      reason: "Managed authoritative Diff acceptance"
+    }]
+  };
+
+  const executed = spawnSync("node", ["--input-type=module", "--eval", managedPlanEvalScript(fixture, diff)], {
+    cwd: process.cwd(), env, encoding: "utf8"
+  });
+  assert.equal(executed.status, 0, `${executed.stdout}\n${executed.stderr}`);
+  const document = JSON.parse(executed.stdout);
+  assert.equal(document.plan.snapshotAuthority, "authoritative");
+  assert.equal(document.plan.snapshotFreshness, "current");
+  assert.equal(document.plan.snapshotRevision, listing.snapshotRevision);
+  assert.equal(document.lifecycle.quit, "verified");
+  assert.equal(document.lifecycle.relaunch, "verified");
+  assert.equal(document.quitCount, 1);
+  assert.equal(document.launchCount, 1);
+  const stored = spawnSync("node", ["dist/cli.js", "plan", "show", document.plan.id, "--json"], { env, encoding: "utf8" });
+  assert.equal(stored.status, 0, `${stored.stdout}\n${stored.stderr}`);
+  assert.equal(JSON.parse(stored.stdout).data.plan.digest, document.plan.digest);
+});
+
+test("an authoritative multi-move Plan proves persistence through a second managed close and final relaunch", async () => {
   const fixture = await makeDailySortFixture();
   const env = dailySortEnv(fixture);
   const plan = previewDailyPlan(env);
@@ -113,6 +149,8 @@ test("an authoritative multi-move Plan applies through one managed quit and rela
   assert.equal(document.receipt.control.windowRestoration, "verified");
   assert.equal(document.receipt.operations.length, moveCount);
   assert.ok(document.receipt.operations.every((operation) => operation.status === "verified"));
+  assert.equal(document.quitCount, 2);
+  assert.equal(document.launchCount, 2);
 });
 
 test("managed Apply refuses whole-Plan Drift before mutation and still restores Zen", async () => {
@@ -153,6 +191,30 @@ test("managed Apply refuses whole-Plan Drift before mutation and still restores 
     assert.equal(after.tabs.find((tab) => tab.zenSyncId === nativeId)?.zenWorkspace, sourceWorkspaceId);
   }
   assert.match(after.tabs.find((tab) => tab.zenSyncId === unrelated.zenSyncId).entries[0].title, /drifted$/u);
+});
+
+test("managed Apply never reports applied when Zen rewrites the moved state during reopen", async () => {
+  const fixture = await makeDailySortFixture();
+  const env = dailySortEnv(fixture);
+  const originalSessionBase64 = (await readFile(fixture.sessionPath)).toString("base64");
+  const plan = previewDailyPlan(env);
+
+  const result = spawnSync("node", ["--input-type=module", "--eval", managedApplyEvalScript(
+    fixture,
+    plan,
+    { originalSessionBase64 }
+  )], { cwd: process.cwd(), env, encoding: "utf8" });
+
+  assert.notEqual(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stderr, /requires zts apply recover/iu);
+  const restored = await readJsonLz4(fixture.sessionPath);
+  assert.equal(restored.tabs.find((tab) => tab.zenSyncId === "tab-space-framer")?.zenWorkspace, "w-space");
+  const receipts = spawnSync("node", ["dist/cli.js", "apply", "list", "--json"], { env, encoding: "utf8" });
+  assert.equal(receipts.status, 0, `${receipts.stdout}\n${receipts.stderr}`);
+  assert.equal(JSON.parse(receipts.stdout).data.receipts.some((receipt) => receipt.outcome === "applied"), false);
+  const recoveries = spawnSync("node", ["dist/cli.js", "apply", "recover", "--json"], { env, encoding: "utf8" });
+  assert.equal(recoveries.status, 0, `${recoveries.stdout}\n${recoveries.stderr}`);
+  assert.equal(JSON.parse(recoveries.stdout).data.recoveries.length, 1);
 });
 
 test("lexical all-workspace preview persists one reviewable Plan reused by dry-run", async () => {
@@ -4627,14 +4689,52 @@ async function planAndApplyManualMove(fixture, env, nativeId, destinationWorkspa
   return JSON.parse(applied.stdout).data.receipt;
 }
 
-function managedApplyEvalScript(fixture, plan) {
+function managedPlanEvalScript(fixture, diff) {
+  const executablePath = "/Applications/Zen.app/Contents/MacOS/zen";
+  return [
+    'import { runManagedAuthoritativeCapture } from "./dist/managed-authoritative-capture.js";',
+    'import { createPatchFromAgentDiff } from "./dist/agent-diff.js";',
+    'import { resolveManualPlanFromInput } from "./dist/manual.js";',
+    'import { parseZenProcessInventory } from "./dist/managed-zen-lifecycle.js";',
+    'import { discoverProfileContext } from "./dist/profile.js";',
+    'import { loadConfig } from "./dist/config.js";',
+    'let phase = "initial"; let quitCount = 0; let launchCount = 0;',
+    `const profilePath = ${JSON.stringify(fixture.profilePath)};`,
+    `const executablePath = ${JSON.stringify(executablePath)};`,
+    'const inventory = (rootPid, childPid, second) => parseZenProcessInventory(`',
+    '${rootPid} 1 501 Sat Jul 11 16:${second}:24 2026 ${executablePath}',
+    '${childPid} ${rootPid} 501 Sat Jul 11 16:${second}:24 2026 /Applications/Zen.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container -profile ${profilePath} org.mozilla.machname.1 1 socket',
+    '`);',
+    'const platform = {',
+    ' async listProcesses() { if (phase === "closed") return []; return phase === "initial" ? inventory(100, 101, "27") : inventory(200, 201, "28"); },',
+    ' async inspectApplication(pid) { return { pid, bundleIdentifier: "app.zen-browser.zen", executablePath, bundlePath: "/Applications/Zen.app", version: "1.19.3b", bundleVersion: "126.3.15", teamIdentifier: "9V5K9TP787", codeDirectoryHash: "8533af", executableDevice: 1, executableInode: 2, executableSize: 3, executableModifiedMs: 4 }; },',
+    ' async inspectWindows() { return [{ visible: true, miniaturized: false, bounds: { x: 10, y: 10, width: 1000, height: 800 } }]; },',
+    ' async requestGracefulQuit() { quitCount += 1; phase = "closed"; return true; },',
+    ' async launch() { launchCount += 1; phase = "relaunched"; },',
+    ' async wait() {}',
+    '};',
+    'const discovered = await discoverProfileContext();',
+    'const context = { ...discovered, running: true };',
+    'const loaded = await loadConfig();',
+    `const diff = ${JSON.stringify(diff)};`,
+    'const result = await runManagedAuthoritativeCapture(context, loaded.config, {',
+    ' platform, request: { profilePath, executablePath, uid: 501, bundleIdentifier: "app.zen-browser.zen" }, waitOptions: { timeoutMs: 100, pollMs: 1 }',
+    '}, async (captured) => resolveManualPlanFromInput(captured.snapshot, createPatchFromAgentDiff(captured.snapshot, diff), loaded.config));',
+    'console.log(JSON.stringify({ plan: result.value.plan, lifecycle: result.lifecycle, quitCount, launchCount }));'
+  ].join("\n");
+}
+
+function managedApplyEvalScript(fixture, plan, options = {}) {
   const executablePath = "/Applications/Zen.app/Contents/MacOS/zen";
   return [
     'import { applyStoredPlanClosedSession } from "./dist/apply-transaction.js";',
     'import { parseZenProcessInventory } from "./dist/managed-zen-lifecycle.js";',
     'import { discoverProfileContext } from "./dist/profile.js";',
     'import { loadStoredPlan } from "./dist/plans.js";',
+    'import { writeFileSync } from "node:fs";',
     'let phase = "initial";',
+    'let quitCount = 0;',
+    'let launchCount = 0;',
     `const profilePath = ${JSON.stringify(fixture.profilePath)};`,
     `const executablePath = ${JSON.stringify(executablePath)};`,
     'const inventory = (rootPid, childPid, second) => parseZenProcessInventory(`',
@@ -4644,7 +4744,8 @@ function managedApplyEvalScript(fixture, plan) {
     'const platform = {',
     '  async listProcesses() {',
     '    if (phase === "closed") return [];',
-    '    return phase === "initial" ? inventory(100, 101, "27") : inventory(200, 201, "28");',
+    '    if (phase === "initial") return inventory(100, 101, "27");',
+    '    return launchCount === 1 ? inventory(200, 201, "28") : inventory(300, 301, "29");',
     '  },',
     '  async inspectApplication(pid) { return {',
     '    pid, bundleIdentifier: "app.zen-browser.zen", executablePath, bundlePath: "/Applications/Zen.app",',
@@ -4652,8 +4753,10 @@ function managedApplyEvalScript(fixture, plan) {
     '    codeDirectoryHash: "8533af", executableDevice: 1, executableInode: 2, executableSize: 3, executableModifiedMs: 4',
     '  }; },',
     '  async inspectWindows() { return [{ visible: true, miniaturized: false, bounds: { x: 10, y: 10, width: 1000, height: 800 } }]; },',
-    '  async requestGracefulQuit() { phase = "closed"; return true; },',
-    '  async launch() { phase = "relaunched"; },',
+    '  async requestGracefulQuit() { quitCount += 1; phase = "closed"; return true; },',
+    `  async launch() { launchCount += 1; phase = "relaunched";${options.originalSessionBase64
+      ? ` if (launchCount === 1) writeFileSync(${JSON.stringify(fixture.sessionPath)}, Buffer.from(${JSON.stringify(options.originalSessionBase64)}, "base64"));`
+      : ""} },`,
     '  async wait() {}',
     '};',
     'const discovered = await discoverProfileContext();',
@@ -4668,7 +4771,7 @@ function managedApplyEvalScript(fixture, plan) {
     '    waitOptions: { timeoutMs: 100, pollMs: 1 }',
     '  }',
     '});',
-    'console.log(JSON.stringify({ authorization: result.authorization, receipt: result.receipt }));'
+    'console.log(JSON.stringify({ authorization: result.authorization, receipt: result.receipt, quitCount, launchCount }));'
   ].join("\n");
 }
 

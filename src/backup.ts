@@ -1278,27 +1278,46 @@ async function withBackupControl<T>(
   operation: (assertStoreHeld: BackupStoreGuard) => Promise<T>
 ): Promise<T> {
   const controlPath = privatePath(backupRoot, ".backup-control.lock");
-  const control = await acquireExclusiveFileControl(controlPath, "Backup store control", { timeoutSeconds: 15 });
+  return withBackupInProcessControl(controlPath, async () => {
+    const control = await acquireExclusiveFileControl(controlPath, "Backup store control", { timeoutSeconds: 15 });
+    try {
+      const rootIdentity = await lstat(backupRoot);
+      assertPrivateDirectoryMetadata(rootIdentity, backupRoot);
+      const assertStoreHeld = async () => {
+        await control.assertHeld();
+        const current = await lstat(backupRoot);
+        assertPrivateDirectoryMetadata(current, backupRoot);
+        if (current.dev !== rootIdentity.dev || current.ino !== rootIdentity.ino) {
+          throw new Error("Backup store root no longer names the controlled directory");
+        }
+      };
+      await assertStoreHeld();
+      await reconcileBackupStandaloneTemporaries(
+        backupRoot,
+        await existingPruneRoot(profileId),
+        assertStoreHeld
+      );
+      return await operation(assertStoreHeld);
+    } finally {
+      await control.release();
+    }
+  });
+}
+
+const backupInProcessControlTails = new Map<string, Promise<void>>();
+
+async function withBackupInProcessControl<T>(key: string, operation: () => Promise<T>): Promise<T> {
+  const previous = backupInProcessControlTails.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const owned = new Promise<void>((resolve) => { release = resolve; });
+  const tail = previous.catch(() => undefined).then(() => owned);
+  backupInProcessControlTails.set(key, tail);
+  await previous.catch(() => undefined);
   try {
-    const rootIdentity = await lstat(backupRoot);
-    assertPrivateDirectoryMetadata(rootIdentity, backupRoot);
-    const assertStoreHeld = async () => {
-      await control.assertHeld();
-      const current = await lstat(backupRoot);
-      assertPrivateDirectoryMetadata(current, backupRoot);
-      if (current.dev !== rootIdentity.dev || current.ino !== rootIdentity.ino) {
-        throw new Error("Backup store root no longer names the controlled directory");
-      }
-    };
-    await assertStoreHeld();
-    await reconcileBackupStandaloneTemporaries(
-      backupRoot,
-      await existingPruneRoot(profileId),
-      assertStoreHeld
-    );
-    return await operation(assertStoreHeld);
+    return await operation();
   } finally {
-    await control.release();
+    release();
+    if (backupInProcessControlTails.get(key) === tail) backupInProcessControlTails.delete(key);
   }
 }
 

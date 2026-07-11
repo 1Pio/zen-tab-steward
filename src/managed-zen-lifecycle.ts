@@ -82,6 +82,7 @@ export interface ManagedZenPlatform {
   listProcesses(): Promise<readonly ZenProcessInventoryEntry[]>;
   inspectApplication(pid: number): Promise<ManagedZenApplicationIdentity>;
   inspectWindows(pid: number): Promise<readonly ManagedZenWindow[]>;
+  restoreWindows?(pid: number, windows: readonly ManagedZenWindow[]): Promise<void>;
   requestGracefulQuit(pid: number): Promise<boolean>;
   launch(application: { readonly bundlePath: string; readonly profilePath: string }): Promise<void>;
   wait(milliseconds: number): Promise<void>;
@@ -347,6 +348,33 @@ export function assertManagedZenRelaunchBinding(
   }
 }
 
+export async function verifyOrRestoreManagedZenRelaunch(
+  platform: ManagedZenPlatform,
+  before: ManagedZenLifecycleBinding,
+  after: ManagedZenLifecycleBinding,
+  options: ManagedZenLifecycleWaitOptions
+): Promise<ManagedZenLifecycleBinding> {
+  try {
+    assertManagedZenRelaunchBinding(before, after);
+    return after;
+  } catch (error) {
+    if (after.profilePath !== before.profilePath
+      || after.executablePath !== before.executablePath
+      || after.bundleIdentifier !== before.bundleIdentifier
+      || after.uid !== before.uid
+      || (after.rootPid === before.rootPid && after.processStartIdentity === before.processStartIdentity)) {
+      throw error;
+    }
+    assertSameApplication(before.application, after.application);
+    if (!platform.restoreWindows) throw error;
+    await platform.restoreWindows(after.rootPid, before.windowState.windows);
+    await platform.wait(options.pollMs);
+    const restored = await captureManagedZenLifecycleBinding(platform, requestFromBinding(before));
+    assertManagedZenRelaunchBinding(before, restored);
+    return restored;
+  }
+}
+
 export async function quitManagedZen(
   platform: ManagedZenPlatform,
   binding: ManagedZenLifecycleBinding,
@@ -413,8 +441,8 @@ export async function relaunchManagedZen(
   let lastError: unknown = null;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
-      const relaunched = await captureManagedZenLifecycleBinding(platform, request);
-      assertManagedZenRelaunchBinding(binding, relaunched);
+      let relaunched = await captureManagedZenLifecycleBinding(platform, request);
+      relaunched = await verifyOrRestoreManagedZenRelaunch(platform, binding, relaunched, options);
       await platform.wait(options.pollMs);
       const stable = await captureManagedZenLifecycleBinding(platform, request);
       if (stable.rootPid !== relaunched.rootPid
@@ -448,8 +476,7 @@ export async function ensureManagedZenRelaunched(
     return relaunchManagedZen(platform, binding, options);
   }
   const current = await captureManagedZenLifecycleBinding(platform, requestFromBinding(binding));
-  assertManagedZenRelaunchBinding(binding, current);
-  return current;
+  return verifyOrRestoreManagedZenRelaunch(platform, binding, current, options);
 }
 
 function commandStartsWithExecutable(args: string, executablePath: string): boolean {

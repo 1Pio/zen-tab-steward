@@ -37,6 +37,31 @@ export function createDarwinManagedZenPlatform(): ManagedZenPlatform {
     async inspectWindows(pid) {
       return inspectWindows(pid);
     },
+    async restoreWindows(pid, windows) {
+      assertPid(pid);
+      const targets = JSON.stringify(windows);
+      await runJxa(`
+        ObjC.import("AppKit");
+        const running = $.NSRunningApplication.runningApplicationWithProcessIdentifier(${pid});
+        if (!running) throw new Error("Zen process is no longer a running application");
+        const application = Application(ObjC.unwrap(running.bundleIdentifier));
+        const targets = ${targets};
+        const read = fn => { try { return fn(); } catch { return null; } };
+        const semantic = application.windows().filter(window => {
+          const id = read(() => window.id());
+          const bounds = read(() => window.bounds());
+          return Number.isInteger(id) && bounds && Number(bounds.width) > 0 && Number(bounds.height) > 0;
+        });
+        if (semantic.length !== targets.length) throw new Error("Zen semantic window count changed before restoration");
+        semantic.forEach((window, index) => {
+          const target = targets[index];
+          window.bounds = target.bounds;
+          window.visible = target.visible;
+          window.miniaturized = target.miniaturized;
+        });
+        "restored";
+      `);
+    },
     async requestGracefulQuit(pid) {
       const { stdout } = await runJxa(`
         ObjC.import("AppKit");

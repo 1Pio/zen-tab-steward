@@ -734,6 +734,9 @@ export async function applyStoredPlanClosedSession(
   let inversePlanArtifact: ArtifactReference | null = null;
   let expectedAfterSnapshot: Snapshot | null = null;
   let managedClosedEvidence: ManagedZenClosedEvidence | null = null;
+  let managedPersistenceRelaunchedBinding: ManagedZenLifecycleBinding | null = null;
+  let managedPersistenceClosedEvidence: ManagedZenClosedEvidence | null = null;
+  let managedPersistenceCaptureCompleted = false;
   let managedRelaunchedBinding: ManagedZenLifecycleBinding | null = null;
   let managedQuitAttempted = false;
   const processChecks: Array<Readonly<Record<string, unknown>>> = [];
@@ -906,16 +909,53 @@ export async function applyStoredPlanClosedSession(
     const afterSnapshot = afterCapture.snapshot;
     observedSnapshot = afterSnapshot;
     assertExactPlannedAfterSnapshot(afterSnapshot, expectedAfterSnapshot);
-    const operations = verifyOperations(afterSnapshot, moveActions);
+    let receiptAfterSnapshot = afterSnapshot;
+    let receiptAfterState = afterState;
+    let operations = verifyOperations(afterSnapshot, moveActions);
     await updateJournal("verified", {
       afterSnapshotRevision: afterSnapshot.revision,
       afterSourceFingerprint: afterState.fingerprint,
       inversePlanArtifact
     });
 
+    const mutationNativeControlProof = nativeControl.proof;
     nativeControlReleaseAttempted = true;
     await nativeControl.release();
     nativeControlReleased = true;
+    if (managedLifecycleBinding && options.managedLifecycle) {
+      managedPersistenceRelaunchedBinding = await relaunchManagedZen(
+        options.managedLifecycle.platform,
+        managedLifecycleBinding,
+        options.managedLifecycle.waitOptions
+      );
+      managedPersistenceClosedEvidence = await quitManagedZen(
+        options.managedLifecycle.platform,
+        managedPersistenceRelaunchedBinding,
+        options.managedLifecycle.waitOptions
+      );
+      const persistenceContext = await refreshTargetContext(initialContext);
+      nativeControl = await acquireNativeProfileControl(persistenceContext, 0);
+      nativeControlReleaseAttempted = false;
+      nativeControlReleased = false;
+      await nativeControl.assertHeld();
+      nativeProfileControlVerified = true;
+      const persistenceCapture = await captureControlledSessionSnapshot(
+        persistenceContext,
+        nativeControl,
+        loadedConfig.config
+      );
+      processChecks.push(processCheck("after_reopen_persistence", persistenceCapture.context));
+      assertClosedSessionRoute(persistenceCapture.context);
+      observedSnapshot = persistenceCapture.snapshot;
+      managedPersistenceCaptureCompleted = true;
+      assertExactPlannedAfterSnapshot(persistenceCapture.snapshot, expectedAfterSnapshot);
+      receiptAfterSnapshot = persistenceCapture.snapshot;
+      receiptAfterState = persistenceCapture.state;
+      operations = verifyOperations(persistenceCapture.snapshot, moveActions);
+      nativeControlReleaseAttempted = true;
+      await nativeControl.release();
+      nativeControlReleased = true;
+    }
     lockReleaseAttempted = true;
     const released = await lock.release();
     lockReleased = true;
@@ -923,11 +963,15 @@ export async function applyStoredPlanClosedSession(
     if (managedLifecycleBinding && options.managedLifecycle) {
       managedRelaunchedBinding = await relaunchManagedZen(
         options.managedLifecycle.platform,
-        managedLifecycleBinding,
+        managedPersistenceRelaunchedBinding ?? managedLifecycleBinding,
         options.managedLifecycle.waitOptions
       );
     }
-    const controlProof = managedLifecycleBinding && managedClosedEvidence && managedRelaunchedBinding
+    const controlProof = managedLifecycleBinding
+      && managedClosedEvidence
+      && managedPersistenceRelaunchedBinding
+      && managedPersistenceClosedEvidence
+      && managedRelaunchedBinding
       ? {
           schemaVersion: CONTROL_SCHEMA,
           transactionId,
@@ -935,17 +979,21 @@ export async function applyStoredPlanClosedSession(
           route: "managed_zen" as const,
           lifecycleBinding: managedLifecycleBinding,
           closedEvidence: managedClosedEvidence,
+          persistenceRelaunchedBinding: managedPersistenceRelaunchedBinding,
+          persistenceClosedEvidence: managedPersistenceClosedEvidence,
           relaunchedBinding: managedRelaunchedBinding,
           lockRevision: lock.artifactRevision,
           lockAcquiredAt: lock.acquiredAt,
           lockReleasedAt: released.releasedAt,
           beforeSnapshotRevision: beforeSnapshot.revision,
-          afterSnapshotRevision: afterSnapshot.revision,
+          afterSnapshotRevision: receiptAfterSnapshot.revision,
           beforeSourceFingerprint: beforeState.fingerprint,
-          afterSourceFingerprint: afterState.fingerprint,
+          afterSourceFingerprint: receiptAfterState.fingerprint,
           nativeProfileControl: {
-            proof: nativeControl.proof,
-            released: nativeControlReleased
+            mutationProof: mutationNativeControlProof,
+            persistenceProof: nativeControl.proof,
+            released: nativeControlReleased,
+            persistenceVerified: true
           },
           zenProcessChecks: processChecks
         }
@@ -958,11 +1006,11 @@ export async function applyStoredPlanClosedSession(
       lockAcquiredAt: lock.acquiredAt,
       lockReleasedAt: released.releasedAt,
       beforeSnapshotRevision: beforeSnapshot.revision,
-      afterSnapshotRevision: afterSnapshot.revision,
+      afterSnapshotRevision: receiptAfterSnapshot.revision,
       beforeSourceFingerprint: beforeState.fingerprint,
-      afterSourceFingerprint: afterState.fingerprint,
+      afterSourceFingerprint: receiptAfterState.fingerprint,
       nativeProfileControl: {
-        proof: nativeControl.proof,
+        proof: mutationNativeControlProof,
         released: nativeControlReleased
       },
       zenProcessChecks: processChecks
@@ -1000,7 +1048,7 @@ export async function applyStoredPlanClosedSession(
       outcome: "applied",
       mutationAttempted: true,
       netChanged: true,
-      afterSnapshotRevision: afterSnapshot.revision,
+      afterSnapshotRevision: receiptAfterSnapshot.revision,
       control: managedLifecycleBinding
         ? {
             route: "managed_zen",
@@ -1142,7 +1190,7 @@ export async function applyStoredPlanClosedSession(
       const lifecycleReleasedAt = releaseStatus === "verified" ? releasedAt : null;
       let managedRelaunchFailure: string | null = null;
       const safeToRelaunch = mutationStatus !== "uncertain"
-        && !(mutationCommitted && !verifiedFailureOperations);
+        && (managedPersistenceCaptureCompleted || !(mutationCommitted && !verifiedFailureOperations));
       if (managedLifecycleBinding
         && managedClosedEvidence
         && !managedRelaunchedBinding

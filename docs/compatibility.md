@@ -10,6 +10,7 @@ control into the runtime Snapshot capability proof.
 | Platform | Zen version | Build id | OS ABI | Schema family | Entity kind | Route | Capability posture |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | macOS arm64 | 1.19.3b | 20260315063056 | `Darwin_aarch64-gcc3` | `zen-session-v1` | standalone tab with one unique native id | closed session | Fixture, crash/recovery, bounded owner-Profile apply/reopen/Undo/reopen, and clean-consumer packaging accepted 2026-07-11; release automation remains |
+| macOS arm64 | 1.19.3b | 20260315063056 | `Darwin_aarch64-gcc3` | `zen-session-v1` | standalone tab with one unique native id | managed closed session | Exact app/Profile/process/window fixture and crash-recovery gates accepted; bounded owner-Profile authoritative Diff Plan/reopen accepted 2026-07-11; reversible managed Apply/Undo acceptance remains |
 | macOS x64 | 1.19.3b | 20260315063056 | `Darwin_x86_64-gcc3` | `zen-session-v1` | standalone tab with one unique native id | closed session | Provisional fixture-tested candidate; runtime proof required |
 
 The exact gate above allows a current authoritative Snapshot to report
@@ -24,6 +25,12 @@ installation, packaged CLI smoke, and packaged read-only acceptance against the
 running owner Profile. Repeatable release automation and signed/published
 artifacts remain separate gates. The x64 row is contract-fixture coverage and
 still needs its own real installation acceptance.
+
+The managed arm64 candidate uses normal app termination only and never force
+kills Zen. It restores the exact signed app, Profile, and semantic window
+geometry. Apply uses two bounded restart cycles because the second authoritative
+closed capture is the evidence that Zen itself loaded and persisted the planned
+Workspace state; a stable process/window alone is not persistence proof.
 
 Grouped tabs, Zen folders, nested folders, and split views are normalized for
 inspection and planning, but closed-session mutation for those Entity kinds is

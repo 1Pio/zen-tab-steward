@@ -57,8 +57,8 @@ test("managed recovery classifies an exact committed after-state and relaunches 
   assert.equal(crashed.status, 72, `${crashed.stdout}\n${crashed.stderr}`);
   assert.deepEqual(await readController(fixture), {
     phase: "closed",
-    quitCount: 1,
-    launchCount: 0
+    quitCount: 2,
+    launchCount: 1
   });
   const committedBytes = await readFile(fixture.sessionPath);
   const committedStat = await stat(fixture.sessionPath);
@@ -84,8 +84,8 @@ test("managed recovery classifies an exact committed after-state and relaunches 
   assert.equal(recoveredStat.mtimeMs, committedStat.mtimeMs);
   assert.deepEqual(await readController(fixture), {
     phase: "relaunched",
-    quitCount: 1,
-    launchCount: 1
+    quitCount: 3,
+    launchCount: 3
   });
   assert.equal(listRecoveries(env).length, 0);
 });
@@ -112,8 +112,8 @@ test("managed recovery resumes after crashing with the exact replacement Zen alr
   assert.equal(recoveryCrash.status, 74, `${recoveryCrash.stdout}\n${recoveryCrash.stderr}`);
   assert.deepEqual(await readController(fixture), {
     phase: "relaunched",
-    quitCount: 1,
-    launchCount: 1
+    quitCount: 3,
+    launchCount: 3
   });
   assert.deepEqual(await readFile(fixture.sessionPath), committedBytes);
   assert.equal(listRecoveries(env).length, 1);
@@ -133,13 +133,46 @@ test("managed recovery resumes after crashing with the exact replacement Zen alr
   assert.equal(finalStat.mtimeMs, committedStat.mtimeMs);
   assert.deepEqual(await readController(fixture), {
     phase: "relaunched",
-    quitCount: 1,
-    launchCount: 1
+    quitCount: 4,
+    launchCount: 4
   });
   assert.equal(listRecoveries(env).length, 0);
   const receipts = listReceipts(env);
   assert.equal(receipts.length, 1);
   assert.equal(receipts[0].id, result.receipt.id);
+});
+
+test("managed Diff capture restores Zen after a hard crash and never creates a Plan during recovery", async () => {
+  const fixture = await makeFixture();
+  const env = fixtureEnv(fixture);
+  const listed = spawnSync("node", ["dist/cli.js", "tabs", "--all", "--json"], { env, encoding: "utf8" });
+  assert.equal(listed.status, 0, `${listed.stdout}\n${listed.stderr}`);
+  const data = JSON.parse(listed.stdout).data;
+  const tab = data.tabs.find((candidate) => candidate.workspace.id === "w-inbox");
+  assert.ok(tab);
+  const diff = {
+    schemaVersion: "zts.diff.provisional-1",
+    snapshotRevision: data.snapshotRevision,
+    moves: [{ entityRef: tab.entityRef, fromWorkspaceId: "w-inbox", toWorkspaceId: "w-work", reason: "Crash-safe managed plan" }]
+  };
+
+  const crashed = runManagedCapture(fixture, env, diff, "afterQuit", 75);
+  assert.equal(crashed.status, 75, `${crashed.stdout}\n${crashed.stderr}`);
+  assert.deepEqual(await readController(fixture), { phase: "closed", quitCount: 1, launchCount: 0 });
+
+  const restored = runManagedCapture(fixture, env, diff, null, null, false);
+  assert.notEqual(restored.status, 0, `${restored.stdout}\n${restored.stderr}`);
+  assert.match(restored.stderr, /restored Zen; rerun/iu);
+  assert.deepEqual(await readController(fixture), { phase: "relaunched", quitCount: 1, launchCount: 1 });
+  const noPlan = spawnSync("node", ["dist/cli.js", "plan", "show", "latest", "--json"], { env, encoding: "utf8" });
+  assert.notEqual(noPlan.status, 0);
+
+  const completed = runManagedCapture(fixture, env, diff);
+  assert.equal(completed.status, 0, `${completed.stdout}\n${completed.stderr}`);
+  const document = JSON.parse(completed.stdout);
+  assert.equal(document.plan.snapshotAuthority, "authoritative");
+  assert.equal(document.plan.snapshotRevision, diff.snapshotRevision);
+  assert.deepEqual(await readController(fixture), { phase: "relaunched", quitCount: 2, launchCount: 2 });
 });
 
 function assertManagedControlComplete(control) {
@@ -247,6 +280,29 @@ function runManagedRecovery(fixture, env, inspection, hook = null, exitCode = nu
   });
 }
 
+function runManagedCapture(fixture, env, diff, hook = null, exitCode = null, forceRunning = true) {
+  const script = [
+    'import { runManagedAuthoritativeCapture } from "./dist/managed-authoritative-capture.js";',
+    'import { createPatchFromAgentDiff } from "./dist/agent-diff.js";',
+    'import { resolveManualPlanFromInput } from "./dist/manual.js";',
+    'import { discoverProfileContext } from "./dist/profile.js";',
+    'import { loadConfig } from "./dist/config.js";',
+    durablePlatformSource(fixture),
+    'const discovered = await discoverProfileContext();',
+    `const context = { ...discovered, running: ${forceRunning ? "true" : "false"} };`,
+    'const loaded = await loadConfig();',
+    `const diff = ${JSON.stringify(diff)};`,
+    'const result = await runManagedAuthoritativeCapture(context, loaded.config, {',
+    '  platform, request, waitOptions,',
+    ...(hook === null ? [] : [`  ${hook}: () => process.exit(${exitCode}),`]),
+    '}, async (captured) => resolveManualPlanFromInput(captured.snapshot, createPatchFromAgentDiff(captured.snapshot, diff), loaded.config));',
+    'console.log(JSON.stringify({ plan: result.value.plan, lifecycle: result.lifecycle }));'
+  ].join("\n");
+  return spawnSync("node", ["--input-type=module", "--eval", script], {
+    cwd: process.cwd(), env, encoding: "utf8"
+  });
+}
+
 function durablePlatformSource(fixture) {
   return [
     'import { readFileSync, writeFileSync } from "node:fs";',
@@ -264,7 +320,9 @@ function durablePlatformSource(fixture) {
     '  async listProcesses() {',
     '    const state = readController();',
     '    if (state.phase === "closed") return [];',
-    '    return state.phase === "initial" ? inventory(100, 101, "27") : inventory(200, 201, "28");',
+    '    if (state.phase === "initial") return inventory(100, 101, "27");',
+    '    const rootPid = 100 + (state.launchCount * 100);',
+    '    return inventory(rootPid, rootPid + 1, String(27 + state.launchCount));',
     '  },',
     '  async inspectApplication(pid) { return {',
     '    pid, bundleIdentifier: "app.zen-browser.zen", executablePath, bundlePath: "/Applications/Zen.app",',
