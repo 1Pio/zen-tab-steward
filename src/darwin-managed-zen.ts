@@ -49,8 +49,13 @@ export function createDarwinManagedZenPlatform(): ManagedZenPlatform {
         const read = fn => { try { return fn(); } catch { return null; } };
         const semantic = application.windows().filter(window => {
           const id = read(() => window.id());
+          const name = read(() => window.name());
           const bounds = read(() => window.bounds());
-          return Number.isInteger(id) && bounds && Number(bounds.width) > 0 && Number(bounds.height) > 0;
+          return Number.isInteger(id)
+            && name !== "Software Update"
+            && bounds
+            && Number(bounds.width) > 0
+            && Number(bounds.height) > 0;
         });
         if (semantic.length !== targets.length) throw new Error("Zen semantic window count changed before restoration");
         semantic.forEach((window, index) => {
@@ -160,11 +165,13 @@ async function inspectWindows(pid: number): Promise<readonly ManagedZenWindow[]>
     const read = fn => { try { return fn(); } catch { return null; } };
     const windows = application.windows().map(window => ({
       id: read(() => window.id()),
+      name: read(() => window.name()),
       visible: read(() => window.visible()),
       miniaturized: read(() => window.miniaturized()),
       bounds: read(() => window.bounds())
     })).filter(window =>
       Number.isInteger(window.id)
+      && window.name !== "Software Update"
       && window.bounds
       && Number(window.bounds.width) > 0
       && Number(window.bounds.height) > 0

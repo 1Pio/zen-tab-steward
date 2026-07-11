@@ -36,6 +36,7 @@ test("managed Zen gracefully quits one exact binding and restores the same Profi
   const profilePath = "/tmp/zts-managed-profile";
   const executablePath = "/Applications/Zen.app/Contents/MacOS/zen";
   let phase = "initial";
+  let initialReads = 0;
   const calls = [];
   const inventory = (rootPid, childPid, start) => parseZenProcessInventory(`
 ${rootPid} 1 501 ${start} ${executablePath}
@@ -45,7 +46,7 @@ ${childPid} ${rootPid} 501 ${start} /Applications/Zen.app/Contents/MacOS/plugin-
     async listProcesses() {
       if (phase === "closed") return [];
       return phase === "initial"
-        ? inventory(100, 101, "Sat Jul 11 16:27:24 2026")
+        ? inventory(100, 101 + initialReads++, "Sat Jul 11 16:27:24 2026")
         : inventory(200, 201, "Sat Jul 11 16:28:24 2026");
     },
     async inspectApplication(pid) {

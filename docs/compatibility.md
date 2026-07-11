@@ -10,7 +10,7 @@ control into the runtime Snapshot capability proof.
 | Platform | Zen version | Build id | OS ABI | Schema family | Entity kind | Route | Capability posture |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | macOS arm64 | 1.19.3b | 20260315063056 | `Darwin_aarch64-gcc3` | `zen-session-v1` | standalone tab with one unique native id | closed session | Fixture, crash/recovery, bounded owner-Profile apply/reopen/Undo/reopen, and clean-consumer packaging accepted 2026-07-11; release automation remains |
-| macOS arm64 | 1.19.3b | 20260315063056 | `Darwin_aarch64-gcc3` | `zen-session-v1` | standalone tab with one unique native id | managed closed session | Exact app/Profile/process/window fixture and crash-recovery gates accepted; bounded owner-Profile authoritative Diff Plan/reopen accepted 2026-07-11; reversible managed Apply/Undo acceptance remains |
+| macOS arm64 | 1.19.3b | 20260315063056 | `Darwin_aarch64-gcc3` | `zen-session-v1` | standalone tab with one unique native id | managed closed session | Exact app/Profile/process/window fixture and crash-recovery gates accepted; bounded owner-Profile authoritative Diff Plan, managed Apply, persisted reopen, exact reverse Diff, and restored reopen accepted 2026-07-11; managed Undo CLI parity remains |
 | macOS x64 | 1.19.3b | 20260315063056 | `Darwin_x86_64-gcc3` | `zen-session-v1` | standalone tab with one unique native id | closed session | Provisional fixture-tested candidate; runtime proof required |
 
 The exact gate above allows a current authoritative Snapshot to report

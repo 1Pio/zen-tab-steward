@@ -382,16 +382,14 @@ export async function quitManagedZen(
 ): Promise<ManagedZenClosedEvidence> {
   validateWaitOptions(options);
   const current = await captureManagedZenLifecycleBinding(platform, requestFromBinding(binding));
-  if (current.revision !== binding.revision) {
-    throw new ManagedZenBindingError("Managed Zen lifecycle binding changed before graceful quit");
-  }
+  assertManagedZenSameRunningInstance(binding, current);
   if (!await platform.requestGracefulQuit(binding.rootPid)) {
     throw new ManagedZenBindingError(`Managed Zen rejected the graceful quit request for pid ${binding.rootPid}`);
   }
   const attempts = waitAttempts(options);
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     const processes = await platform.listProcesses();
-    const originalByPid = new Map(binding.boundProcesses.map((process) => [process.pid, process]));
+    const originalByPid = new Map(current.boundProcesses.map((process) => [process.pid, process]));
     const reused = processes.find((process) => {
       const original = originalByPid.get(process.pid);
       return original && process.processStartIdentity !== original.processStartIdentity;
@@ -408,6 +406,7 @@ export async function quitManagedZen(
         stateFlush: "pending_native_profile_control",
         closedProcessBindingRevision: sha256Canonical({
           lifecycleRevision: binding.revision,
+          quitBoundaryProcessBindingRevision: current.processBindingRevision,
           processPids: []
         })
       };
@@ -417,6 +416,23 @@ export async function quitManagedZen(
   throw new ManagedZenBindingError(
     `Managed Zen did not release the exact Profile within ${options.timeoutMs}ms; no force quit was attempted`
   );
+}
+
+export function assertManagedZenSameRunningInstance(
+  beforeValue: unknown,
+  currentValue: unknown
+): asserts currentValue is ManagedZenLifecycleBinding {
+  const before = defineManagedZenLifecycleBinding(beforeValue);
+  const current = defineManagedZenLifecycleBinding(currentValue);
+  if (current.profilePath !== before.profilePath
+    || current.executablePath !== before.executablePath
+    || current.bundleIdentifier !== before.bundleIdentifier
+    || current.uid !== before.uid
+    || current.rootPid !== before.rootPid
+    || current.processStartIdentity !== before.processStartIdentity) {
+    throw new ManagedZenBindingError("Managed Zen root application or Profile changed before graceful quit");
+  }
+  assertSameApplication(before.application, current.application);
 }
 
 export async function relaunchManagedZen(

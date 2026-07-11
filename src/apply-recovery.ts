@@ -89,6 +89,7 @@ import { findZenProcesses } from "./processes.js";
 import { captureControlledSessionSnapshot } from "./session-snapshot.js";
 import {
   assertManagedZenRelaunchBinding,
+  assertManagedZenSameRunningInstance,
   captureManagedZenLifecycleBinding,
   defineManagedZenLifecycleBinding,
   ensureManagedZenRelaunched,
@@ -591,7 +592,9 @@ async function inspectApplyRecoveryInternal(
               ? "before_state_present"
               : "external_drift";
           }
-          if (classification === "external_drift" && !commitStageSeen) {
+          if (classification === "external_drift"
+            && !commitStageSeen
+            && journalEntry(journal, "write_prepared")) {
             const recoverableAtomicEvidence = await journalHasRecoverableAtomicEvidence(
               journal,
               refreshed.sessionFile.path
@@ -799,7 +802,12 @@ export async function recoverApplyTransaction(
         uid: managedLifecycleBinding.uid,
         bundleIdentifier: managedLifecycleBinding.bundleIdentifier
       });
-      assertManagedZenRelaunchBinding(managedLifecycleBinding, current);
+      if (current.rootPid === managedLifecycleBinding.rootPid
+        && current.processStartIdentity === managedLifecycleBinding.processStartIdentity) {
+        assertManagedZenSameRunningInstance(managedLifecycleBinding, current);
+      } else {
+        assertManagedZenRelaunchBinding(managedLifecycleBinding, current);
+      }
       await quitManagedZen(
         options.managedLifecycle.platform,
         current,
