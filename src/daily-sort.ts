@@ -1,4 +1,5 @@
 import { effectiveConfigRevision } from "./config.js";
+import { createLexicalPlan, lexicalPlanRequestRevision } from "./engines/lexical.js";
 import { createRulesPlan, rulesPlanRequestRevision } from "./engines/rules.js";
 import { resolveOrCreatePlan } from "./plans.js";
 
@@ -6,11 +7,13 @@ import type { ZtsConfig } from "./config.js";
 import type { Plan } from "./domain/change.js";
 import type { ArtifactReference, Snapshot } from "./domain/snapshot.js";
 import type { Sha256Digest } from "./domain/digest.js";
-import type { RulesPlanOptions, SortScope } from "./engines/rules.js";
+import type { LexicalPlanOptions } from "./engines/lexical.js";
+import type { RulesPlanOptions } from "./engines/rules.js";
+import type { SortScope } from "./engines/plan-compiler.js";
 
 export interface DailySortRequest {
   readonly scope: SortScope;
-  readonly engine: "rules";
+  readonly engine: "rules" | "lexical";
   readonly destinationAllowlist: readonly string[];
   readonly destinationDenylist: readonly string[];
   readonly only: readonly string[];
@@ -18,8 +21,10 @@ export interface DailySortRequest {
   readonly limit: number | null;
   readonly includePinned: boolean;
   readonly includeEssentials: boolean;
+  readonly suggestionThreshold: number;
+  readonly minimumMargin: number;
   readonly autoApplyRequested: boolean;
-  readonly planMode: "create_or_reuse" | "require_existing";
+  readonly planMode: "create_or_reuse" | "create_if_missing_require_existing_state" | "require_existing";
 }
 
 export interface DailySortPlanResult {
@@ -44,10 +49,9 @@ export async function planDailySort(
   now = new Date()
 ): Promise<DailySortPlanResult> {
   const configRevision = effectiveConfigRevision(config);
-  const rulesOptions: Omit<RulesPlanOptions, "now"> = {
+  const commonOptions = {
     scope: request.scope,
     configRevision,
-    domainRules: config.rules.domains,
     sourceAllowlist: config.sort.from,
     destinationAllowlist: request.destinationAllowlist,
     destinationDenylist: request.destinationDenylist,
@@ -58,11 +62,27 @@ export async function planDailySort(
     limit: request.limit,
     autoApplyRequested: request.autoApplyRequested
   };
-  const requestRevision = rulesPlanRequestRevision(rulesOptions);
+  const engineOptions = request.engine === "rules"
+    ? {
+        ...commonOptions,
+        domainRules: config.rules.domains
+      } satisfies Omit<RulesPlanOptions, "now">
+    : {
+        ...commonOptions,
+        suggestionThreshold: request.suggestionThreshold,
+        minimumMargin: request.minimumMargin,
+        inboxSelector: config.defaults.inbox,
+        domainRules: config.rules.domains
+      } satisfies Omit<LexicalPlanOptions, "now">;
+  const requestRevision = request.engine === "rules"
+    ? rulesPlanRequestRevision(engineOptions as Omit<RulesPlanOptions, "now">)
+    : lexicalPlanRequestRevision(engineOptions as Omit<LexicalPlanOptions, "now">);
   const resolved = await resolveOrCreatePlan(
     snapshot,
     requestRevision,
-    () => createRulesPlan(snapshot, { ...rulesOptions, now }),
+    () => request.engine === "rules"
+      ? createRulesPlan(snapshot, { ...(engineOptions as Omit<RulesPlanOptions, "now">), now })
+      : createLexicalPlan(snapshot, { ...(engineOptions as Omit<LexicalPlanOptions, "now">), now }),
     now,
     request.planMode
   );

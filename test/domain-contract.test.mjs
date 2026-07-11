@@ -673,6 +673,19 @@ test("Semantic suggestion and automatic-apply decisions are derived from complet
   assert.equal(eligible.suggested, true);
   assert.equal(eligible.autoApply.status, "eligible");
 
+  const lowMargin = createSemanticDecision({
+    engine: "lexical",
+    explanation: ztsText("Score passes but the candidates are tied", ["entity:root:tab-1"]),
+    score: 0.91,
+    margin: 0.05,
+    thresholds: { suggestion: 0.7, autoApply: 0.9, minimumMargin: 0.2 },
+    modelRevision: digest("3"),
+    calibrationRevision: digest("4"),
+    autoApplyRequested: false
+  });
+  assert.equal(lowMargin.suggested, false);
+  assert.equal(lowMargin.autoApply.status, "not_requested");
+
   const forged = structuredClone(eligible);
   forged.score = 0.2;
   const snapshot = planSnapshotFixture();

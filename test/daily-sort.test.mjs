@@ -90,6 +90,173 @@ test("all-workspace preview and dry-run reuse one protected state-bound Plan", a
   assert.ok(latestJson.suggestedNextCommands.includes("zts sort --all --engine rules --dry-run"));
 });
 
+test("lexical all-workspace preview persists one reviewable Plan reused by dry-run", async () => {
+  const fixture = await makeLexicalSortFixture();
+  const env = dailySortEnv(fixture);
+  const beforeSession = await readFile(fixture.sessionPath);
+
+  const preview = spawnSync(
+    "node",
+    ["dist/cli.js", "sort", "--all", "--engine", "lexical", "--preview", "--json"],
+    { env, encoding: "utf8" }
+  );
+  assert.equal(preview.status, 0, `${preview.stdout}\n${preview.stderr}`);
+  const previewDocument = JSON.parse(preview.stdout);
+
+  const dryRun = spawnSync(
+    "node",
+    ["dist/cli.js", "sort", "--all", "--engine", "lexical", "--dry-run", "--json"],
+    { env, encoding: "utf8" }
+  );
+  assert.equal(dryRun.status, 0, `${dryRun.stdout}\n${dryRun.stderr}`);
+  const dryRunDocument = JSON.parse(dryRun.stdout);
+
+  assert.equal(previewDocument.data.plan.source.kind, "engine");
+  assert.equal(previewDocument.data.plan.source.engine, "lexical");
+  assert.equal(previewDocument.data.planResolution, "created");
+  assert.equal(dryRunDocument.data.planResolution, "reused_latest");
+  assert.equal(dryRunDocument.data.plan.id, previewDocument.data.plan.id);
+  assert.equal(dryRunDocument.data.plan.digest, previewDocument.data.plan.digest);
+  assert.deepEqual(dryRunDocument.data.plan.actions, previewDocument.data.plan.actions);
+  assert.equal(
+    previewDocument.data.plan.actions.some((action) =>
+      action.disposition === "move" && action.decision.engine === "lexical"
+    ),
+    true,
+    JSON.stringify(previewDocument.data.plan.actions, null, 2)
+  );
+  assert.equal(
+    previewDocument.data.plan.actions.find((action) => action.decision.trustClass === "semantic")
+      .decision.thresholds.suggestion,
+    0.1
+  );
+  assert.deepEqual(await readFile(fixture.sessionPath), beforeSession);
+});
+
+test("lexical dry-run works on first invocation and persists its exact Plan", async () => {
+  const fixture = await makeLexicalSortFixture();
+  const env = dailySortEnv(fixture);
+  const dryRun = spawnSync(
+    "node",
+    ["dist/cli.js", "sort", "--engine", "lexical", "--dry-run", "--json"],
+    { env, encoding: "utf8" }
+  );
+  assert.equal(dryRun.status, 0, `${dryRun.stdout}\n${dryRun.stderr}`);
+  const document = JSON.parse(dryRun.stdout);
+  assert.equal(document.data.mode, "dry-run");
+  assert.equal(document.data.planResolution, "created");
+  assert.equal(document.data.plan.source.engine, "lexical");
+  const preview = spawnSync(
+    "node",
+    ["dist/cli.js", "sort", "--engine", "lexical", "--preview", "--json"],
+    { env, encoding: "utf8" }
+  );
+  assert.equal(preview.status, 0, `${preview.stdout}\n${preview.stderr}`);
+  const previewDocument = JSON.parse(preview.stdout);
+  assert.equal(previewDocument.data.planResolution, "reused_latest");
+  assert.equal(previewDocument.data.plan.id, document.data.plan.id);
+  assert.equal(previewDocument.data.plan.digest, document.data.plan.digest);
+  const stored = await execFileAsync("node", ["dist/cli.js", "plan", "show", "latest", "--json"], { env });
+  assert.equal(JSON.parse(stored.stdout).data.plan.digest, document.data.plan.digest);
+});
+
+test("lexical explicit threshold and move cap gate candidates without changing Engine identity", async () => {
+  const thresholdFixture = await makeLexicalSortFixture();
+  const thresholdRun = spawnSync(
+    "node",
+    [
+      "dist/cli.js", "sort", "--all", "--engine", "lexical", "--min-confidence", "0.99",
+      "--preview", "--json"
+    ],
+    { env: dailySortEnv(thresholdFixture), encoding: "utf8" }
+  );
+  assert.equal(thresholdRun.status, 0, `${thresholdRun.stdout}\n${thresholdRun.stderr}`);
+  const thresholdPlan = JSON.parse(thresholdRun.stdout).data.plan;
+  assert.equal(thresholdPlan.source.engine, "lexical");
+  assert.equal(thresholdPlan.actions.some((action) => action.disposition === "move"), false);
+  assert.ok(thresholdPlan.actions.some((action) =>
+    action.decision.trustClass === "semantic"
+    && action.decision.thresholds.suggestion === 0.99
+  ));
+
+  const capFixture = await makeLexicalSortFixture();
+  const capRun = spawnSync(
+    "node",
+    ["dist/cli.js", "sort", "--all", "--engine", "lexical", "--limit", "0", "--preview", "--json"],
+    { env: dailySortEnv(capFixture), encoding: "utf8" }
+  );
+  assert.equal(capRun.status, 0, `${capRun.stdout}\n${capRun.stderr}`);
+  const capPlan = JSON.parse(capRun.stdout).data.plan;
+  assert.equal(capPlan.actions.some((action) => action.disposition === "move"), false);
+  assert.ok(capPlan.actions.some((action) =>
+    action.disposition === "review" && /Move limit 0/iu.test(action.dispositionReason.value)
+  ));
+});
+
+test("lexical defaults to semantic max_moves and retains the strongest suggestions first", async () => {
+  const fixture = await makeLexicalPriorityFixture();
+  const env = dailySortEnv(fixture);
+  const capped = spawnSync(
+    "node",
+    ["dist/cli.js", "sort", "--all", "--engine", "lexical", "--preview", "--json"],
+    { env, encoding: "utf8" }
+  );
+  assert.equal(capped.status, 0, `${capped.stdout}\n${capped.stderr}`);
+  const cappedPlan = JSON.parse(capped.stdout).data.plan;
+  const suggestedCandidates = cappedPlan.actions.filter((action) =>
+    action.decision.trustClass === "semantic"
+    && action.decision.suggested
+    && (action.disposition === "move" || /Move limit 1/iu.test(action.dispositionReason?.value ?? ""))
+  );
+  const selected = cappedPlan.actions.filter((action) => action.disposition === "move");
+  assert.ok(suggestedCandidates.length >= 2);
+  assert.equal(selected.length, 1);
+  const strongest = [...suggestedCandidates].sort((left, right) =>
+    right.decision.score - left.decision.score
+    || right.decision.margin - left.decision.margin
+    || actionEntityRef(left).localeCompare(actionEntityRef(right), "en-US")
+  )[0];
+  assert.equal(actionEntityRef(selected[0]), actionEntityRef(strongest));
+
+  const overridden = spawnSync(
+    "node",
+    ["dist/cli.js", "sort", "--all", "--engine", "lexical", "--limit", "2", "--preview", "--json"],
+    { env, encoding: "utf8" }
+  );
+  assert.equal(overridden.status, 0, `${overridden.stdout}\n${overridden.stderr}`);
+  assert.equal(
+    JSON.parse(overridden.stdout).data.plan.actions.filter((action) => action.disposition === "move").length,
+    2
+  );
+});
+
+test("an exact reviewed lexical Plan applies through the saved-Plan Receipt spine", async () => {
+  const fixture = await makeLexicalSortFixture();
+  const env = dailySortEnv(fixture);
+  const preview = spawnSync(
+    "node",
+    ["dist/cli.js", "sort", "--all", "--engine", "lexical", "--preview", "--json"],
+    { env, encoding: "utf8" }
+  );
+  assert.equal(preview.status, 0, `${preview.stdout}\n${preview.stderr}`);
+  const plan = JSON.parse(preview.stdout).data.plan;
+  const move = plan.actions.find((action) => action.disposition === "move");
+  assert.ok(move);
+  assert.equal(move.decision.trustClass, "semantic");
+  assert.equal(move.decision.autoApply.status, "not_requested");
+
+  const apply = spawnSync(
+    "node",
+    ["dist/cli.js", "apply", plan.id, "--yes", "--expect-digest", plan.digest, "--json"],
+    { env, encoding: "utf8" }
+  );
+  assert.equal(apply.status, 0, `${apply.stdout}\n${apply.stderr}`);
+  const document = JSON.parse(apply.stdout);
+  assert.equal(document.data.plan.digest, plan.digest);
+  assert.equal(document.data.receipt.outcome, "applied");
+  assert.ok(document.data.receipt.operations.some((operation) => operation.actionId === move.actionId));
+});
+
 test("Receipt-bound Undo previews read-only, restores the exact logical Snapshot, and records causal history", async () => {
   const fixture = await makeDailySortFixture();
   const env = dailySortEnv(fixture);
@@ -4480,6 +4647,116 @@ async function makeDailySortFixture() {
   return { temp, appSupportDir, profilePath, sessionPath, stateDir, binDir, configPath };
 }
 
+async function makeLexicalSortFixture() {
+  const fixture = await makeDailySortFixture();
+  await writeFile(fixture.configPath, [
+    "[defaults]",
+    "inbox = \"Inbox\"",
+    "min_confidence = 0.77",
+    "include_pinned = false",
+    "include_essentials = false",
+    "apply_backend = \"auto\"",
+    "",
+    "[sort]",
+    "from = []",
+    "to = []",
+    "not_to = []",
+    "only = []",
+    "except = []",
+    "",
+    "[semantic]",
+    "enabled = false",
+    "engine = \"lexical\"",
+    "suggestion_threshold = 0.10",
+    "auto_apply = false",
+    "auto_apply_threshold = 0.95",
+    "minimum_margin = 0.05",
+    "max_moves = 10",
+    "",
+    "[protect.workspaces]",
+    "from = [\"Stash\"]",
+    "to = [\"Stash\"]",
+    "",
+    "[protect.domains]",
+    "never_move = []",
+    "",
+    "[rules.domains]",
+    ""
+  ].join("\n"), { mode: 0o600 });
+  await writeFile(fixture.sessionPath, encodeLiteralJsonLz4ForFixture({
+    spaces: [
+      { uuid: "w-inbox", name: "Inbox" },
+      { uuid: "w-development", name: "Development" },
+      { uuid: "w-research", name: "Research" },
+      { uuid: "w-stash", name: "Stash" }
+    ],
+    tabs: [
+      {
+        zenSyncId: "tab-sort-typescript",
+        zenWorkspace: "w-inbox",
+        pinned: false,
+        entries: [{
+          url: "https://github.com/microsoft/TypeScript/issues/123",
+          title: "TypeScript compiler API issue"
+        }]
+      },
+      {
+        zenSyncId: "tab-development-node",
+        zenWorkspace: "w-development",
+        pinned: false,
+        entries: [{ url: "https://nodejs.org/api/typescript.html", title: "Node TypeScript API documentation" }]
+      },
+      {
+        zenSyncId: "tab-development-code",
+        zenWorkspace: "w-development",
+        pinned: false,
+        entries: [{ url: "https://github.com/nodejs/node", title: "JavaScript runtime development repository" }]
+      },
+      {
+        zenSyncId: "tab-research-paper",
+        zenWorkspace: "w-research",
+        pinned: false,
+        entries: [{ url: "https://arxiv.org/abs/1706.03762", title: "Machine learning transformer research paper" }]
+      },
+      {
+        zenSyncId: "tab-stash-typescript",
+        zenWorkspace: "w-stash",
+        pinned: false,
+        entries: [{ url: "https://typescriptlang.org/private", title: "Protected TypeScript stash" }]
+      }
+    ],
+    folders: [],
+    groups: [],
+    splitViewData: []
+  }));
+  return fixture;
+}
+
+async function makeLexicalPriorityFixture() {
+  const fixture = await makeLexicalSortFixture();
+  const session = await readJsonLz4(fixture.sessionPath);
+  session.tabs.unshift({
+    zenSyncId: "tab-sort-research",
+    zenWorkspace: "w-inbox",
+    pinned: false,
+    entries: [{
+      url: "https://arxiv.org/abs/1706.03762",
+      title: "Machine learning transformer research paper"
+    }]
+  });
+  await writeFile(fixture.sessionPath, encodeLiteralJsonLz4ForFixture(session));
+  const config = await readFile(fixture.configPath, "utf8");
+  await writeFile(
+    fixture.configPath,
+    config
+      .replace("suggestion_threshold = 0.10", "suggestion_threshold = 0.01")
+      .replace("minimum_margin = 0.05", "minimum_margin = 0.0")
+      .replace("max_moves = 10", "max_moves = 1"),
+    { mode: 0o600 }
+  );
+  return fixture;
+}
+
 function supportedCompatibilityIni() {
   const osAbi = process.arch === "arm64" ? "Darwin_aarch64-gcc3" : "Darwin_x86_64-gcc3";
   return `[Compatibility]\nLastVersion=1.19.3b_20260315063056/20260315063056\nLastOSABI=${osAbi}\n`;
@@ -4570,4 +4847,8 @@ function actionFor(plan, entityRef) {
   return plan.actions.find((action) =>
     (action.disposition === "move" ? action.operation.entityRef : action.entityRef) === entityRef
   );
+}
+
+function actionEntityRef(action) {
+  return action.disposition === "move" ? action.operation.entityRef : action.entityRef;
 }

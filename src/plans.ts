@@ -116,7 +116,7 @@ export async function resolveOrCreatePlan(
   requestRevision: Sha256Digest,
   create: () => Plan,
   now = new Date(),
-  policy: "create_or_reuse" | "require_existing" = "create_or_reuse",
+  policy: "create_or_reuse" | "create_if_missing_require_existing_state" | "require_existing" = "create_or_reuse",
   storePolicy: PlanStorePolicy = DEFAULT_PLAN_STORE_POLICY,
   hooks: PlanStorePublicationHooks = {}
 ): Promise<ResolvedPlan> {
@@ -135,7 +135,7 @@ export async function resolveOrCreatePlan(
         || stored.plan.snapshotAuthority !== snapshot.authority
         || stored.plan.snapshotFreshness !== snapshot.freshness
       ) {
-        if (policy === "require_existing") {
+        if (policy !== "create_or_reuse") {
           throw new PlanReuseError(
             "PLAN_SNAPSHOT_DRIFT",
             `Snapshot Drift: reviewed Plan ${stored.plan.digest} binds ${stored.plan.snapshotRevision}, current Snapshot is ${snapshot.revision}`,
@@ -144,7 +144,7 @@ export async function resolveOrCreatePlan(
           );
         }
       } else if (Date.parse(stored.plan.expiresAt) <= now.getTime()) {
-        if (policy === "require_existing") {
+        if (policy !== "create_or_reuse") {
           throw new PlanReuseError(
             "PLAN_EXPIRED",
             `Reviewed Plan ${stored.plan.digest} expired at ${stored.plan.expiresAt}; create a fresh preview`,

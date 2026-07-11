@@ -1345,18 +1345,18 @@ program
       const summary = captured.summary;
       const sourceResolution = resolveSourceWorkspace(summary, sourceWorkspace, loadedConfig.config.defaults.inbox);
       const source = sourceResolution.status === "resolved" ? sourceResolution.workspace : null;
-      const inputs = sortInputs(options, loadedConfig.config);
       const selectedEngine = normalizeEngine(options.engine);
+      const inputs = sortInputs(options, loadedConfig.config, selectedEngine);
       const inputError = validateSortMode(options, sourceWorkspace)
         ?? validateSortInputs(inputs)
         ?? (options.minConfidence !== undefined && selectedEngine === "rules"
           ? "--min-confidence applies only to confidence-producing lexical, semantic, or hybrid Engines; exact rules have no confidence threshold"
           : null)
-        ?? (selectedEngine !== "rules"
-          ? selectedEngine === "invalid"
-            ? `Unknown Engine '${options.engine}'; expected rules, lexical, bge-small, or hybrid`
-            : `Engine '${options.engine}' is not installed in the production planner yet; explicit Engine selection never falls back`
-          : null);
+        ?? (selectedEngine === "invalid"
+          ? `Unknown Engine '${options.engine}'; expected rules, lexical, bge-small, or hybrid`
+          : selectedEngine === "bge_small" || selectedEngine === "hybrid"
+            ? `Engine '${options.engine}' is not installed in the production planner yet; explicit Engine selection never falls back`
+            : null);
       if (inputError) {
         if (options.json) {
           printJson(envelope("sort", { sourceWorkspace: sourceWorkspace ?? null, inputs }, { ok: false, blockers: [inputError], suggestedNextCommands: ["zts sort --help"] }));
@@ -1394,7 +1394,7 @@ program
             scope: sourceScope.kind === "all_workspaces"
               ? sourceScope
               : { kind: "workspace", workspaceId: sourceScope.workspaceId },
-            engine: "rules",
+            engine: selectedEngine === "lexical" ? "lexical" : "rules",
             destinationAllowlist: inputs.to,
             destinationDenylist: inputs.notTo,
             only: inputs.only,
@@ -1402,11 +1402,17 @@ program
             limit: inputs.limit,
             includePinned: inputs.includePinned,
             includeEssentials: inputs.includeEssentials,
+            suggestionThreshold: inputs.minConfidence,
+            minimumMargin: loadedConfig.config.semantic.minimumMargin,
             // Explicit CLI apply is authorized separately by exact Plan digest.
             // Automatic-apply intent is reserved for the future configured
             // quick-sort policy and must not split preview/apply Plan identity.
             autoApplyRequested: false,
-            planMode: mode === "preview" ? "create_or_reuse" : "require_existing"
+            planMode: mode === "preview"
+              ? "create_or_reuse"
+              : mode === "dry-run"
+                ? "create_if_missing_require_existing_state"
+                : "require_existing"
           });
         } catch (error) {
           if (!(error instanceof PlanReuseError)) throw error;
@@ -1539,9 +1545,14 @@ program
             loadedConfig.revision
           );
         }
-        const warnings = result.snapshot.authority === "persisted_observation"
-          ? ["Zen is running; this Plan is based on a persisted observation and cannot be authorized for apply"]
-          : [];
+        const warnings = [
+          ...(result.snapshot.authority === "persisted_observation"
+            ? ["Zen is running; this Plan is based on a persisted observation and cannot be authorized for apply"]
+            : []),
+          ...(selectedEngine === "lexical"
+            ? ["Lexical suggestions are uncalibrated and never auto-apply; explicitly review and authorize the exact saved Plan or subset"]
+            : [])
+        ];
         const suggestedNextCommands = dailySortNextCommands(options, sourceWorkspace, mode, result.plan);
         const data = {
           profile: context.profile,
@@ -2026,18 +2037,31 @@ function csvOption(value: string | undefined, fallback: string[]): string[] {
   return value === undefined ? fallback : splitCsv(value);
 }
 
-function sortInputs(options: SortOptions, config: ZtsConfig): SortInputs {
+function sortInputs(
+  options: SortOptions,
+  config: ZtsConfig,
+  engine: ReturnType<typeof normalizeEngine>
+): SortInputs {
+  const statisticalEngine = engine === "lexical" || engine === "bge_small" || engine === "hybrid";
   return {
     preview: Boolean(options.preview),
     dryRun: Boolean(options.dryRun),
-    minConfidence: options.minConfidence === undefined ? config.defaults.minConfidence : Number(options.minConfidence),
+    minConfidence: options.minConfidence === undefined
+      ? statisticalEngine
+        ? config.semantic.suggestionThreshold
+        : config.defaults.minConfidence
+      : Number(options.minConfidence),
     includePinned: options.includePinned ?? config.defaults.includePinned,
     includeEssentials: options.includeEssentials ?? config.defaults.includeEssentials,
     to: csvOption(options.to, config.sort.to),
     notTo: csvOption(options.notTo, config.sort.notTo),
     only: csvOption(options.only, config.sort.only),
     except: csvOption(options.except, config.sort.except),
-    limit: options.limit === undefined ? null : Number(options.limit),
+    limit: options.limit === undefined
+      ? statisticalEngine
+        ? config.semantic.maxMoves
+        : null
+      : Number(options.limit),
     backend: options.backend === undefined ? config.defaults.applyBackend : normalizeBackend(options.backend),
     domainRules: config.rules.domains,
     protectedDomains: config.protect.domains.neverMove

@@ -251,7 +251,8 @@ export interface SemanticDecisionInput {
 /** Derives suggestion and automatic-apply eligibility from complete evidence. */
 export function createSemanticDecision(input: SemanticDecisionInput): SemanticDecisionEvidence {
   validateSemanticInput(input);
-  const suggested = input.score >= input.thresholds.suggestion;
+  const suggested = input.score >= input.thresholds.suggestion
+    && input.margin >= input.thresholds.minimumMargin;
   const eligible = input.autoApplyRequested
     && input.score >= input.thresholds.autoApply
     && input.margin >= input.thresholds.minimumMargin;
