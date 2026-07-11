@@ -23,13 +23,17 @@ Raw Zen files and live browser objects are untrusted inputs. They require size b
 
 Arguments, standard input, Patch files, environment variables, and configuration are untrusted intent. They cannot directly choose an internal mutation primitive or bypass Protection. Unknown fields, duplicate configuration, malformed values, contradictory intent, and stale revisions fail clearly.
 
+Configuration accepts only its bounded documented grammar. Unknown sections or fixed keys, duplicate sections/keys/rules, malformed or mistyped values, oversized collections/strings, and incoherent semantic thresholds are rejected before load or edit; valid partial files inherit explicit defaults.
+
 ### Engines
 
 Rules, lexical classification, local embeddings, hybrid classification, and agent-authored decisions propose destinations only. Their evidence is recorded in Plan with explicit provenance and data-only interpretation. Engine output never crosses the mutation seam directly.
 
 ### Artifact store
 
-Artifacts may contain full private browser state. zts-owned directories use mode `0700`; files use `0600`. The store rejects symlinks, unexpected file types, oversized content, unknown schemas, identifier collisions, path escape, and payload-to-filename mismatch. Durable publication uses exclusive temporary files, file sync, atomic rename, and directory sync.
+Artifacts may contain full private browser state. zts-owned directories use mode `0700`; files use `0600`. The store rejects symlinks, unexpected file types, oversized content, unknown schemas, identifier collisions, path escape, and payload-to-filename mismatch. Durable immutable publication uses an exclusive synced temporary and no-replace hardlink. A kill between link and temp unlink is accepted only when exactly one owner-private, same-directory zts temp has the same inode, and explicit reconciliation under the same store owner removes that proof-bound residue. Mutable user/config publication uses expectation-bound Darwin atomic CAS; kernel-controlled internal heads use synced replacement and directory sync. A small digest-bound accounting head reserves conservative capacity before transaction or maintenance artifact growth; reservations include the largest bounded publication temporary. Baselines are replaced only from a complete bounded inventory while the non-forgeable store owner is held: during initial bootstrap, transaction or maintenance settlement, legacy recovery expansion, or the narrowly scoped admission of one exact newly created recovery-control file for a settled transaction retry.
+
+Standalone backup creation accepts at most 64 MiB per known source and four fixed source names. Stable reads allocate the exact pre-open-handle stat size, fill that buffer, probe one byte past the boundary, and then recheck handle and path identity before publication. Session decoding retains its independent 32 MiB decompressed ceiling and the corresponding LZ4 worst-case compressed ceiling; larger profile support requires new measured evidence rather than silently raising either bound.
 
 ### Control Route Adapter
 
@@ -47,10 +51,18 @@ Browser-provided titles, URLs, Workspace names, folder names, and group names ar
 | Zen changes after preview | Reacquire authority and fail the whole preflight on any Drift |
 | Duplicate URL or shifted tab index moves the wrong tab | Snapshot-scoped Entity reference, native identity, Entity revision, exact source precondition |
 | Folder, group, or split is broken apart | Structural Entity reconstruction and indivisible movement policy |
-| Zen starts during closed-session apply | Profile lock, process recheck at transaction boundaries, fail or recover before publication |
-| Crash leaves partial file or no audit trail | Durable journal before mutation, atomic publication, recovery state, exact partial Receipt |
+| Zen starts during closed-session apply | Hold Zen/Gecko's native `.parentlock` across capture, preflight, commit, and verification; recheck the live lease and exact source at the atomic-swap boundary |
+| Crash leaves partial file or no audit trail | Capacity reservation, self-contained unfinished marker as the first transaction artifact, exact atomic-swap boundary, residue-fingerprint-bound recovery, truthful restorative-mutation reporting, applied outcome only after exact after-state verification, and an exactly preflighted terminal intent that replays fixed evidence without reacquiring browser control |
 | Two zts processes apply concurrently | Exclusive Profile transaction lock with stale-lock and PID-reuse handling |
-| Backup or restore escapes its directory | Canonical containment, no symlinks, strict manifest schema and filename binding |
+| Completed history makes apply/recovery unusable | Indexed unfinished markers, O(1) accounting admission, bounded immutable Receipt ledger, and O(page-size) traversal |
+| Concurrent or interrupted Receipt publication loses/duplicates history | Persistent kernel store control, exact marker plus reservation authorization, immutable generation-bound node before one atomic head swap, markerless validate-only retry, and marker cleanup last |
+| Cursor selects another Profile, old generation, or orphan fork | HMAC-authenticated opaque cursor bound to Profile, ledger generation, immutable node digest, and sequence; append-only traversal from that canonical node |
+| Missing index silently hides terminal Receipts | Bootstrap only an empty store under kernel control; never rebuild transaction-bearing state implicitly; malformed or inconsistent ledger state fails closed and requires explicit maintenance |
+| Retention deletes current undo or audit state | Unexpired Plan self-pinning, Apply-reference protection after expiry, write-free exact preview, deterministic archive boundary, domain validation of every available Receipt, immutable source/target manifest, reachability and disjoint-generation checks, one head swap, safe-subset deletion reconciliation |
+| Forged inverse metadata mutates arbitrary tabs as Undo | Strict causal invocation consent plus deterministic inverse-template and source-Receipt recomputation at admission and the final mutation boundary |
+| A later Undo or failed transaction makes older history ambiguous | Causal stack reduction cancels only digest-bound successful forward/Undo pairs; uncertain outcomes stop eligibility and whole-Snapshot Drift still fails closed |
+| Low disk wedges maintenance after it blocks Apply | Conservative maintenance reservation covers target nodes, manifest, result, and publication temporary before the maintenance gate is published |
+| Backup or restore escapes its directory | Canonical containment, no symlinks, strict manifest schema and filename binding; restore remains preview-only until its narrow durable transaction exists |
 | Malicious title controls the terminal | Renderer sanitization without mutating domain data |
 | Malicious title or URL injects instructions into an agent | Explicit browser-untrusted data label, strict separation from instructions/issues, hostile-content fixtures |
 | Semantic score is mistaken for certainty | Engine-specific calibration, margin, explicit opt-in, move cap, normal safety gates |
@@ -69,7 +81,7 @@ Before the first operation, the Apply Transaction must prove:
 3. Plan creation, authorization, and Receipt validation receive the actual validated Snapshot. Derived Profile, authority, freshness, Entity, Workspace, and Protection state plus configuration, intent, Engine/model, and calibration revisions match.
 4. Every Entity identity, source Workspace, Protection decision, destination, move cap, and Capability precondition matches authoritative current state.
 5. The selected Control Route is exclusively and safely available.
-6. A durable transaction journal and required recovery artifact exist.
+6. A durable transaction journal and required recovery artifact exist. When the route supports Undo, the exact inverse Plan bound to the deterministic complete after-Snapshot is durable before mutation becomes eligible.
 
 After execution begins:
 
@@ -77,8 +89,11 @@ After execution begins:
 2. Stop on the first unexpected failure or Drift.
 3. Never label an unverified move successful.
 4. Record exact changed and unchanged outcomes.
-5. Publish an inverse Plan when supported; label compensation as best effort.
+5. Reuse the prepublished inverse Plan only after the exact complete after-Snapshot verifies; blocked and interrupted Receipts must not advertise it as executable Undo state.
 6. Leave enough durable state for deterministic recovery after interruption.
+7. Verify native and zts control release before publishing terminal lifecycle proof and the canonical Receipt; then settle the exact reservation idempotently and remove the unfinished marker last. Any uncertain commit or control release retains recovery work.
+
+For Undo, the same boundary additionally reloads the source Receipt, source Plan, exact inverse template and Snapshot, causal ledger state, and typed invocation consent. It recomputes the one deterministic executable inverse Plan and rejects any digest, action, configuration, expiry, or lineage mismatch before the atomic swap.
 
 ## Privacy position
 

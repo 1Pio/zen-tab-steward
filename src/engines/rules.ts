@@ -1,5 +1,8 @@
 import { createPlan } from "../domain/change.js";
 import { sha256Canonical } from "../domain/digest.js";
+import { movementEligibility } from "../domain/snapshot.js";
+import { urlMatchesAnyPattern, urlPatternSpecificity } from "../url-pattern.js";
+import { destinationAllowedByPolicy, workspaceAllowedByPolicy } from "../workspace-policy.js";
 
 import type {
   AutoApplyEvidence,
@@ -11,13 +14,24 @@ import type {
   UnknownDecisionEvidence,
   ZtsMessage
 } from "../domain/change.js";
-import type { Entity, MovementRootRef, Protection, Snapshot, Workspace } from "../domain/snapshot.js";
+import type {
+  Entity,
+  EntityMember,
+  EntityRef,
+  MovementRootRef,
+  Protection,
+  Snapshot,
+  Workspace
+} from "../domain/snapshot.js";
+import type { MovementEligibility } from "../domain/snapshot.js";
 import type { Sha256Digest } from "../domain/digest.js";
 
 const ENGINE_MANIFEST_REVISION = sha256Canonical({
   engine: "rules",
-  implementation: "zts.rules.provisional-1",
-  matching: "url-domain-subdomain-tld-specificity"
+  implementation: "zts.rules.provisional-2",
+  matching: "url-domain-subdomain-tld-specificity",
+  entityInput: "complete-ordered-movement-root-closure",
+  executionPolicy: "current-capability-aware"
 });
 const PLAN_TTL_MS = 5 * 60 * 1000;
 
@@ -34,12 +48,56 @@ export interface RulesPlanOptions {
   readonly destinationDenylist: readonly string[];
   readonly only: readonly string[];
   readonly except: readonly string[];
-  readonly protectedDomains: readonly string[];
   readonly includePinned: boolean;
   readonly includeEssentials: boolean;
   readonly limit: number | null;
   readonly autoApplyRequested: boolean;
   readonly now?: Date;
+}
+
+export interface RuleMatch {
+  readonly workspaceName: string;
+  readonly matchedPattern: string;
+}
+
+export type RuleWorkspaceResolution =
+  | { readonly status: "resolved"; readonly workspace: Workspace }
+  | { readonly status: "missing"; readonly matches: readonly [] }
+  | { readonly status: "ambiguous"; readonly matches: readonly Workspace[] };
+
+/**
+ * The single deterministic URL/domain matcher used by both planning and the
+ * `rules test` explanation surface. It intentionally knows no default routes:
+ * only the caller's exact configured rules participate.
+ */
+export function classifyRuleForUrl(
+  urlOrDomain: string,
+  domainRules: Readonly<Record<string, string>>
+): RuleMatch | null {
+  const candidates = Object.entries(domainRules)
+    .map(([pattern, workspaceName]) => ({
+      pattern,
+      workspaceName,
+      score: urlPatternSpecificity(pattern, urlOrDomain)
+    }))
+    .filter((candidate) => candidate.score >= 0)
+    .sort((left, right) =>
+      right.score - left.score
+      || compareText(left.pattern, right.pattern)
+      || compareText(left.workspaceName, right.workspaceName)
+    );
+  const selected = candidates[0];
+  return selected
+    ? { workspaceName: selected.workspaceName, matchedPattern: selected.pattern }
+    : null;
+}
+
+/** Resolves a configured destination without letting duplicate names win by iteration order. */
+export function resolveRuleWorkspace(
+  workspaces: readonly Workspace[],
+  selector: string
+): RuleWorkspaceResolution {
+  return resolveWorkspaceLookup(workspaceNames(workspaces), selector);
 }
 
 export function rulesPlanRequestRevision(options: Omit<RulesPlanOptions, "now">): Sha256Digest {
@@ -54,7 +112,6 @@ export function rulesPlanRequestRevision(options: Omit<RulesPlanOptions, "now">)
     destinationDenylist: [...options.destinationDenylist],
     only: [...options.only],
     except: [...options.except],
-    protectedDomains: [...options.protectedDomains],
     includePinned: options.includePinned,
     includeEssentials: options.includeEssentials,
     limit: options.limit,
@@ -68,6 +125,7 @@ export function createRulesPlan(snapshot: Snapshot, options: RulesPlanOptions): 
   const expiresAt = new Date(now.getTime() + PLAN_TTL_MS).toISOString();
   const workspaces = new Map(snapshot.workspaces.map((workspace) => [workspace.id, workspace]));
   const workspaceLookup = workspaceNames(snapshot.workspaces);
+  const entities = new Map(snapshot.entities.map((entity) => [entity.ref, entity]));
   const requestRevision = rulesPlanRequestRevision(options);
   const actions: PlanAction[] = [];
   let moveCount = 0;
@@ -77,85 +135,108 @@ export function createRulesPlan(snapshot: Snapshot, options: RulesPlanOptions): 
     if (!entityInScope(entity, options.scope)) continue;
     const source = workspaces.get(entity.workspaceId);
     if (!source) throw new Error(`Entity ${entity.ref} references a missing source Workspace`);
+    const members = movementRootMembers(entity, entities);
     const actionIdBase = { entityRef: entity.ref, requestRevision };
 
     if (source.protection.source.protected) {
-      actions.push(nonMoveAction(actionIdBase, entity, "protected", null, unknownDecision(
-        entity,
+      actions.push(unknownNonMoveAction(
+        actionIdBase, entity, "protected", null,
         `Source Workspace ${source.name} is protected from sorting`,
         options.autoApplyRequested
-      )));
+      ));
       continue;
     }
-    if (!workspaceAllowed(source, options.sourceAllowlist)) {
-      actions.push(nonMoveAction(actionIdBase, entity, "blocked", null, unknownDecision(
-        entity,
+    if (!workspaceAllowedByPolicy(source, options.sourceAllowlist)) {
+      actions.push(unknownNonMoveAction(
+        actionIdBase, entity, "blocked", null,
         `Source Workspace ${source.name} is outside the active source policy`,
         options.autoApplyRequested
-      )));
+      ));
       continue;
     }
     if (entity.protection.protected && !includedEntityProtection(entity.protection, options)) {
-      actions.push(nonMoveAction(actionIdBase, entity, "protected", null, unknownDecision(
-        entity,
+      actions.push(unknownNonMoveAction(
+        actionIdBase, entity, "protected", null,
         `Entity is protected: ${entity.protection.reasons.join(", ")}`,
         options.autoApplyRequested
-      )));
+      ));
       continue;
     }
-    if (entityMatchesAny(entity, options.protectedDomains)) {
-      actions.push(nonMoveAction(actionIdBase, entity, "protected", null, unknownDecision(
-        entity,
-        "Entity contains a protected domain or URL",
-        options.autoApplyRequested
-      )));
-      continue;
-    }
-    if (entityMatchesAny(entity, options.except)) {
-      actions.push(nonMoveAction(actionIdBase, entity, "unchanged", null, unknownDecision(
-        entity,
+    if (membersMatchAny(members, options.except)) {
+      actions.push(unknownNonMoveAction(
+        actionIdBase, entity, "unchanged", null,
         "Entity is excluded by the active filter",
         options.autoApplyRequested
-      )));
+      ));
       continue;
     }
-    if (options.only.length > 0 && !entity.members.every((member) => matchesAny(member.url, options.only))) {
-      actions.push(nonMoveAction(actionIdBase, entity, "review", null, unknownDecision(
-        entity,
+    if (options.only.length > 0 && !members.every((member) => matchesAny(member.url, options.only))) {
+      actions.push(unknownNonMoveAction(
+        actionIdBase, entity, "review", null,
         "Entity contains content outside the active only filter",
         options.autoApplyRequested
-      )));
+      ));
       continue;
     }
 
-    const classification = classifyEntity(entity, options.domainRules, workspaceLookup);
+    const classification = classifyMembers(members, options.domainRules, workspaceLookup);
     if (classification.status !== "matched") {
-      actions.push(nonMoveAction(actionIdBase, entity, "review", null, unknownDecision(
-        entity,
-        classification.status === "unmatched"
-          ? "No exact routing rule matched this Entity"
-          : "Entity members matched different destination Workspaces",
+      const dispositionReason = classification.status === "unmatched"
+        ? "No exact routing rule matched this Entity"
+        : classification.status === "invalid_destination"
+          ? "A configured routing rule names a Workspace that does not exist in this Snapshot"
+          : classification.status === "ambiguous_destination"
+            ? "A configured routing rule names more than one Workspace in this Snapshot"
+          : "Entity members matched different destination Workspaces";
+      actions.push(unknownNonMoveAction(
+        actionIdBase, entity, "review", null, dispositionReason,
         options.autoApplyRequested
-      )));
+      ));
       continue;
     }
 
     const destination = classification.workspace;
-    const decision = ruleDecision(entity, classification.patterns, destination, options.autoApplyRequested);
+    const movement = movementEligibility(snapshot, entity);
+    const decision = ruleDecision(
+      entity,
+      classification.patterns,
+      destination,
+      options.autoApplyRequested,
+      movement
+    );
     if (destination.id === source.id) {
-      actions.push(nonMoveAction(actionIdBase, entity, "unchanged", destination.id, decision));
+      actions.push(nonMoveAction(
+        actionIdBase, entity, "unchanged", destination.id, decision,
+        `Entity already belongs to destination Workspace ${destination.name}`
+      ));
       continue;
     }
     if (destination.protection.destination.protected) {
-      actions.push(nonMoveAction(actionIdBase, entity, "protected", destination.id, decision));
+      actions.push(nonMoveAction(
+        actionIdBase, entity, "protected", destination.id, decision,
+        `Destination Workspace ${destination.name} is protected from receiving sorted Entities`
+      ));
       continue;
     }
-    if (!destinationAllowed(destination, options.destinationAllowlist, options.destinationDenylist)) {
-      actions.push(nonMoveAction(actionIdBase, entity, "blocked", destination.id, decision));
+    if (!destinationAllowedByPolicy(destination, options.destinationAllowlist, options.destinationDenylist)) {
+      actions.push(nonMoveAction(
+        actionIdBase, entity, "blocked", destination.id, decision,
+        `Destination Workspace ${destination.name} is outside the active destination policy`
+      ));
+      continue;
+    }
+    if (!movement.eligible) {
+      actions.push(nonMoveAction(
+        actionIdBase, entity, "review", destination.id, decision,
+        `Entity cannot move through the current Snapshot: ${movement.reason}`
+      ));
       continue;
     }
     if (options.limit !== null && moveCount >= options.limit) {
-      actions.push(nonMoveAction(actionIdBase, entity, "review", destination.id, decision));
+      actions.push(nonMoveAction(
+        actionIdBase, entity, "review", destination.id, decision,
+        `Move limit ${options.limit} has been reached; review this otherwise eligible move`
+      ));
       continue;
     }
 
@@ -202,17 +283,27 @@ export function createRulesPlan(snapshot: Snapshot, options: RulesPlanOptions): 
 }
 
 type EntityClassification =
-  | { readonly status: "unmatched" | "ambiguous" }
+  | { readonly status: "unmatched" | "ambiguous" | "invalid_destination" | "ambiguous_destination" }
   | { readonly status: "matched"; readonly workspace: Workspace; readonly patterns: readonly string[] };
 
-function classifyEntity(
-  entity: Entity,
+function classifyMembers(
+  members: readonly EntityMember[],
   domainRules: Readonly<Record<string, string>>,
-  workspaces: ReadonlyMap<string, Workspace>
+  workspaces: WorkspaceLookup
 ): EntityClassification {
-  const matches = entity.members.map((member) => classifyUrl(member.url, domainRules, workspaces));
-  if (matches.some((match) => match === null)) return { status: "unmatched" };
-  const exactMatches = matches as Array<{ workspace: Workspace; pattern: string }>;
+  if (members.length === 0) return { status: "unmatched" };
+  const configured = members.map((member) => classifyRuleForUrl(member.url, domainRules));
+  if (configured.some((match) => match === null)) return { status: "unmatched" };
+  const resolved = configured.map((match) => {
+    const exact = match!;
+    const destination = resolveWorkspaceLookup(workspaces, exact.workspaceName);
+    return destination.status === "resolved"
+      ? { status: "resolved" as const, workspace: destination.workspace, pattern: exact.matchedPattern }
+      : { status: destination.status };
+  });
+  if (resolved.some((match) => match.status === "missing")) return { status: "invalid_destination" };
+  if (resolved.some((match) => match.status === "ambiguous")) return { status: "ambiguous_destination" };
+  const exactMatches = resolved as Array<{ status: "resolved"; workspace: Workspace; pattern: string }>;
   const destinationId = exactMatches[0]?.workspace.id;
   if (!destinationId || exactMatches.some((match) => match.workspace.id !== destinationId)) return { status: "ambiguous" };
   return {
@@ -222,63 +313,48 @@ function classifyEntity(
   };
 }
 
-function classifyUrl(
-  url: string,
-  domainRules: Readonly<Record<string, string>>,
-  workspaces: ReadonlyMap<string, Workspace>
-): { workspace: Workspace; pattern: string } | null {
-  const candidates = Object.entries(domainRules)
-    .map(([pattern, destination]) => ({ pattern, destination, score: matchSpecificity(pattern, url) }))
-    .filter((candidate) => candidate.score >= 0)
-    .sort((left, right) => right.score - left.score || compareText(left.pattern, right.pattern));
-  const selected = candidates[0];
-  if (!selected) return null;
-  const workspace = workspaces.get(normalize(selected.destination));
-  if (!workspace) return null;
-  return { workspace, pattern: selected.pattern };
-}
-
-function matchSpecificity(pattern: string, url: string): number {
-  const normalized = normalize(pattern);
-  if (!normalized) return -1;
-  const parsed = parseUrl(url);
-  const host = parsed?.hostname.toLowerCase() ?? "";
-  const full = url.toLowerCase();
-  if (normalized.startsWith("http://") || normalized.startsWith("https://")) {
-    return full.startsWith(normalized) ? 4000 + normalized.length : -1;
-  }
-  if (normalized.startsWith("*.")) {
-    const suffix = normalized.slice(2);
-    return host.endsWith(`.${suffix}`) ? 2000 + normalized.length : -1;
-  }
-  if (normalized.startsWith(".")) {
-    return host.endsWith(normalized) ? 1000 + normalized.length : -1;
-  }
-  if (host === normalized) return 3000 + normalized.length;
-  return host.endsWith(`.${normalized}`) ? 2500 + normalized.length : -1;
-}
-
 function nonMoveAction(
   identity: { readonly entityRef: string; readonly requestRevision: string },
   entity: Entity,
   disposition: "review" | "protected" | "blocked" | "unchanged",
   candidateDestinationWorkspaceId: string | null,
-  decision: DecisionEvidence
+  decision: DecisionEvidence,
+  dispositionReason: string
 ): PlanAction {
   return {
     actionId: stableActionId({ ...identity, disposition, candidateDestinationWorkspaceId }),
     disposition,
     entityRef: entity.ref,
     candidateDestinationWorkspaceId,
-    decision
+    decision,
+    dispositionReason: ztsMessage(dispositionReason)
   };
+}
+
+function unknownNonMoveAction(
+  identity: { readonly entityRef: string; readonly requestRevision: string },
+  entity: Entity,
+  disposition: "review" | "protected" | "blocked" | "unchanged",
+  candidateDestinationWorkspaceId: string | null,
+  dispositionReason: string,
+  autoApplyRequested: boolean
+): PlanAction {
+  return nonMoveAction(
+    identity,
+    entity,
+    disposition,
+    candidateDestinationWorkspaceId,
+    unknownDecision(entity, dispositionReason, autoApplyRequested),
+    dispositionReason
+  );
 }
 
 function ruleDecision(
   entity: Entity,
   patterns: readonly string[],
   destination: Workspace,
-  autoApplyRequested: boolean
+  autoApplyRequested: boolean,
+  movement: MovementEligibility
 ): RuleDecisionEvidence {
   const explanation = evidenceText(
     `Exact rule ${patterns.join(", ")} routes this Entity to Workspace ${destination.name}`,
@@ -290,11 +366,18 @@ function ruleDecision(
     explanation,
     ruleRevision: sha256Canonical({ patterns, destinationWorkspaceId: destination.id }),
     autoApply: autoApplyRequested
-      ? {
+      ? movement.eligible
+        ? {
           status: "eligible",
           requested: true,
           eligible: true,
           reason: ztsMessage("Exact rule intent is eligible after all movement-safety checks")
+        }
+        : {
+          status: "ineligible",
+          requested: true,
+          eligible: false,
+          reason: ztsMessage(`Current state cannot execute this ${entity.kind} move: ${movement.reason}`)
         }
       : notRequested("Automatic apply was not requested for this Plan")
   };
@@ -354,29 +437,72 @@ function entityInScope(entity: Entity, scope: SortScope): boolean {
   return scope.kind === "all_workspaces" || entity.workspaceId === scope.workspaceId;
 }
 
-function workspaceAllowed(workspace: Workspace, allowlist: readonly string[]): boolean {
-  if (allowlist.length === 0) return true;
-  const identities = new Set([normalize(workspace.id), normalize(workspace.name)]);
-  return allowlist.some((value) => identities.has(normalize(value)));
+interface WorkspaceLookup {
+  readonly exactIds: ReadonlyMap<string, Workspace>;
+  readonly normalizedIds: ReadonlyMap<string, readonly Workspace[]>;
+  readonly normalizedNames: ReadonlyMap<string, readonly Workspace[]>;
 }
 
-function destinationAllowed(workspace: Workspace, allowlist: readonly string[], denylist: readonly string[]): boolean {
-  if (!workspaceAllowed(workspace, allowlist)) return false;
-  const identities = new Set([normalize(workspace.id), normalize(workspace.name)]);
-  return !denylist.some((value) => identities.has(normalize(value)));
-}
-
-function workspaceNames(workspaces: readonly Workspace[]): ReadonlyMap<string, Workspace> {
-  const result = new Map<string, Workspace>();
+function workspaceNames(workspaces: readonly Workspace[]): WorkspaceLookup {
+  const exactIds = new Map<string, Workspace>();
+  const normalizedIds = new Map<string, Workspace[]>();
+  const normalizedNames = new Map<string, Workspace[]>();
   for (const workspace of workspaces) {
-    result.set(normalize(workspace.id), workspace);
-    result.set(normalize(workspace.name), workspace);
+    exactIds.set(workspace.id, workspace);
+    pushWorkspace(normalizedIds, normalize(workspace.id), workspace);
+    pushWorkspace(normalizedNames, normalize(workspace.name), workspace);
   }
-  return result;
+  return { exactIds, normalizedIds, normalizedNames };
 }
 
-function entityMatchesAny(entity: Entity, patterns: readonly string[]): boolean {
-  return entity.members.some((member) => matchesAny(member.url, patterns));
+function resolveWorkspaceLookup(lookup: WorkspaceLookup, selector: string): RuleWorkspaceResolution {
+  const exact = lookup.exactIds.get(selector);
+  if (exact) return { status: "resolved", workspace: exact };
+  const normalized = normalize(selector);
+  const candidates = new Map<string, Workspace>();
+  for (const workspace of lookup.normalizedIds.get(normalized) ?? []) candidates.set(workspace.id, workspace);
+  for (const workspace of lookup.normalizedNames.get(normalized) ?? []) candidates.set(workspace.id, workspace);
+  const matches = [...candidates.values()].sort((left, right) => compareText(left.id, right.id));
+  if (matches.length === 0) return { status: "missing", matches: [] };
+  if (matches.length > 1) return { status: "ambiguous", matches };
+  return { status: "resolved", workspace: matches[0]! };
+}
+
+function pushWorkspace(map: Map<string, Workspace[]>, key: string, workspace: Workspace): void {
+  const values = map.get(key) ?? [];
+  values.push(workspace);
+  map.set(key, values);
+}
+
+function membersMatchAny(members: readonly EntityMember[], patterns: readonly string[]): boolean {
+  return members.some((member) => matchesAny(member.url, patterns));
+}
+
+function movementRootMembers(
+  root: Entity,
+  entities: ReadonlyMap<EntityRef, Entity>
+): readonly EntityMember[] {
+  const members: EntityMember[] = [];
+  const visited = new Set<EntityRef>();
+  const visiting = new Set<EntityRef>();
+  const visit = (entity: Entity): void => {
+    if (visiting.has(entity.ref)) throw new Error(`Entity graph cycle at ${entity.ref}`);
+    if (visited.has(entity.ref)) throw new Error(`Movement Root ${root.ref} repeats structural child ${entity.ref}`);
+    if (entity.structuralRootRef !== root.ref) {
+      throw new Error(`Structural child ${entity.ref} escapes Movement Root ${root.ref}`);
+    }
+    visiting.add(entity.ref);
+    members.push(...entity.members);
+    for (const childRef of entity.childRefs) {
+      const child = entities.get(childRef);
+      if (!child) throw new Error(`Movement Root ${root.ref} references missing child ${childRef}`);
+      visit(child);
+    }
+    visiting.delete(entity.ref);
+    visited.add(entity.ref);
+  };
+  visit(root);
+  return members;
 }
 
 function includedEntityProtection(protection: Protection, options: Pick<RulesPlanOptions, "includePinned" | "includeEssentials">): boolean {
@@ -388,7 +514,7 @@ function includedEntityProtection(protection: Protection, options: Pick<RulesPla
 }
 
 function matchesAny(url: string, patterns: readonly string[]): boolean {
-  return patterns.some((pattern) => matchSpecificity(pattern, url) >= 0);
+  return urlMatchesAnyPattern(url, patterns);
 }
 
 function stableActionId(value: unknown): string {
@@ -401,14 +527,6 @@ function shortDigest(digest: string): string {
 
 function orderedRecord(value: Readonly<Record<string, string>>): Readonly<Record<string, string>> {
   return Object.fromEntries(Object.entries(value).sort(([left], [right]) => compareText(left, right)));
-}
-
-function parseUrl(value: string): URL | null {
-  try {
-    return new URL(value);
-  } catch {
-    return null;
-  }
 }
 
 function normalize(value: string): string {

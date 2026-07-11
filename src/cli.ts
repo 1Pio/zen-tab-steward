@@ -1,33 +1,97 @@
 #!/usr/bin/env node
-import { Command } from "commander";
-import { createInterface } from "node:readline/promises";
-import { applySortPlanLive, applySortPlanOffline, listApplyReceipts, offlineApplyBlockers, resolveApplyBackend, sortApplyBlockers, verifyApplyReceipt } from "./apply.js";
-import { createBackup, listBackups, pruneBackups, restoreBackup } from "./backup.js";
-import { inspectBridge, inspectLiveAttachment, runBridgeLiveMoveProof, runBridgeLiveReadProof, runBridgeProbe } from "./bridge.js";
-import { addDomainRuleInContents, getConfigValue, loadConfig, saveConfigContents, setConfigValueInContents, ZtsConfig } from "./config.js";
-import { planDailySort } from "./daily-sort.js";
-import { envelope, formatApplyReceiptList, formatApplyVerification, formatBackup, formatBackupList, formatBackupPrune, formatBridge, formatBridgeLiveAttachment, formatBridgeLiveMove, formatBridgeLiveRead, formatBridgeProbe, formatRestore, formatReview, formatSortDryRun, formatSortPreview, formatStatus, formatTabs, formatWorkspaces, printJson } from "./output.js";
-import { applyManualPatchOffline, createManualPlanFromInput, listManualApplyReceipts, readPatchInput, verifyDomainApplyReceipt } from "./manual.js";
+import { Command, CommanderError } from "commander";
+import { BackupSelectionError, createBackup, listBackups, previewBackupRestore, pruneBackups } from "./backup.js";
+import { inspectBridge, inspectLiveAttachment, runBridgeLiveReadProof, runBridgeProbe } from "./bridge.js";
+import {
+  addDomainRuleInContents,
+  ConfigChangedError,
+  ConfigPermissionsError,
+  ConfigValidationError,
+  getConfigValue,
+  inspectConfigLocation,
+  loadConfig,
+  saveConfigContents,
+  setConfigValueInContents,
+  ZtsConfig
+} from "./config.js";
+import { planDailySort, summarizePlan } from "./daily-sort.js";
+import { envelope, formatBackup, formatBackupList, formatBackupPrune, formatBridge, formatBridgeLiveAttachment, formatBridgeLiveRead, formatBridgeProbe, formatStatus, formatTabs, formatWorkspaces, printJson } from "./output.js";
+import { PatchInputValidationError, readPatchInput, resolveManualPlanFromInput } from "./manual.js";
 import {
   applyStoredPlanClosedSession,
-  listTransactionReceipts,
+  ApplyReceiptSelectionError,
+  ApplyTransactionSafetyError,
+  assertSupportedApplyRoute,
+  ensureApplyReceiptSummaryHistory,
+  listTransactionReceiptPage,
   verifyTransactionReceipt
 } from "./apply-transaction.js";
+import {
+  CLI_BLOCKED_OUTCOME,
+  CLI_INTERNAL_ERROR_OUTCOME,
+  CLI_INVALID_OUTCOME,
+  cliOutcomeForApplyExecutionError,
+  cliOutcomeForApplyTransaction,
+  cliOutcomeForApplyVerification,
+  cliOutcomeForNoMutation,
+  cliOutcomeForRecoveryError,
+  cliOutcomeForRecoveryResult
+} from "./cli-outcome.js";
+import { ApplyReceiptCursorError, ApplyReceiptHistoryCorruptionError } from "./apply-receipt-store.js";
+import type { CliOutcome } from "./cli-outcome.js";
+import {
+  ApplyRecoveryBlockedError,
+  inspectApplyRecovery,
+  listApplyRecoveryInspections,
+  recoverApplyTransaction
+} from "./apply-recovery.js";
+import {
+  applyApplyStoreRetention,
+  APPLY_RETENTION_DESTRUCTIVE_CONSENT,
+  ApplyRetentionBlockedError,
+  inspectApplyStoreRetention
+} from "./apply-retention.js";
+import { readApplyArtifactLayout } from "./apply-artifacts.js";
 import { deriveAndStoreSubsetPlan, loadStoredPlan, PlanReuseError } from "./plans.js";
+import {
+  noMutationApplyOutcome,
+  type NoMutationApplyOutcome,
+  validateNoMutationApply
+} from "./no-changes.js";
 import { discoverProfileContext } from "./profile.js";
-import { listTabs, loadSession, loadSessionSummary, summarizeSession, withWorkspacePolicy } from "./session.js";
-import { snapshotFromSession } from "./session-snapshot.js";
-import { classifyDomainForWorkspace, planSortPreview, SortInputs } from "./sort.js";
+import { loadSessionSummary, withWorkspacePolicy } from "./session.js";
+import { captureSessionSnapshot } from "./session-snapshot.js";
+import { classifyRuleForUrl, resolveRuleWorkspace } from "./engines/rules.js";
+import { canonicalUrlPattern } from "./url-pattern.js";
 import { VERSION } from "./version.js";
+import { terminalJson, terminalText } from "./terminal.js";
+import { ambiguousWorkspaceMessage, resolveWorkspaceSelector, tabViews, workspaceViews } from "./views.js";
+import { applyUndo, inspectUndo, UndoBlockedError, UndoSelectionError } from "./undo.js";
 
-import type { DomainApplyVerificationReport, ManualApplyReceiptSummary, ManualApplyResult, ManualPlanResult } from "./manual.js";
-import type { ApplyTransactionResult } from "./apply-transaction.js";
+import type { ManualPlanResult } from "./manual.js";
+import type {
+  ApplyTransactionOutcome,
+  ApplyTransactionResult,
+  TransactionReceiptPage,
+  TransactionReceiptVerificationReport
+} from "./apply-transaction.js";
+import type { ApplyRecoveryInspection, ApplyRecoveryResult } from "./apply-recovery.js";
+import type { ApplyRetentionInspection, ApplyRetentionResult } from "./apply-retention.js";
 import type { DailySortPlanResult } from "./daily-sort.js";
 import type { Plan } from "./domain/change.js";
+import type { Sha256Digest } from "./domain/digest.js";
 import type { Entity, EntityRef, Snapshot } from "./domain/snapshot.js";
+import type { UndoInspection } from "./undo.js";
 
 interface JsonOption {
   json?: boolean;
+}
+
+class CliInvocationError extends Error {
+  constructor(message: string, cause?: unknown) {
+    super(message, cause === undefined ? undefined : { cause });
+    this.name = "CliInvocationError";
+  }
 }
 
 const program = new Command();
@@ -36,6 +100,12 @@ program
   .name("zts")
   .description("Zen Tab Steward: safe Zen Browser tab and workspace stewardship")
   .version(VERSION)
+  .exitOverride()
+  .configureOutput({
+    writeErr: (text) => {
+      if (!jsonDocumentModeRequested()) process.stderr.write(text);
+    }
+  })
   .showHelpAfterError()
   .showSuggestionAfterError();
 
@@ -49,7 +119,14 @@ program
       const loadedConfig = await loadConfig();
       const summary = withWorkspacePolicy(await loadSessionSummary(context.sessionFile), loadedConfig.config);
       const bridge = inspectBridge(context);
-      const data = { profile: context.profile, zenRunning: context.running, session: summary, bridge };
+      const closedSessionApply = {
+        status: context.running ? "blocked_running" as const : "checked_at_apply" as const,
+        mutationAuthorityEstablished: false,
+        reason: context.running
+          ? "Zen is running and may own the Profile"
+          : "Native Profile control, primary session source, unfinished transactions, Plan Drift, and expiry are checked atomically at apply time"
+      };
+      const data = { profile: context.profile, zenRunning: context.running, session: summary, closedSessionApply, bridge };
 
       if (options.json) {
         printJson(envelope("status", data, statusEnvelopeOptions(context.running, bridge.blockers)));
@@ -62,12 +139,8 @@ program
 program
   .command("bridge")
   .description("Inspect the live Zen bridge boundary without changing Zen state")
-  .argument("[action]", "status, doctor, live-check, live-read, live-move-proof, or probe")
+  .argument("[action]", "status, doctor, live-check, live-read, or probe")
   .option("--connect", "for live-check, connect to the discovered local WebDriver BiDi endpoint and run session.status")
-  .option("--url <url>", "for live-move-proof, exact live tab URL to move")
-  .option("--from-workspace <workspace-id>", "for live-move-proof, exact source workspace id")
-  .option("--to-workspace <workspace-id>", "for live-move-proof, exact destination workspace id")
-  .option("--confirm-live-move", "for live-move-proof, acknowledge that one eligible live tab may be moved")
   .option("--timeout-ms <ms>", "probe timeout in milliseconds")
   .option("--json", "print stable JSON output")
   .action(async (action: string | undefined, options: JsonOption & BridgeOptions) => {
@@ -135,35 +208,6 @@ program
       return;
     }
 
-    if (selectedAction === "live-move-proof") {
-      await runCommand("bridge live-move-proof", options, async () => {
-        const context = await discoverProfileContext();
-        const timeoutMs = probeTimeoutMs(options.timeoutMs);
-        const receipt = await runBridgeLiveMoveProof(context, {
-          timeoutMs,
-          url: options.url,
-          fromWorkspaceId: options.fromWorkspace,
-          toWorkspaceId: options.toWorkspace,
-          confirmLiveMove: Boolean(options.confirmLiveMove)
-        });
-        const suggestedNextCommands = receipt.ok
-          ? ["zts bridge live-read --json", "zts sort --preview"]
-          : ["zts bridge live-read --json", "zts bridge live-check --connect --json", "zts tabs <workspace> --json"];
-        if (options.json) {
-          printJson(envelope("bridge live-move-proof", { profile: context.profile, zenRunning: context.running, receipt }, {
-            ok: receipt.ok,
-            warnings: receipt.warnings,
-            blockers: receipt.blockers,
-            suggestedNextCommands
-          }));
-        } else {
-          process.stdout.write(`${formatBridgeLiveMove(receipt, suggestedNextCommands)}\n`);
-        }
-        process.exitCode = receipt.ok ? 0 : 2;
-      });
-      return;
-    }
-
     if (selectedAction === "probe") {
       await runCommand("bridge probe", options, async () => {
         const timeoutMs = probeTimeoutMs(options.timeoutMs);
@@ -186,9 +230,9 @@ program
 
     const message = `unknown bridge action '${selectedAction}'`;
     if (options.json) {
-      printJson(envelope("bridge", { action: selectedAction }, { ok: false, blockers: [message], suggestedNextCommands: ["zts bridge status", "zts bridge doctor", "zts bridge live-check", "zts bridge live-read", "zts bridge live-move-proof", "zts bridge probe"] }));
+      printJson(envelope("bridge", { action: selectedAction }, { ok: false, blockers: [message], suggestedNextCommands: ["zts bridge status", "zts bridge doctor", "zts bridge live-check", "zts bridge live-read", "zts bridge probe"] }));
     } else {
-      process.stderr.write(`zts: ${message}\n`);
+      process.stderr.write(`zts: ${terminalData(message)}\n`);
     }
     process.exitCode = 1;
   });
@@ -202,38 +246,40 @@ program
   .option("--json", "print stable JSON output")
   .action(async (action: string | undefined, key: string | undefined, value: string | undefined, options: JsonOption) => {
     await runCommand("config", options, async () => {
-      const loaded = await loadConfig();
       const selectedAction = action ?? "show";
 
       if (selectedAction === "path") {
-        if (options.json) printJson(envelope("config path", { path: loaded.path, exists: loaded.exists }));
-        else process.stdout.write(`${loaded.path}\n`);
+        const location = await inspectConfigLocation();
+        if (options.json) printJson(envelope("config path", location));
+        else process.stdout.write(`${terminalData(location.path)}\n`);
         return;
       }
 
+      const loaded = await loadConfig();
+
       if (selectedAction === "show") {
         if (options.json) printJson(envelope("config show", loaded));
-        else process.stdout.write(`${JSON.stringify(loaded.config, null, 2)}\n`);
+        else process.stdout.write(`${terminalJson(loaded.config)}\n`);
         return;
       }
 
       if (selectedAction === "get" && key) {
         const configValue = getConfigValue(loaded.config, key);
         if (options.json) printJson(envelope("config get", { path: loaded.path, key, value: configValue }));
-        else process.stdout.write(`${String(configValue)}\n`);
+        else process.stdout.write(`${typeof configValue === "object" ? terminalJson(configValue) : terminalData(String(configValue))}\n`);
         return;
       }
 
       if (selectedAction === "set" && key && value !== undefined) {
         const contents = setConfigValueInContents(loaded.contents, key, value);
-        const path = await saveConfigContents(contents);
+        const path = await saveConfigContents(contents, loaded);
         const updated = (await loadConfig()).config;
         if (options.json) printJson(envelope("config set", { path, key, value: getConfigValue(updated, key) }));
-        else process.stdout.write(`Set ${key} in ${path}\n`);
+        else process.stdout.write(`Set ${terminalData(key)} in ${terminalData(path)}\n`);
         return;
       }
 
-      throw new Error("Usage: zts config [path|show|get <key>|set <key> <value>]");
+      throw new CliInvocationError("Usage: zts config [path|show|get <key>|set <key> <value>]");
     });
   });
 
@@ -256,23 +302,62 @@ program
       }
 
       if (action === "add" && type === "domain" && patternOrUrl && workspace) {
-        const contents = addDomainRuleInContents(loaded.contents, patternOrUrl, workspace);
-        const path = await saveConfigContents(contents);
-        if (options.json) printJson(envelope("rules add domain", { path, pattern: patternOrUrl, workspace }));
-        else process.stdout.write(`Added domain rule ${patternOrUrl} -> ${workspace}\n`);
+        if (!workspace.trim()) throw new CliInvocationError("Destination Workspace cannot be empty");
+        const pattern = validatedCliInput(() => canonicalUrlPattern(patternOrUrl));
+        const context = await discoverProfileContext();
+        const captured = await captureSessionSnapshot(context, loaded.config);
+        const resolved = resolveRuleWorkspace(captured.snapshot.workspaces, workspace.trim());
+        if (resolved.status === "missing") throw new CliInvocationError(`Destination Workspace not found: ${workspace}`);
+        if (resolved.status === "ambiguous") {
+          throw new CliInvocationError(
+            `Destination Workspace '${workspace}' is ambiguous; use one id: ${resolved.matches.map((match) => match.id).join(", ")}`
+          );
+        }
+        const destination = resolved.workspace;
+        const contents = addDomainRuleInContents(loaded.contents, pattern, destination.id);
+        const path = await saveConfigContents(contents, loaded);
+        if (options.json) printJson(envelope("rules add domain", { path, pattern, workspace: destination }));
+        else process.stdout.write(`Added domain rule ${terminalData(pattern)} -> ${terminalData(destination.name)}\n`);
         return;
       }
 
       if (action === "test" && type) {
         const testInput = patternOrUrl ?? type;
-        const domain = domainFromInput(testInput);
-        const match = classifyDomainForWorkspace(domain, loaded.config.rules.domains);
-        if (options.json) printJson(envelope("rules test", { input: testInput, domain, match }));
-        else process.stdout.write(match ? `${domain} -> ${match.workspaceName} (${match.matchedPattern})\n` : `${domain} -> review\n`);
+        const domain = validatedCliInput(() => domainFromInput(testInput));
+        const configuredMatch = classifyRuleForUrl(testInput, loaded.config.rules.domains);
+        const context = await discoverProfileContext();
+        const captured = await captureSessionSnapshot(context, loaded.config);
+        const resolution = configuredMatch
+          ? resolveRuleWorkspace(captured.snapshot.workspaces, configuredMatch.workspaceName)
+          : null;
+        const destination = resolution?.status === "resolved" ? resolution.workspace : null;
+        const match = configuredMatch && destination
+          ? {
+              ...configuredMatch,
+              workspaceSelector: configuredMatch.workspaceName,
+              workspaceName: destination.name,
+              workspaceId: destination.id
+            }
+          : null;
+        const warnings = configuredMatch && resolution?.status === "missing"
+          ? [`Configured rule ${configuredMatch.matchedPattern} names missing Workspace ${configuredMatch.workspaceName}`]
+          : configuredMatch && resolution?.status === "ambiguous"
+            ? [`Configured rule ${configuredMatch.matchedPattern} names ambiguous Workspace ${configuredMatch.workspaceName}; use one Workspace id`]
+            : [];
+        if (options.json) printJson(envelope("rules test", {
+          input: testInput,
+          domain,
+          snapshotRevision: captured.snapshot.revision,
+          configuredMatch,
+          match
+        }, { warnings }));
+        else process.stdout.write(match
+          ? `${terminalData(domain)} -> ${terminalData(match.workspaceName)} (${terminalData(match.matchedPattern)})\n`
+          : `${terminalData(domain)} -> review${warnings.length > 0 ? ` (${terminalData(warnings[0])})` : ""}\n`);
         return;
       }
 
-      throw new Error("Usage: zts rules [add domain <pattern> <workspace>|test <url-or-domain>]");
+      throw new CliInvocationError("Usage: zts rules [add domain <pattern> <workspace>|test <url-or-domain>]");
     });
   });
 
@@ -284,11 +369,20 @@ program
     await runCommand("workspaces", options, async () => {
       const context = await discoverProfileContext();
       const loadedConfig = await loadConfig();
-      const summary = withWorkspacePolicy(await loadSessionSummary(context.sessionFile), loadedConfig.config);
+      const captured = await captureSessionSnapshot(context, loadedConfig.config);
+      const workspaces = workspaceViews(captured.snapshot, captured.summary.workspaces);
+      const observation = snapshotObservationPresentation(captured.snapshot, captured.context.running);
       if (options.json) {
-        printJson(envelope("workspaces", { profile: context.profile, zenRunning: context.running, workspaces: summary.workspaces }));
+        printJson(envelope("workspaces", {
+          profile: captured.context.profile,
+          zenRunning: captured.context.running,
+          snapshotRevision: captured.snapshot.revision,
+          authority: captured.snapshot.authority,
+          freshness: captured.snapshot.freshness,
+          workspaces
+        }, { warnings: snapshotObservationWarnings(observation) }));
       } else {
-        process.stdout.write(`${formatWorkspaces(summary)}\n`);
+        process.stdout.write(`${formatWorkspaces(workspaces, observation)}\n`);
       }
     });
   });
@@ -303,14 +397,22 @@ program
     await runCommand("tabs", options, async () => {
       const context = await discoverProfileContext();
       const loadedConfig = await loadConfig();
-      const session = await loadSession(context.sessionFile);
-      const summary = withWorkspacePolicy(summarizeSession(session, context.sessionFile), loadedConfig.config);
       const workspace = options.workspace ?? workspaceArgument;
-      const tabs = listTabs(session, summary, workspace);
+      const captured = await captureSessionSnapshot(context, loadedConfig.config);
+      const tabs = validatedCliInput(() => tabViews(captured.snapshot, workspace));
+      const observation = snapshotObservationPresentation(captured.snapshot, captured.context.running);
       if (options.json) {
-        printJson(envelope("tabs", { profile: context.profile, zenRunning: context.running, workspace: workspace ?? null, tabs }));
+        printJson(envelope("tabs", {
+          profile: captured.context.profile,
+          zenRunning: captured.context.running,
+          snapshotRevision: captured.snapshot.revision,
+          authority: captured.snapshot.authority,
+          freshness: captured.snapshot.freshness,
+          workspace: workspace ?? null,
+          tabs
+        }, { warnings: snapshotObservationWarnings(observation) }));
       } else {
-        process.stdout.write(`${formatTabs(tabs)}\n`);
+        process.stdout.write(`${formatTabs(tabs, observation)}\n`);
       }
     });
   });
@@ -323,16 +425,15 @@ program
     await runCommand("snapshot", options, async () => {
       const context = await discoverProfileContext();
       const loadedConfig = await loadConfig();
-      const session = await loadSession(context.sessionFile);
-      const summary = withWorkspacePolicy(summarizeSession(session, context.sessionFile), loadedConfig.config);
-      const snapshot = snapshotFromSession(context, session, summary);
+      const captured = await captureSessionSnapshot(context, loadedConfig.config);
+      const snapshot = captured.snapshot;
       const data = {
-        profile: context.profile,
-        zenRunning: context.running,
+        profile: captured.context.profile,
+        zenRunning: captured.context.running,
         snapshot
       };
-      const warnings = context.running
-        ? ["Zen is running; this Snapshot is a persisted observation and cannot be used for apply"]
+      const warnings = captured.authorityBlocker
+        ? [`Snapshot is a persisted observation and cannot be used for apply: ${captured.authorityBlocker}`]
         : [];
       const suggestedNextCommands = ["zts patch plan patch.json --json", "zts tabs --json"];
       if (options.json) {
@@ -352,12 +453,13 @@ program
   .action(async (action: string | undefined, selector: string | undefined, options: JsonOption) => {
     await runCommand("plan", options, async () => {
       const selectedAction = action ?? "show";
-      if (selectedAction !== "show") throw new Error("Usage: zts plan show [latest|plan-id|plan-digest]");
+      if (selectedAction !== "show") throw new CliInvocationError("Usage: zts plan show [latest|plan-id|plan-digest]");
       const context = await discoverProfileContext();
       const stored = await loadStoredPlan(context.profile.id, selector ?? "latest");
       const expired = Date.parse(stored.plan.expiresAt) <= Date.now();
       const data = {
         profile: context.profile,
+        snapshot: stored.snapshot,
         plan: stored.plan,
         requestRevision: stored.requestRevision,
         artifact: stored.artifact,
@@ -369,7 +471,7 @@ program
           suggestedNextCommands: expired ? ["zts sort --all --engine rules --preview"] : ["zts sort --all --engine rules --dry-run", "zts plan show latest --json"]
         }));
       } else {
-        process.stdout.write(formatSavedPlan(stored.plan, expired));
+        process.stdout.write(formatSavedPlan(stored.snapshot, stored.plan, expired));
       }
     });
   });
@@ -377,18 +479,20 @@ program
 program
   .command("patch")
   .description("Plan exact manual tab moves from a Patch JSON file")
-  .argument("[action]", "plan, apply, or receipts")
+  .argument("[action]", "plan or apply")
   .argument("[patch-file]", "Patch JSON path, or - for stdin")
   .option("--yes", "confirm an unattended apply; required for patch apply")
+  .option("--expect-digest <digest>", "required exact reviewed Plan digest for patch apply")
+  .option("--backend <backend>", "apply route preference: auto, live, or session")
   .option("--json", "print stable JSON output")
-  .action(async (action: string | undefined, patchFile: string | undefined, options: JsonOption & { yes?: boolean }) => {
+  .action(async (action: string | undefined, patchFile: string | undefined, options: JsonOption & { yes?: boolean; expectDigest?: string; backend?: string }) => {
     const selectedAction = action ?? "plan";
-    if (selectedAction !== "plan" && selectedAction !== "apply" && selectedAction !== "receipts") {
+    if (selectedAction !== "plan" && selectedAction !== "apply") {
       const message = `unknown patch action '${selectedAction}'`;
       if (options.json) {
-        printJson(envelope("patch", { action: selectedAction }, { ok: false, blockers: [message], suggestedNextCommands: ["zts patch plan <patch-file> --json", "zts patch apply <patch-file> --yes --json", "zts patch receipts --json"] }));
+        printJson(envelope("patch", { action: selectedAction }, { ok: false, blockers: [message], suggestedNextCommands: ["zts patch plan <patch-file> --json"] }));
       } else {
-        process.stderr.write(`zts: ${message}\n`);
+        process.stderr.write(`zts: ${terminalData(message)}\n`);
       }
       process.exitCode = 1;
       return;
@@ -396,30 +500,33 @@ program
 
     if (selectedAction === "plan") {
       await runCommand("patch plan", options, async () => {
-        if (!patchFile) throw new Error("Patch file is required; use - to read JSON from stdin");
+        if (!patchFile) throw new CliInvocationError("Patch file is required; use - to read JSON from stdin");
         const context = await discoverProfileContext();
         const loadedConfig = await loadConfig();
-        const session = await loadSession(context.sessionFile);
-        const summary = withWorkspacePolicy(summarizeSession(session, context.sessionFile), loadedConfig.config);
-        const snapshot = snapshotFromSession(context, session, summary);
+        const captured = await captureSessionSnapshot(context, loadedConfig.config);
+        const snapshot = captured.snapshot;
         const patchInput = await readPatchInput(patchFile);
-        const result = createManualPlanFromInput(snapshot, patchInput);
-        const blockers = result.plan.snapshotAuthority === "authoritative" && result.plan.snapshotFreshness === "current"
+        const result = await resolveManualPlanFromInput(snapshot, patchInput, loadedConfig.config);
+        const warnings = result.plan.snapshotAuthority === "authoritative" && result.plan.snapshotFreshness === "current"
           ? []
           : ["Patch Plan was created from a persisted observation and is not executable for apply"];
-        const suggestedNextCommands = blockers.length > 0
+        const suggestedNextCommands = warnings.length > 0
           ? ["Quit Zen, then rerun zts snapshot --json and zts patch plan <patch-file> --json"]
-          : ["zts patch apply <patch-file> --yes", "zts snapshot --json"];
+          : [
+              `zts plan show ${shellQuote(result.plan.id)}`,
+              `zts apply ${shellQuote(result.plan.id)}`,
+              "zts snapshot --json"
+            ];
         if (options.json) {
-          printJson(envelope("patch plan", { profile: context.profile, zenRunning: context.running, ...result }, {
-            ok: blockers.length === 0,
-            blockers,
+          printJson(envelope("patch plan", { profile: captured.context.profile, zenRunning: captured.context.running, ...result }, {
+            ok: true,
+            warnings,
             suggestedNextCommands
           }));
-          process.exitCode = blockers.length === 0 ? 0 : 2;
+          process.exitCode = 0;
         } else {
-          process.stdout.write(formatManualPlanSummary(result, blockers, suggestedNextCommands));
-          process.exitCode = blockers.length === 0 ? 0 : 2;
+          process.stdout.write(formatManualPlanSummary(result, warnings, suggestedNextCommands));
+          process.exitCode = 0;
         }
       });
       return;
@@ -427,32 +534,83 @@ program
 
     if (selectedAction === "apply") {
       await runCommand("patch apply", options, async () => {
-        if (!patchFile) throw new Error("Patch file is required; use - to read JSON from stdin");
-        if (!options.yes) throw new Error("Manual Patch apply requires explicit consent with --yes");
+        if (!patchFile) throw new CliInvocationError("Patch file is required; use - to read JSON from stdin");
+        if (!options.yes) throw new CliInvocationError("Manual Patch apply requires explicit consent with --yes");
+        if (!options.expectDigest) throw new CliInvocationError("Manual Patch apply requires --expect-digest from the reviewed Patch Plan");
         const context = await discoverProfileContext();
         const loadedConfig = await loadConfig();
-        const session = await loadSession(context.sessionFile);
-        const summary = withWorkspacePolicy(summarizeSession(session, context.sessionFile), loadedConfig.config);
+        const routePreference = validatedApplyBackend(options.backend)
+          ?? loadedConfig.config.defaults.applyBackend;
+        try {
+          assertSupportedApplyRoute(routePreference);
+        } catch (error) {
+          if (!(error instanceof ApplyTransactionSafetyError)) throw error;
+          emitApplySafetyBlocker(
+            "patch apply",
+            options,
+            { profile: context.profile, applied: false },
+            error,
+            "Manual Patch Apply blocked"
+          );
+          return;
+        }
+        const captured = await captureSessionSnapshot(context, loadedConfig.config, { requireAuthoritative: true });
         const patchInput = await readPatchInput(patchFile);
-        const result = await applyManualPatchOffline(context, session, summary, patchInput, patchCommandForReceipt(selectedAction, patchFile, options));
-        const suggestedNextCommands = ["zts patch receipts --json", "zts snapshot --json", "zts backup list"];
-        if (options.json) {
-          printJson(envelope("patch apply", { profile: context.profile, zenRunning: context.running, ...result }, { suggestedNextCommands }));
-        } else {
-          process.stdout.write(formatManualApplySummary(result, suggestedNextCommands));
+        const planned = await resolveManualPlanFromInput(
+          captured.snapshot,
+          patchInput,
+          loadedConfig.config,
+          new Date(),
+          "require_existing"
+        );
+        if (planned.plan.digest !== options.expectDigest) {
+          throw new CliInvocationError(`Expected Plan digest ${options.expectDigest} does not match reviewed Patch Plan ${planned.plan.digest}`);
         }
-      });
-    }
-
-    if (selectedAction === "receipts") {
-      await runCommand("patch receipts", options, async () => {
-        const context = await discoverProfileContext();
-        const receipts = await listManualApplyReceipts(context.profile.id);
-        if (options.json) {
-          printJson(envelope("patch receipts", { profile: context.profile, receipts }));
-        } else {
-          process.stdout.write(formatManualReceiptList(receipts));
+        const noChanges = noMutationApplyOutcome(planned.plan);
+        if (noChanges) {
+          const validated = validateNoMutationApply(
+            captured.snapshot,
+            planned.plan,
+            options.expectDigest,
+            loadedConfig.revision
+          );
+          emitNoMutationApply(
+            "patch apply",
+            options,
+            "Manual Patch Apply",
+            {
+              profile: context.profile,
+              ...planned,
+              artifacts: [{ kind: "plan" as const, ...planned.artifact }]
+            },
+            validated
+          );
+          return;
         }
+        let result: Awaited<ReturnType<typeof applyStoredPlanClosedSession>>;
+        try {
+          result = await applyStoredPlanClosedSession(context, planned, {
+            expectedDigest: options.expectDigest,
+            command: patchCommandForReceipt(selectedAction, patchFile, options),
+            routePreference
+          });
+        } catch (error) {
+          emitApplyExecutionFailure(
+            "patch apply",
+            options,
+            { profile: context.profile, plan: planned.plan, applied: false },
+            error,
+            "Manual Patch Apply"
+          );
+          return;
+        }
+        emitApplyTransactionOutcome(
+          "patch apply",
+          options,
+          "Manual Patch Apply",
+          { profile: context.profile, ...result },
+          result
+        );
       });
     }
   });
@@ -460,28 +618,52 @@ program
 program
   .command("apply")
   .description("Apply an exact saved Plan, or inspect apply receipts")
-  .argument("[action]", "latest, Plan id/digest, list, or verify")
-  .argument("[receipt-id]", "apply receipt id for verify")
+  .argument("[action]", "latest, Plan id/digest, list, verify, or recover")
+  .argument("[selector]", "receipt id for verify, or transaction id for recover")
   .option("--actions <ids>", "comma-separated executable action ids to derive as an exact subset Plan")
   .option("--yes", "confirm unattended application of the exact Plan")
   .option("--expect-digest <digest>", "required exact Plan digest for unattended mutation")
+  .option("--expect-recovery-digest <digest>", "required exact inspected recovery revision for recovery finalization")
+  .option("--backend <backend>", "apply route preference: auto, live, or session")
+  .option("--limit <count>", "maximum saved-Plan Receipts to list (default 50, maximum 500)")
+  .option("--cursor <cursor>", "opaque saved-Plan Receipt history cursor")
   .option("--json", "print stable JSON output")
   .action(async (action: string | undefined, receiptId: string | undefined, options: JsonOption & ApplyPlanOptions) => {
     const selectedAction = action ?? "list";
-
     if (selectedAction === "list") {
       await runCommand("apply list", options, async () => {
         const context = await discoverProfileContext();
-        const receipts = await listApplyReceipts(context.profile.id);
-        const domainReceipts = [
-          ...await listTransactionReceipts(context.profile.id),
-          ...await listManualApplyReceipts(context.profile.id)
-        ];
-        if (options.json) {
-          printJson(envelope("apply list", { profile: context.profile, receipts, domainReceipts }));
-        } else {
-          process.stdout.write(`${formatApplyReceiptList(receipts)}\n${formatDomainApplyReceiptList(domainReceipts)}`);
+        const historyLimit = options.limit === undefined ? 50 : Number(options.limit);
+        if (!Number.isSafeInteger(historyLimit) || historyLimit < 1 || historyLimit > 500) {
+          throw new CliInvocationError("--limit must be an integer between 1 and 500");
         }
+        const savedPlanPage = await listTransactionReceiptPage(context.profile.id, {
+          limit: historyLimit,
+          ...(options.cursor === undefined ? {} : { cursor: options.cursor })
+        });
+        if (options.json) {
+          printJson(envelope("apply list", {
+            profile: context.profile,
+            receipts: savedPlanPage.receipts,
+            history: { kind: "saved_plan", limit: historyLimit, nextCursor: savedPlanPage.nextCursor }
+          }, {
+            suggestedNextCommands: savedPlanPage.nextCursor
+              ? [`zts apply list --limit ${historyLimit} --cursor ${shellQuote(savedPlanPage.nextCursor)} --json`]
+              : []
+          }));
+        } else {
+          const next = savedPlanPage.nextCursor
+            ? `\nNext page: zts apply list --limit ${historyLimit} --cursor ${shellQuote(savedPlanPage.nextCursor)}\n`
+            : "";
+          process.stdout.write(`${formatDomainApplyReceiptList(savedPlanPage.receipts)}${next}`);
+        }
+      });
+      return;
+    }
+
+    if (options.limit !== undefined || options.cursor !== undefined) {
+      await runCommand(`apply ${selectedAction}`, options, async () => {
+        throw new CliInvocationError("--limit and --cursor are only valid with zts apply list");
       });
       return;
     }
@@ -489,68 +671,229 @@ program
     if (selectedAction === "verify") {
       await runCommand("apply verify", options, async () => {
         const context = await discoverProfileContext();
-        if (!receiptId) throw new Error("Apply receipt id is required");
-        let report;
+        if (!receiptId) throw new CliInvocationError("Apply receipt id is required");
+        const validatedReceiptId = validatedApplyReceiptSelector(receiptId);
+        let report: TransactionReceiptVerificationReport;
         try {
-          report = await verifyApplyReceipt(context, receiptId);
+          report = await verifyTransactionReceipt(context, validatedReceiptId);
         } catch (error) {
-          if (!(error instanceof Error) || !/Apply receipt not found/.test(error.message)) throw error;
-          const loadedConfig = await loadConfig();
-          const session = await loadSession(context.sessionFile);
-          const summary = withWorkspacePolicy(summarizeSession(session, context.sessionFile), loadedConfig.config);
-          let domainReport;
-          try {
-            domainReport = await verifyTransactionReceipt(context, session, summary, receiptId);
-          } catch (transactionError) {
-            if (!(transactionError instanceof Error) || !/Transaction apply receipt not found/.test(transactionError.message)) {
-              throw transactionError;
-            }
-            domainReport = await verifyDomainApplyReceipt(context, session, summary, receiptId);
-          }
-          const ok = domainReport.verification.ok;
-          if (options.json) {
-            printJson(envelope("apply verify", { profile: context.profile, report: domainReport }, { ok, blockers: domainReport.verification.blockers }));
-          } else {
-            process.stdout.write(formatDomainApplyVerification(domainReport));
-          }
-          process.exitCode = ok ? 0 : 2;
+          emitCliExecutionFailure(
+            "apply verify",
+            options,
+            { profile: context.profile, receiptId: validatedReceiptId },
+            error,
+            "Apply Receipt verification",
+            cliOutcomeForCommandBoundary(error),
+            ["zts apply list --json", "zts apply recover --json", "zts status --json"]
+          );
           return;
         }
-        const ok = report.verification.ok;
+        const disposition = cliOutcomeForApplyVerification(report.verification.ok);
         if (options.json) {
-          printJson(envelope("apply verify", { profile: context.profile, report }, { ok, blockers: report.verification.blockers }));
+          printJson(envelope("apply verify", { profile: context.profile, report, outcome: disposition }, {
+            ok: disposition.ok,
+            blockers: report.verification.blockers
+          }));
         } else {
-          process.stdout.write(`${formatApplyVerification(report)}\n`);
+          process.stdout.write(formatDomainApplyVerification(report));
         }
-        process.exitCode = ok ? 0 : 2;
+        process.exitCode = disposition.exitCode;
+      });
+      return;
+    }
+
+    if (selectedAction === "recover") {
+      await runCommand("apply recover", options, async () => {
+        const context = await discoverProfileContext();
+        if (!receiptId) {
+          const recoveries = await listApplyRecoveryInspections(context);
+          const suggestedNextCommands = recoveries.length > 0
+            ? [`zts apply recover ${shellQuote(recoveries[0].transactionId)} --json`]
+            : ["zts apply list --json"];
+          if (options.json) {
+            printJson(envelope("apply recover", {
+              profile: context.profile,
+              recoveries,
+              outcome: cliOutcomeForNoMutation(false)
+            }, { suggestedNextCommands }));
+          } else {
+            process.stdout.write(formatApplyRecoveryList(recoveries));
+          }
+          return;
+        }
+
+        if (!options.yes) {
+          const inspection = await inspectApplyRecovery(context, receiptId);
+          const exactCommand = [
+            "zts apply recover",
+            shellQuote(inspection.transactionId),
+            "--yes",
+            "--expect-recovery-digest",
+            inspection.recoveryRevision
+          ].join(" ");
+          if (options.json) {
+            printJson(envelope("apply recover", {
+              profile: context.profile,
+              inspection,
+              recoveryRecorded: false,
+              sessionMutated: false,
+              outcome: cliOutcomeForNoMutation(false)
+            }, {
+              warnings: [...inspection.blockers],
+              suggestedNextCommands: inspection.recoverable ? [`${exactCommand} --json`] : ["zts status --json"]
+            }));
+          } else {
+            process.stdout.write(formatApplyRecoveryInspection(inspection, exactCommand));
+          }
+          return;
+        }
+
+        const readiness = await inspectApplyRecovery(context, receiptId);
+        const alreadyComplete = Boolean(readiness.terminalReceipt && readiness.lock.status === "absent");
+        const recoveryConsentBlocker = !options.expectRecoveryDigest
+          ? "Apply recovery finalization requires --expect-recovery-digest from an exact inspection"
+          : options.expectRecoveryDigest !== readiness.recoveryRevision
+            ? `Expected recovery digest ${options.expectRecoveryDigest} does not match current inspection ${readiness.recoveryRevision}`
+            : null;
+        if (recoveryConsentBlocker || (!readiness.recoverable && !alreadyComplete)) {
+          const blocker = recoveryConsentBlocker
+            ?? readiness.blockers.join("; ")
+            ?? "Apply Transaction is not recoverable";
+          const data = { profile: context.profile, inspection: readiness, recoveryRecorded: false, sessionMutated: false };
+          const outcome = cliOutcomeForRecoveryError(new ApplyRecoveryBlockedError(blocker));
+          if (options.json) {
+            printJson(envelope("apply recover", { ...data, outcome }, {
+              ok: outcome.ok,
+              blockers: [blocker],
+              suggestedNextCommands: ["zts status --json", "zts apply recover --json"]
+            }));
+          } else {
+            process.stderr.write(`Apply recovery blocked\n- ${terminalData(blocker)}\n`);
+          }
+          process.exitCode = outcome.exitCode;
+          return;
+        }
+        let result: ApplyRecoveryResult;
+        try {
+          result = await recoverApplyTransaction(context, receiptId, {
+            expectedRecoveryRevision: options.expectRecoveryDigest!
+          });
+        } catch (error) {
+          const data = { profile: context.profile, inspection: readiness, recoveryRecorded: false, sessionMutated: false };
+          emitRecoveryExecutionFailure("apply recover", options, data, error, receiptId);
+          return;
+        }
+        const outcome = cliOutcomeForRecoveryResult(result);
+        const data = { profile: context.profile, ...result, outcome };
+        if (options.json) {
+          printJson(envelope("apply recover", data, {
+            ok: outcome.ok,
+            suggestedNextCommands: ["zts apply list --json", `zts apply verify ${shellQuote(result.receipt.id)} --json`]
+          }));
+        } else {
+          process.stdout.write(formatApplyRecoveryResult(result));
+        }
+        process.exitCode = outcome.exitCode;
       });
       return;
     }
 
     await runCommand("apply plan", options, async () => {
-      if (receiptId) throw new Error("Saved Plan apply accepts one Plan selector");
+      if (receiptId) throw new CliInvocationError("Saved Plan apply accepts one Plan selector");
       const context = await discoverProfileContext();
       const original = await loadStoredPlan(context.profile.id, selectedAction);
+      if (original.plan.source.kind === "inverse") {
+        const outcome = CLI_INVALID_OUTCOME;
+        const blocker = "Receipt-bound inverse Plans cannot be applied directly; use zts undo for the source Receipt";
+        const suggestedNextCommands = [
+          `zts undo ${shellQuote(original.plan.source.sourceReceiptId)} --preview --json`,
+          "zts apply list --json"
+        ];
+        if (options.json) {
+          printJson(envelope("apply plan", {
+            profile: context.profile,
+            plan: original.plan,
+            applied: false,
+            outcome
+          }, { ok: false, blockers: [blocker], suggestedNextCommands }));
+        } else {
+          process.stderr.write(`Saved Plan Apply rejected\n- ${terminalData(blocker)}\n\nNext:\n${suggestedNextCommands.map((next) => `  ${terminalData(next)}`).join("\n")}\n`);
+        }
+        process.exitCode = outcome.exitCode;
+        return;
+      }
       let selected = original;
-      const requestedActionIds = splitCsv(options.actions);
+        const requestedActionIds = splitCsv(options.actions);
       if (options.actions !== undefined) {
-        if (requestedActionIds.length === 0) throw new Error("--actions requires at least one action id");
-        if (options.yes) throw new Error("Selected action apply must first derive a subset Plan, then apply that exact Plan id with --yes");
+        if (requestedActionIds.length === 0) throw new CliInvocationError("--actions requires at least one action id");
+        if (options.yes) throw new CliInvocationError("Selected action apply must first derive a subset Plan, then apply that exact Plan id with --yes");
         const loadedConfig = await loadConfig();
-        const session = await loadSession(context.sessionFile);
-        const summary = withWorkspacePolicy(summarizeSession(session, context.sessionFile), loadedConfig.config);
-        const snapshot = snapshotFromSession(context, session, summary);
-        selected = await deriveAndStoreSubsetPlan(snapshot, original.plan, requestedActionIds);
+        const captured = await captureSessionSnapshot(context, loadedConfig.config, { requireAuthoritative: true });
+        selected = await deriveAndStoreSubsetPlan(captured.snapshot, original.plan, requestedActionIds);
       }
       if (options.yes) {
-        if (!options.expectDigest) throw new Error("Saved Plan apply requires --expect-digest with the exact Plan digest");
+        if (!options.expectDigest) throw new CliInvocationError("Saved Plan apply requires --expect-digest with the exact Plan digest");
         if (options.expectDigest !== selected.plan.digest) {
-          throw new Error(`Expected Plan digest ${options.expectDigest} does not match selected Plan ${selected.plan.digest}`);
+          throw new CliInvocationError(`Expected Plan digest ${options.expectDigest} does not match selected Plan ${selected.plan.digest}`);
         }
-        const result = await applyStoredPlanClosedSession(context, selected, {
-          expectedDigest: options.expectDigest,
-          command: applyPlanCommandForReceipt(selectedAction, options)
-        });
+        const routePreference = validatedApplyBackend(options.backend);
+        const noChanges = noMutationApplyOutcome(selected.plan);
+        if (noChanges) {
+          const loadedConfig = await loadConfig();
+          try {
+            assertSupportedApplyRoute(routePreference ?? loadedConfig.config.defaults.applyBackend);
+          } catch (error) {
+            if (!(error instanceof ApplyTransactionSafetyError)) throw error;
+            emitApplySafetyBlocker(
+              "apply plan",
+              options,
+              { profile: context.profile, plan: selected.plan, applied: false },
+              error,
+              "Saved Plan Apply blocked"
+            );
+            return;
+          }
+          const captured = await captureSessionSnapshot(context, loadedConfig.config, { requireAuthoritative: true });
+          const validated = validateNoMutationApply(
+            captured.snapshot,
+            selected.plan,
+            options.expectDigest,
+            loadedConfig.revision
+          );
+          emitNoMutationApply(
+            "apply plan",
+            options,
+            "Saved Plan Apply",
+            {
+              profile: context.profile,
+              snapshot: selected.snapshot,
+              originalPlan: original.plan,
+              plan: selected.plan,
+              requestRevision: selected.requestRevision,
+              summary: summarizePlan(selected.plan),
+              artifacts: [{ kind: "plan" as const, ...selected.artifact }]
+            },
+            validated
+          );
+          return;
+        }
+        let result: Awaited<ReturnType<typeof applyStoredPlanClosedSession>>;
+        try {
+          result = await applyStoredPlanClosedSession(context, selected, {
+            expectedDigest: options.expectDigest,
+            command: applyPlanCommandForReceipt(selectedAction, options),
+            routePreference
+          });
+        } catch (error) {
+          emitApplyExecutionFailure(
+            "apply plan",
+            options,
+            { profile: context.profile, plan: selected.plan, applied: false },
+            error,
+            "Saved Plan Apply"
+          );
+          return;
+        }
         const data = {
           profile: context.profile,
           originalPlan: original.plan,
@@ -560,36 +903,10 @@ program
           receiptPath: result.receiptPath,
           summary: result.summary,
           artifacts: result.artifacts,
-          applied: result.applied
+          applied: result.applied,
+          terminalCleanupRequired: result.terminalCleanupRequired
         };
-        if (!result.applied) {
-          const suggestedNextCommands = [
-            "zts apply list --json",
-            "zts status --json",
-            "zts sort --all --engine rules --preview --json"
-          ];
-          if (options.json) {
-            printJson(envelope("apply plan", data, {
-              ok: false,
-              blockers: [result.blocker],
-              suggestedNextCommands
-            }));
-          } else {
-            process.stderr.write(`Saved Plan Apply blocked\n- ${result.blocker}\nReceipt: ${result.receipt.id}\n`);
-          }
-          process.exitCode = 2;
-          return;
-        }
-        if (options.json) {
-          printJson(envelope("apply plan", data, {
-            suggestedNextCommands: [
-              `zts apply verify ${shellQuote(result.receipt.id)} --json`,
-              "zts apply list --json"
-            ]
-          }));
-        } else {
-          process.stdout.write(formatSavedPlanApply(result));
-        }
+        emitApplyTransactionOutcome("apply plan", options, "Saved Plan Apply", data, result);
         return;
       }
       const exactCommand = `zts apply ${shellQuote(selected.plan.id)} --yes --expect-digest ${selected.plan.digest}`;
@@ -598,11 +915,13 @@ program
         : `Confirm the exact saved Plan ${selected.plan.digest} before mutation`;
       const data = {
         profile: context.profile,
+        snapshot: selected.snapshot,
         originalPlan: original.plan,
         plan: selected.plan,
         requestRevision: selected.requestRevision,
         artifacts: [{ kind: "plan", ...selected.artifact }],
-        applied: false
+        applied: false,
+        outcome: cliOutcomeForNoMutation(true)
       };
       if (options.json) {
         printJson(envelope("apply plan", data, {
@@ -611,9 +930,265 @@ program
           suggestedNextCommands: [`${exactCommand} --json`, "zts plan show latest --json"]
         }));
       } else {
-        process.stdout.write(`${formatSavedPlan(selected.plan, false)}\n${blocker}\n\nNext:\n  ${exactCommand}\n`);
+        process.stdout.write(`${formatSavedPlan(selected.snapshot, selected.plan, false)}\n${blocker}\n\nNext:\n  ${exactCommand}\n`);
       }
       process.exitCode = 2;
+    });
+  });
+
+program
+  .command("undo")
+  .description("Preview or apply the exact inverse of an eligible Apply Receipt")
+  .argument("[receipt]", "source Apply Receipt id, or latest")
+  .option("--preview", "explicitly inspect the exact Undo Plan without writing")
+  .option("--yes", "confirm application of the exact reviewed Undo Plan")
+  .option("--expect-digest <digest>", "required exact reviewed Undo Plan digest")
+  .option("--accept-unrelated-drift", "rebind the exact inverse to current state after every affected Operation still validates")
+  .option("--backend <backend>", "apply route preference: auto, live, or session")
+  .option("--json", "print stable JSON output")
+  .action(async (receipt: string | undefined, options: JsonOption & UndoOptions) => {
+    await runCommand("undo", options, async () => {
+      if (options.preview && options.yes) throw new CliInvocationError("Undo --preview cannot be combined with --yes");
+      if (options.expectDigest && !options.yes) throw new CliInvocationError("Undo --expect-digest requires --yes");
+      if (options.yes && !options.expectDigest) {
+        throw new CliInvocationError("Undo apply requires --yes and --expect-digest from the exact preview");
+      }
+      const selector = validatedUndoSelector(receipt ?? "latest");
+      const routePreference = validatedApplyBackend(options.backend);
+      const context = await discoverProfileContext();
+      const loadedConfig = await loadConfig();
+      let inspection: UndoInspection;
+      try {
+        inspection = await inspectUndo(context, loadedConfig.config, selector, new Date(), {
+          acceptUnrelatedDrift: options.acceptUnrelatedDrift
+        });
+      } catch (error) {
+        if (error instanceof UndoSelectionError) {
+          const outcome = error.code === "UNDO_NOT_FOUND"
+            ? CLI_INVALID_OUTCOME
+            : cliOutcomeForNoMutation(true);
+          emitCliExecutionFailure(
+            "undo",
+            options,
+            { profile: context.profile, selector },
+            error,
+            "Undo",
+            outcome,
+            ["zts apply list --json", "zts history list --json", "zts status --json"]
+          );
+          return;
+        }
+        emitApplyExecutionFailure(
+          "undo",
+          options,
+          { profile: context.profile, selector },
+          error,
+          "Undo"
+        );
+        return;
+      }
+      if (!inspection.eligible || !inspection.undoPlan) {
+        const outcome = cliOutcomeForNoMutation(true);
+        const data = { profile: context.profile, inspection, applied: false, outcome };
+        if (options.json) {
+          printJson(envelope("undo", data, {
+            ok: outcome.ok,
+            blockers: [...inspection.blockers],
+            suggestedNextCommands: inspection.drift.detected && !inspection.drift.acceptUnrelatedDriftRequested
+              ? [
+                  `zts undo ${shellQuote(inspection.sourceReceipt.id)} --preview --accept-unrelated-drift --json`,
+                  "zts status --json"
+                ]
+              : ["zts status --json", "zts apply list --json"]
+          }));
+        } else {
+          process.stderr.write(formatUndoInspection(inspection, null));
+        }
+        process.exitCode = outcome.exitCode;
+        return;
+      }
+      const exactCommand = undoApplyCommand(inspection, options);
+      if (!options.yes) {
+        const explicitPreview = Boolean(options.preview);
+        const outcome = cliOutcomeForNoMutation(!explicitPreview);
+        const blocker = explicitPreview ? null : "Review and confirm the exact Undo Plan before mutation";
+        if (options.json) {
+          printJson(envelope("undo", {
+            profile: context.profile,
+            inspection,
+            applied: false,
+            outcome
+          }, {
+            ok: outcome.ok,
+            blockers: blocker ? [blocker] : [],
+            suggestedNextCommands: [exactCommand + " --json"]
+          }));
+        } else {
+          process.stdout.write(formatUndoInspection(inspection, exactCommand));
+        }
+        process.exitCode = outcome.exitCode;
+        return;
+      }
+      if (options.expectDigest !== inspection.undoPlan.digest) {
+        throw new CliInvocationError(
+          `Expected Undo Plan digest ${options.expectDigest} does not match reviewed Plan ${inspection.undoPlan.digest}`
+        );
+      }
+      let applied;
+      try {
+        applied = await applyUndo(
+          context,
+          loadedConfig.config,
+          selector,
+          options.expectDigest,
+          exactCommand,
+          routePreference,
+          new Date(),
+          { acceptUnrelatedDrift: options.acceptUnrelatedDrift }
+        );
+      } catch (error) {
+        if (error instanceof UndoBlockedError) {
+          const outcome = cliOutcomeForNoMutation(true);
+          emitCliExecutionFailure(
+            "undo",
+            options,
+            { profile: context.profile, inspection: error.inspection, applied: false },
+            error,
+            "Undo",
+            outcome,
+            ["zts undo --preview --json", "zts status --json"]
+          );
+          return;
+        }
+        emitApplyExecutionFailure(
+          "undo",
+          options,
+          { profile: context.profile, inspection, applied: false },
+          error,
+          "Undo"
+        );
+        return;
+      }
+      emitApplyTransactionOutcome(
+        "undo",
+        options,
+        "Undo",
+        {
+          profile: context.profile,
+          sourceReceipt: inspection.sourceReceipt,
+          undoPlan: inspection.undoPlan,
+          detachedPlanArtifact: applied.detachedPlan.artifact,
+          ...applied.transaction
+        },
+        applied.transaction
+      );
+    });
+  });
+
+program
+  .command("history")
+  .description("List durable Apply Receipts or retain the bounded private Apply store")
+  .argument("[action]", "list or retain")
+  .option("--limit <count>", "maximum Receipt summaries to list")
+  .option("--cursor <cursor>", "authenticated history continuation cursor")
+  .option("--apply", "apply the exact retention inspection instead of previewing")
+  .option("--yes", "confirm retention payload deletion; requires --apply")
+  .option("--expect-inspection-revision <digest>", "required exact retention preview revision")
+  .option("--json", "print stable JSON output")
+  .action(async (action: string | undefined, options: JsonOption & HistoryOptions) => {
+    const selectedAction = action ?? "list";
+    if (selectedAction === "list") {
+      await runCommand("history list", options, async () => {
+        if (options.apply || options.yes || options.expectInspectionRevision) {
+          throw new CliInvocationError("History list does not accept retention mutation flags");
+        }
+        const context = await discoverProfileContext();
+        const limit = historyLimit(options.limit);
+        const page = await listTransactionReceiptPage(context.profile.id, {
+          limit,
+          ...(options.cursor ? { cursor: options.cursor } : {})
+        });
+        const data = { profile: context.profile, ...page };
+        if (options.json) {
+          printJson(envelope("history list", data, {
+            warnings: page.receipts.some((receipt) => receipt.fullReceiptAvailability === "archived_summary_only")
+              ? ["Some full Receipts are archived; their bounded durable summaries remain truthful but verify and undo are unavailable"]
+              : [],
+            suggestedNextCommands: ["zts history retain --json", "zts apply recover --json"]
+          }));
+        } else {
+          process.stdout.write(formatHistoryList(page));
+        }
+      });
+      return;
+    }
+    if (selectedAction !== "retain") {
+      await runCommand("history", options, async () => {
+        throw new CliInvocationError(`Unknown history action '${selectedAction}'; use list or retain`);
+      });
+      return;
+    }
+    await runCommand("history retain", options, async () => {
+      if (options.yes && !options.apply) throw new CliInvocationError("--yes requires --apply");
+      if (options.apply && !options.yes) throw new CliInvocationError("History retention apply requires explicit consent with --apply --yes");
+      if (options.apply && !options.expectInspectionRevision) {
+        throw new CliInvocationError("History retention apply requires --expect-inspection-revision from a reviewed preview");
+      }
+      if (options.expectInspectionRevision && !options.apply) {
+        throw new CliInvocationError("--expect-inspection-revision requires --apply");
+      }
+      const context = await discoverProfileContext();
+      if (!options.apply) {
+        const inspection = await inspectApplyStoreRetention(context.profile.id);
+        const data = { profile: context.profile, inspection, applied: false };
+        const next = `zts history retain --apply --yes --expect-inspection-revision ${inspection.inspectionRevision}`;
+        if (options.json) {
+          printJson(envelope("history retain", data, {
+            ok: inspection.blockers.length === 0,
+            blockers: [...inspection.blockers],
+            suggestedNextCommands: inspection.blockers.length === 0
+              || inspection.action === "reconcile_publication_residue"
+              ? [`${next} --json`]
+              : ["zts apply recover --json"]
+          }));
+        } else {
+          process.stdout.write(formatHistoryRetentionInspection(inspection, next));
+        }
+        if (inspection.blockers.length > 0) process.exitCode = 2;
+        return;
+      }
+      try {
+        const layout = await readApplyArtifactLayout(context.profile.id);
+        await ensureApplyReceiptSummaryHistory(layout, context.profile.id);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      try {
+        const result = await applyApplyStoreRetention(context.profile.id, {
+          expectedInspectionRevision: options.expectInspectionRevision!,
+          destructiveConsent: APPLY_RETENTION_DESTRUCTIVE_CONSENT
+        });
+        if (options.json) {
+          printJson(envelope("history retain", { profile: context.profile, result, applied: true }, {
+            suggestedNextCommands: ["zts history list --json", "zts history retain --json"]
+          }));
+        } else {
+          process.stdout.write(formatHistoryRetentionResult(result));
+        }
+      } catch (error) {
+        if (!(error instanceof ApplyRetentionBlockedError)) throw error;
+        const data = { profile: context.profile, inspection: error.inspection, applied: false };
+        if (options.json) {
+          printJson(envelope("history retain", data, {
+            ok: false,
+            blockers: [...error.inspection.blockers],
+            suggestedNextCommands: ["zts apply recover --json", "zts history retain --json"]
+          }));
+        } else {
+          process.stderr.write(formatHistoryRetentionInspection(error.inspection, null));
+        }
+        process.exitCode = 2;
+      }
     });
   });
 
@@ -643,24 +1218,24 @@ program
     if (action === "restore") {
       await runCommand("backup restore", options, async () => {
         const context = await discoverProfileContext();
-        if (context.running) {
-          const blockers = ["Restore is refused because Zen is running"];
-          const suggestedNextCommands = ["zts backup list", "zts status"];
-          if (options.json) {
-            printJson(envelope("backup restore", { backupId, profile: context.profile }, { ok: false, blockers, suggestedNextCommands }));
-          } else {
-            process.stderr.write(`Restore refused for ${backupId ?? "(missing backup id)"}\n${blockers.map((b) => `- ${b}`).join("\n")}\n`);
-          }
-          process.exitCode = 2;
-          return;
-        }
-
-        const receipt = await restoreBackup(context, backupId, `zts backup restore ${backupId ?? ""}`.trim());
+        const preview = await previewBackupRestore(context, backupId);
+        const blockers = [preview.blocker];
+        const suggestedNextCommands = ["zts backup list", "zts status"];
         if (options.json) {
-          printJson(envelope("backup restore", { profile: context.profile, receipt }));
+          printJson(envelope("backup restore", { profile: context.profile, preview }, {
+            ok: false,
+            blockers,
+            suggestedNextCommands
+          }));
         } else {
-          process.stdout.write(`${formatRestore(receipt)}\n`);
+          process.stderr.write(`${[
+            `Restore preview for ${preview.backupId}`,
+            ...preview.files.map((file) => `  - ${file.source} (${file.size} bytes, verified backup)`),
+            "",
+            `Blocked: ${preview.blocker}`
+          ].join("\n")}\n`);
         }
+        process.exitCode = 2;
       });
       return;
     }
@@ -684,7 +1259,7 @@ program
       if (options.json) {
         printJson(envelope("backup", { action }, { ok: false, blockers: [message], suggestedNextCommands: ["zts backup", "zts backup list", "zts backup prune --dry-run --older-than 30d"] }));
       } else {
-        process.stderr.write(`zts: ${message}\n`);
+        process.stderr.write(`zts: ${terminalData(message)}\n`);
       }
       process.exitCode = 1;
       return;
@@ -703,72 +1278,37 @@ program
 
 program
   .command("review")
-  .description("List sort plan items that need human review")
-  .argument("[source-workspace]", "source workspace name or id")
-  .option("--min-confidence <number>", "minimum confidence required for future apply")
-  .option("--include-pinned", "include pinned tabs in review planning")
-  .option("--include-essentials", "include essentials in review planning")
-  .option("--to <workspaces>", "comma-separated destination workspace allowlist")
-  .option("--not-to <workspaces>", "comma-separated destination workspace denylist")
-  .option("--only <patterns>", "comma-separated source URL/domain patterns")
-  .option("--except <patterns>", "comma-separated exclusion URL/domain patterns")
-  .option("--limit <count>", "maximum number of move actions to plan before overflow review")
-  .option("--backend <backend>", "backend preference to include in resolved inputs")
+  .description("Show attention items from one exact saved Plan")
+  .argument("[plan-selector]", "latest, Plan id, or Plan digest", "latest")
   .option("--json", "print stable JSON output")
-  .action(async (sourceWorkspace: string | undefined, options: JsonOption & SortOptions) => {
+  .action(async (planSelector: string, options: JsonOption) => {
     await runCommand("review", options, async () => {
       const context = await discoverProfileContext();
-      const loadedConfig = await loadConfig();
-      const session = await loadSession(context.sessionFile);
-      const summary = withWorkspacePolicy(summarizeSession(session, context.sessionFile), loadedConfig.config);
-      const source = resolveSourceWorkspace(summary, sourceWorkspace, loadedConfig.config.defaults.inbox);
-      const inputs = sortInputs(options, loadedConfig.config);
-      const inputError = validateSortInputs(inputs);
-      if (inputError) {
-        if (options.json) {
-          printJson(envelope("review", { sourceWorkspace: sourceWorkspace ?? null, inputs }, { ok: false, blockers: [inputError], suggestedNextCommands: ["zts review --help"] }));
-        } else {
-          process.stderr.write(`zts: ${inputError}\n`);
-        }
-        process.exitCode = 1;
-        return;
-      }
-      if (!source) {
-        const message = sourceWorkspace
-          ? `Source workspace not found: ${sourceWorkspace}`
-          : "No source workspace could be resolved";
-        const suggestedNextCommands = ["zts workspaces", "zts sort --preview"];
-        if (options.json) {
-          printJson(envelope("review", { sourceWorkspace: sourceWorkspace ?? null, inputs }, { ok: false, blockers: [message], suggestedNextCommands }));
-        } else {
-          process.stderr.write(`zts: ${message}\n`);
-        }
-        process.exitCode = 1;
-        return;
-      }
-
-      const plan = planSortPreview(session, summary, source!, inputs);
+      const stored = await loadStoredPlan(context.profile.id, planSelector);
+      const attentionActions = stored.plan.actions.filter((action) =>
+        action.disposition === "review"
+        || action.disposition === "protected"
+        || action.disposition === "blocked"
+      );
+      const summary = summarizePlan(stored.plan);
       const data = {
         profile: context.profile,
-        zenRunning: context.running,
-        sourceWorkspace: source,
-        inputs,
-        summary: {
-          moveCount: plan.moveCount,
-          skipCount: plan.skipCount,
-          reviewCount: plan.reviewCount,
-          blockedCount: plan.blockedCount
-        },
-        reviewActions: plan.reviewActions
+        selector: planSelector,
+        snapshot: stored.snapshot,
+        plan: stored.plan,
+        requestRevision: stored.requestRevision,
+        summary,
+        attentionActions,
+        artifacts: [{ kind: "plan", ...stored.artifact }]
       };
-      const suggestedNextCommands = plan.reviewCount > 0
-        ? ["zts sort --dry-run", "zts rules test <url-or-domain>", "zts rules add domain <domain> <workspace>"]
-        : ["zts sort --preview"];
+      const suggestedNextCommands = attentionActions.length > 0
+        ? [`zts plan show ${shellQuote(stored.plan.id)}`, "zts rules test <url-or-domain>", "zts rules add domain <domain> <workspace>"]
+        : [`zts plan show ${shellQuote(stored.plan.id)}`];
 
       if (options.json) {
         printJson(envelope("review", data, { suggestedNextCommands }));
       } else {
-        process.stdout.write(`${formatReview(plan, suggestedNextCommands)}\n`);
+        process.stdout.write(formatCanonicalReview(stored.snapshot, stored.plan, summary, suggestedNextCommands));
       }
     });
   });
@@ -783,9 +1323,12 @@ program
   .option("--dry-run", "show an operational dry run without writing")
   .option("--apply", "apply planned safe moves with the selected backend")
   .option("--yes", "confirm an unattended apply; requires --apply")
+  .option("--expect-digest <digest>", "required exact reviewed Plan digest for apply")
   .option("--min-confidence <number>", "minimum confidence required for future apply")
-  .option("--include-pinned", "include pinned tabs in future sort planning")
-  .option("--include-essentials", "include essentials in future sort planning")
+  .option("--include-pinned", "include pinned tabs with an explicit Protection grant")
+  .option("--no-include-pinned", "keep pinned tabs protected even when config includes them")
+  .option("--include-essentials", "include essentials with an explicit Protection grant")
+  .option("--no-include-essentials", "keep essentials protected even when config includes them")
   .option("--to <workspaces>", "comma-separated destination workspace allowlist")
   .option("--not-to <workspaces>", "comma-separated destination workspace denylist")
   .option("--only <patterns>", "comma-separated source URL/domain patterns")
@@ -795,17 +1338,21 @@ program
   .option("--json", "print stable JSON output")
   .action(async (sourceWorkspace: string | undefined, options: JsonOption & SortOptions) => {
     await runCommand("sort", options, async () => {
-      const context = await discoverProfileContext();
+      const discoveredContext = await discoverProfileContext();
       const loadedConfig = await loadConfig();
-      const session = await loadSession(context.sessionFile);
-      const summary = withWorkspacePolicy(summarizeSession(session, context.sessionFile), loadedConfig.config);
-      const source = resolveSourceWorkspace(summary, sourceWorkspace, loadedConfig.config.defaults.inbox);
+      const captured = await captureSessionSnapshot(discoveredContext, loadedConfig.config);
+      const context = captured.context;
+      const summary = captured.summary;
+      const sourceResolution = resolveSourceWorkspace(summary, sourceWorkspace, loadedConfig.config.defaults.inbox);
+      const source = sourceResolution.status === "resolved" ? sourceResolution.workspace : null;
       const inputs = sortInputs(options, loadedConfig.config);
-      const productionPlanRequested = Boolean(options.all || options.engine);
       const selectedEngine = normalizeEngine(options.engine);
       const inputError = validateSortMode(options, sourceWorkspace)
         ?? validateSortInputs(inputs)
-        ?? (productionPlanRequested && selectedEngine !== "rules"
+        ?? (options.minConfidence !== undefined && selectedEngine === "rules"
+          ? "--min-confidence applies only to confidence-producing lexical, semantic, or hybrid Engines; exact rules have no confidence threshold"
+          : null)
+        ?? (selectedEngine !== "rules"
           ? selectedEngine === "invalid"
             ? `Unknown Engine '${options.engine}'; expected rules, lexical, bge-small, or hybrid`
             : `Engine '${options.engine}' is not installed in the production planner yet; explicit Engine selection never falls back`
@@ -814,33 +1361,36 @@ program
         if (options.json) {
           printJson(envelope("sort", { sourceWorkspace: sourceWorkspace ?? null, inputs }, { ok: false, blockers: [inputError], suggestedNextCommands: ["zts sort --help"] }));
         } else {
-          process.stderr.write(`zts: ${inputError}\n`);
+          process.stderr.write(`zts: ${terminalData(inputError)}\n`);
         }
         process.exitCode = 1;
         return;
       }
       if (!source && !options.all) {
-        const message = sourceWorkspace
-          ? `Source workspace not found: ${sourceWorkspace}`
-          : "No source workspace could be resolved";
+        const selector = sourceWorkspace ?? loadedConfig.config.defaults.inbox;
+        const message = sourceResolution.status === "ambiguous"
+          ? ambiguousWorkspaceMessage(selector, sourceResolution.matches)
+          : sourceWorkspace
+            ? `Source workspace not found: ${sourceWorkspace}`
+            : "No source workspace could be resolved";
         const suggestedNextCommands = ["zts workspaces", "zts sort --preview"];
         if (options.json) {
           printJson(envelope("sort", { sourceWorkspace: sourceWorkspace ?? null, inputs }, { ok: false, blockers: [message], suggestedNextCommands }));
         } else {
-          process.stderr.write(`zts: ${message}\n`);
+          process.stderr.write(`zts: ${terminalData(message)}\n`);
         }
         process.exitCode = 1;
         return;
       }
 
-      if (productionPlanRequested) {
+      {
         const sourceScope = options.all
           ? { kind: "all_workspaces" as const }
           : { kind: "workspace" as const, workspaceId: source!.id, workspaceName: source!.name };
         const mode = options.apply ? "apply" : options.dryRun ? "dry-run" : "preview";
         let result: DailySortPlanResult;
         try {
-          result = await planDailySort(context, session, summary, loadedConfig.config, {
+          result = await planDailySort(captured.snapshot, loadedConfig.config, {
             scope: sourceScope.kind === "all_workspaces"
               ? sourceScope
               : { kind: "workspace", workspaceId: sourceScope.workspaceId },
@@ -852,7 +1402,10 @@ program
             limit: inputs.limit,
             includePinned: inputs.includePinned,
             includeEssentials: inputs.includeEssentials,
-            autoApplyRequested: Boolean(options.apply),
+            // Explicit CLI apply is authorized separately by exact Plan digest.
+            // Automatic-apply intent is reserved for the future configured
+            // quick-sort policy and must not split preview/apply Plan identity.
+            autoApplyRequested: false,
             planMode: mode === "preview" ? "create_or_reuse" : "require_existing"
           });
         } catch (error) {
@@ -880,14 +1433,112 @@ program
           if (options.json) {
             printJson(envelope("sort", data, { ok: false, blockers: [error.message], suggestedNextCommands }));
           } else {
-            process.stderr.write(`Sort ${mode} blocked\n- ${error.message}\n\nNext:\n${suggestedNextCommands.map((command) => `  ${command}`).join("\n")}\n`);
+            process.stderr.write(`Sort ${mode} blocked\n- ${terminalData(error.message)}\n\nNext:\n${suggestedNextCommands.map((command) => `  ${terminalData(command)}`).join("\n")}\n`);
           }
           process.exitCode = 2;
           return;
         }
-        const applyBlockers = options.apply
-          ? ["Engine Plan apply is not enabled yet; the exact Plan was preserved without mutation"]
-          : [];
+        if (options.apply && options.expectDigest !== result.plan.digest) {
+          throw new CliInvocationError(
+            `Expected Plan digest ${options.expectDigest} does not match reviewed Sort Plan ${result.plan.digest}`
+          );
+        }
+        if (options.apply) {
+          try {
+            assertSupportedApplyRoute(inputs.backend);
+          } catch (error) {
+            if (!(error instanceof ApplyTransactionSafetyError)) throw error;
+            emitApplySafetyBlocker(
+              "sort",
+              options,
+              {
+                profile: context.profile,
+                sourceScope,
+                engine: selectedEngine,
+                mode,
+                plan: result.plan,
+                applied: false
+              },
+              error,
+              "Sort apply blocked"
+            );
+            return;
+          }
+        }
+        if (options.apply && result.summary.moveCount > 0) {
+          let applied: Awaited<ReturnType<typeof applyStoredPlanClosedSession>>;
+          try {
+            applied = await applyStoredPlanClosedSession(context, result, {
+              expectedDigest: options.expectDigest!,
+              command: sortCommandForReceipt(sourceWorkspace, options),
+              routePreference: inputs.backend
+            });
+          } catch (error) {
+            emitApplyExecutionFailure(
+              "sort",
+              options,
+              {
+                profile: context.profile,
+                sourceScope,
+                engine: selectedEngine,
+                mode,
+                plan: result.plan,
+                applied: false
+              },
+              error,
+              "Sort apply"
+            );
+            return;
+          }
+          emitApplyTransactionOutcome(
+            "sort",
+            options,
+            "Sort apply",
+            {
+              profile: context.profile,
+              sourceScope,
+              engine: selectedEngine,
+              mode,
+              planResolution: result.planResolution,
+              requestRevision: result.requestRevision,
+              ...applied
+            },
+            applied
+          );
+          return;
+        }
+        let applyState = options.apply ? noMutationApplyOutcome(result.plan) : null;
+        if (options.apply && !applyState) {
+          throw new Error("Sort Plan summary disagrees with its executable Operations");
+        }
+        if (applyState) {
+          let current;
+          try {
+            current = await captureSessionSnapshot(context, loadedConfig.config, { requireAuthoritative: true });
+          } catch (error) {
+            emitApplySafetyBlocker(
+              "sort",
+              options,
+              {
+                profile: context.profile,
+                sourceScope,
+                engine: selectedEngine,
+                mode,
+                plan: result.plan,
+                applied: false
+              },
+              new ApplyTransactionSafetyError(error instanceof Error ? error.message : String(error)),
+              "Sort apply blocked"
+            );
+            return;
+          }
+          applyState = validateNoMutationApply(
+            current.snapshot,
+            result.plan,
+            options.expectDigest!,
+            loadedConfig.revision
+          );
+        }
         const warnings = result.snapshot.authority === "persisted_observation"
           ? ["Zen is running; this Plan is based on a persisted observation and cannot be authorized for apply"]
           : [];
@@ -904,90 +1555,24 @@ program
           requestRevision: result.requestRevision,
           summary: result.summary,
           artifacts: [{ kind: "plan", ...result.artifact }],
-          applied: false
+          ...(applyState ?? { applied: false as const, applyOutcome: "not_requested" as const })
         };
+        if (applyState) {
+          emitNoMutationApply("sort", options, "Sort apply", data, applyState);
+          return;
+        }
         if (options.json) {
           printJson(envelope("sort", data, {
-            ok: applyBlockers.length === 0,
             warnings,
-            blockers: applyBlockers,
             suggestedNextCommands
           }));
         } else {
-          process.stdout.write(formatDailySortPlan(result, sourceScope, mode, warnings, applyBlockers, suggestedNextCommands));
+          process.stdout.write(formatDailySortPlan(result, sourceScope, mode, warnings, [], suggestedNextCommands));
         }
-        process.exitCode = applyBlockers.length === 0 ? 0 : 2;
+        process.exitCode = 0;
         return;
       }
 
-      const plan = planSortPreview(session, summary, source!, inputs);
-      const applyRequested = Boolean(options.apply);
-      const previewRequested = !applyRequested;
-      const applyRequestedWithMoves = applyRequested && plan.moveCount > 0;
-      let applyBlockers = applyRequested && plan.moveCount === 0
-        ? []
-        : previewRequested
-          ? offlineApplyBlockers(context, inputs.backend)
-          : sortApplyBlockers(context, inputs.backend);
-      let applyReceipt = undefined;
-      let resolvedBackend: "session" | "live" = resolveApplyBackend(context, inputs.backend);
-      if (applyRequestedWithMoves && applyBlockers.length === 0) {
-        const consent = await requestSortApplyConsent(plan.moveCount, resolvedBackend, options);
-        if (!consent.granted && consent.blocker) applyBlockers.push(consent.blocker);
-      }
-      if (applyRequestedWithMoves && applyBlockers.length === 0) {
-        resolvedBackend = resolveApplyBackend(context, inputs.backend);
-        if (resolvedBackend === "live") {
-          const liveCheck = await inspectLiveAttachment(context, { connect: true });
-          if (!liveCheck.attachable) {
-            applyBlockers = liveCheck.blockers;
-          } else {
-            applyReceipt = await applySortPlanLive(context, plan, sortCommandForReceipt(sourceWorkspace, options));
-          }
-        } else {
-          applyReceipt = await applySortPlanOffline(context, session, plan, sortCommandForReceipt(sourceWorkspace, options));
-        }
-        if (applyReceipt && !applyReceipt.verification.ok) applyBlockers = applyReceipt.verification.blockers ?? ["Apply verification failed"];
-      }
-      const suggestedNextCommands = applyBlockers.length > 0
-        ? ["zts sort --preview", "zts status", resolvedBackend === "live" ? "zts bridge live-check --connect --json" : "zts backup"]
-        : previewRequested
-          ? ["zts sort --apply", "zts status"]
-          : ["zts status", "zts backup"];
-      const ok = previewRequested || applyBlockers.length === 0;
-
-      const data = {
-        profile: context.profile,
-        zenRunning: context.running,
-        sourceWorkspace: source,
-        inputs,
-        plan,
-        mode: applyRequested ? "apply" : options.dryRun ? "dry-run" : "preview",
-        previewOnly: previewRequested,
-        noChanges: applyRequested && plan.moveCount === 0,
-        applied: Boolean(applyReceipt?.verification.ok),
-        applyReceiptWritten: Boolean(applyReceipt),
-        applyReceipt: applyReceipt ?? null,
-        plannedActions: plan.plannedActions,
-        skippedActions: plan.skippedActions,
-        reviewActions: plan.reviewActions,
-        blockedActions: plan.blockedActions,
-        session: {
-          workspaceCount: summary.workspaceCount,
-          tabCount: summary.tabCount,
-          pinnedCount: summary.pinnedCount,
-          essentialCount: summary.essentialCount,
-          folderGroupCount: summary.folderGroupCount
-        }
-      };
-
-      if (options.json) {
-        printJson(envelope("sort", data, { ok, blockers: applyBlockers, suggestedNextCommands }));
-        process.exitCode = ok ? 0 : 2;
-      } else {
-        process.stdout.write(`${options.dryRun ? formatSortDryRun(plan, applyBlockers, suggestedNextCommands) : formatSortPreview(plan, applyBlockers, suggestedNextCommands, applyReceipt, applyRequested)}\n`);
-        process.exitCode = ok ? 0 : 2;
-      }
     });
   });
 
@@ -998,6 +1583,7 @@ interface SortOptions {
   dryRun?: boolean;
   apply?: boolean;
   yes?: boolean;
+  expectDigest?: string;
   minConfidence?: string;
   includePinned?: boolean;
   includeEssentials?: boolean;
@@ -1009,10 +1595,38 @@ interface SortOptions {
   backend?: string;
 }
 
+interface UndoOptions {
+  preview?: boolean;
+  yes?: boolean;
+  expectDigest?: string;
+  acceptUnrelatedDrift?: boolean;
+  backend?: string;
+}
+
+interface SortInputs {
+  readonly preview: boolean;
+  readonly dryRun: boolean;
+  readonly minConfidence: number;
+  readonly includePinned: boolean;
+  readonly includeEssentials: boolean;
+  readonly to: string[];
+  readonly notTo: string[];
+  readonly only: string[];
+  readonly except: string[];
+  readonly limit: number | null;
+  readonly backend: "auto" | "live" | "session";
+  readonly domainRules: Record<string, string>;
+  readonly protectedDomains: string[];
+}
+
 interface ApplyPlanOptions {
   actions?: string;
   yes?: boolean;
   expectDigest?: string;
+  expectRecoveryDigest?: string;
+  limit?: string;
+  cursor?: string;
+  backend?: string;
 }
 
 interface BackupOptions {
@@ -1021,23 +1635,47 @@ interface BackupOptions {
   dryRun?: boolean;
 }
 
+interface HistoryOptions {
+  limit?: string;
+  cursor?: string;
+  apply?: boolean;
+  yes?: boolean;
+  expectInspectionRevision?: Sha256Digest;
+}
+
 interface BridgeOptions {
   timeoutMs?: string;
   connect?: boolean;
-  url?: string;
-  fromWorkspace?: string;
-  toWorkspace?: string;
-  confirmLiveMove?: boolean;
 }
 
 function sortCommandForReceipt(sourceWorkspace: string | undefined, options: SortOptions): string {
   const parts = ["zts", "sort"];
-  if (sourceWorkspace) parts.push(sourceWorkspace);
+  if (!options.all && sourceWorkspace) parts.push(shellQuote(sourceWorkspace));
+  appendSortIntentFlags(parts, options);
   if (options.apply) parts.push("--apply");
-  if (options.backend) parts.push("--backend", options.backend);
-  if (options.minConfidence) parts.push("--min-confidence", options.minConfidence);
-  if (options.limit) parts.push("--limit", options.limit);
+  if (options.yes) parts.push("--yes");
+  if (options.expectDigest) parts.push("--expect-digest", options.expectDigest);
   return parts.join(" ");
+}
+
+function appendSortIntentFlags(parts: string[], options: SortOptions): void {
+  if (options.all) parts.push("--all");
+  if (options.engine) parts.push("--engine", shellQuote(options.engine));
+  if (options.backend) parts.push("--backend", shellQuote(options.backend));
+  if (options.minConfidence) parts.push("--min-confidence", shellQuote(options.minConfidence));
+  if (options.to) parts.push("--to", shellQuote(options.to));
+  if (options.notTo) parts.push("--not-to", shellQuote(options.notTo));
+  if (options.only) parts.push("--only", shellQuote(options.only));
+  if (options.except) parts.push("--except", shellQuote(options.except));
+  if (options.limit) parts.push("--limit", shellQuote(options.limit));
+  appendProtectionOverrides(parts, options);
+}
+
+function appendProtectionOverrides(parts: string[], options: SortOptions): void {
+  if (options.includePinned === true) parts.push("--include-pinned");
+  if (options.includePinned === false) parts.push("--no-include-pinned");
+  if (options.includeEssentials === true) parts.push("--include-essentials");
+  if (options.includeEssentials === false) parts.push("--no-include-essentials");
 }
 
 function backupPruneCommand(options: BackupOptions): string {
@@ -1048,9 +1686,14 @@ function backupPruneCommand(options: BackupOptions): string {
   return parts.join(" ");
 }
 
-function patchCommandForReceipt(action: string, patchFile: string, options: { yes?: boolean; json?: boolean }): string {
+function patchCommandForReceipt(
+  action: string,
+  patchFile: string,
+  options: { yes?: boolean; json?: boolean; backend?: string }
+): string {
   const parts = ["zts", "patch", action, patchFile];
   if (options.yes) parts.push("--yes");
+  if (options.backend) parts.push("--backend", options.backend);
   if (options.json) parts.push("--json");
   return parts.join(" ");
 }
@@ -1059,29 +1702,30 @@ function applyPlanCommandForReceipt(selector: string, options: ApplyPlanOptions)
   const parts = ["zts", "apply", shellQuote(selector)];
   if (options.yes) parts.push("--yes");
   if (options.expectDigest) parts.push("--expect-digest", options.expectDigest);
+  if (options.backend) parts.push("--backend", options.backend);
   return parts.join(" ");
 }
 
 function pruneCutoff(options: BackupOptions): Date {
   if (options.before && options.olderThan) {
-    throw new Error("Use only one prune selector: --before or --older-than");
+    throw new CliInvocationError("Use only one prune selector: --before or --older-than");
   }
   if (options.before) {
     const before = new Date(options.before);
-    if (!Number.isFinite(before.getTime())) throw new Error("--before must be a valid ISO date");
+    if (!Number.isFinite(before.getTime())) throw new CliInvocationError("--before must be a valid ISO date");
     return before;
   }
   if (options.olderThan) {
     return new Date(Date.now() - parseDurationMs(options.olderThan));
   }
-  throw new Error("Backup prune requires --before <iso-date> or --older-than <duration>");
+  throw new CliInvocationError("Backup prune requires --before <iso-date> or --older-than <duration>");
 }
 
 function parseDurationMs(value: string): number {
   const match = /^(\d+)(m|h|d)$/.exec(value.trim());
-  if (!match) throw new Error("--older-than must use a duration such as 30d, 12h, or 45m");
+  if (!match) throw new CliInvocationError("--older-than must use a duration such as 30d, 12h, or 45m");
   const amount = Number(match[1]);
-  if (amount <= 0) throw new Error("--older-than must be greater than zero");
+  if (amount <= 0) throw new CliInvocationError("--older-than must be greater than zero");
   const unit = match[2];
   const multipliers: Record<string, number> = {
     m: 60 * 1000,
@@ -1095,43 +1739,279 @@ function probeTimeoutMs(value?: string): number {
   if (value === undefined) return 8000;
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 1000 || parsed > 30000) {
-    throw new Error("--timeout-ms must be a whole number between 1000 and 30000");
+    throw new CliInvocationError("--timeout-ms must be a whole number between 1000 and 30000");
   }
   return parsed;
 }
 
-program.parseAsync(process.argv);
+function historyLimit(value?: string): number {
+  if (value === undefined) return 50;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 500) {
+    throw new CliInvocationError("History --limit must be a whole number between 1 and 500");
+  }
+  return parsed;
+}
+
+try {
+  await program.parseAsync(process.argv);
+} catch (error) {
+  if (error instanceof CommanderError) {
+    if (error.code !== "commander.helpDisplayed" && error.code !== "commander.version" && jsonDocumentModeRequested()) {
+      const message = error.message.replace(/^error:\s*/u, "");
+      printJson(envelope(parserCommandName(), { error: message, outcome: CLI_INVALID_OUTCOME }, { ok: false, blockers: [message] }));
+    }
+    process.exitCode = error.exitCode;
+  } else {
+    const message = error instanceof Error ? error.message : String(error);
+    const outcome = cliOutcomeForCommandBoundary(error);
+    if (jsonDocumentModeRequested()) {
+      printJson(envelope(parserCommandName(), { error: message, outcome }, { ok: false, blockers: [message] }));
+    } else {
+      process.stderr.write(`zts: ${terminalData(message)}\n`);
+    }
+    process.exitCode = outcome.exitCode;
+  }
+}
 
 async function runCommand(command: string, options: JsonOption, action: () => Promise<void>): Promise<void> {
+  // Commander can consume a following option-looking token as the value of a
+  // required option (for example `--limit --json`). The raw argv occurrence is
+  // still an explicit output-protocol request, so make it authoritative before
+  // any action-level validation emits output.
+  if (jsonDocumentModeRequested()) options.json = true;
   try {
     await action();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    const outcome = cliOutcomeForCommandBoundary(error);
     if (options.json) {
-      printJson(envelope(command, { error: message }, { ok: false, blockers: [message] }));
+      printJson(envelope(command, { error: message, outcome }, { ok: false, blockers: [message] }));
     } else {
-      process.stderr.write(`zts: ${message}\n`);
+      process.stderr.write(`zts: ${terminalData(message)}\n`);
     }
-    process.exitCode = 1;
+    process.exitCode = outcome.exitCode;
   }
+}
+
+function cliOutcomeForCommandBoundary(error: unknown): CliOutcome {
+  if (error instanceof CliInvocationError
+    || error instanceof ConfigValidationError
+    || error instanceof ConfigPermissionsError
+    || error instanceof PatchInputValidationError
+    || error instanceof ApplyReceiptSelectionError
+    || error instanceof ApplyReceiptCursorError
+    || error instanceof BackupSelectionError) {
+    return CLI_INVALID_OUTCOME;
+  }
+  if (error instanceof ConfigChangedError) return CLI_BLOCKED_OUTCOME;
+  if (error instanceof ApplyReceiptHistoryCorruptionError) return CLI_INTERNAL_ERROR_OUTCOME;
+  if (isNodeSystemError(error)) return CLI_INTERNAL_ERROR_OUTCOME;
+  const applyOutcome = cliOutcomeForApplyExecutionError(error);
+  return applyOutcome;
+}
+
+function isNodeSystemError(error: unknown): boolean {
+  return error instanceof Error
+    && typeof (error as NodeJS.ErrnoException).code === "string";
+}
+
+function emitApplySafetyBlocker<T>(
+  command: string,
+  options: JsonOption,
+  data: T,
+  error: ApplyTransactionSafetyError,
+  humanHeading: string
+): void {
+  const outcome = cliOutcomeForApplyExecutionError(error);
+  const liveRouteUnavailable = /production live mutation is unavailable/iu.test(error.message);
+  const suggestedNextCommands = liveRouteUnavailable
+    ? ["zts status --json", "zts bridge status --json"]
+    : ["zts apply recover --json", "zts status --json"];
+  if (options.json) {
+    printJson(envelope(command, { ...data, outcome }, {
+      ok: outcome.ok,
+      blockers: [error.message],
+      suggestedNextCommands
+    }));
+  } else {
+    process.stderr.write(`${humanHeading}\n- ${terminalData(error.message)}\n`);
+  }
+  process.exitCode = outcome.exitCode;
+}
+
+function emitApplyExecutionFailure<T>(
+  command: string,
+  options: JsonOption,
+  data: T,
+  error: unknown,
+  humanTitle: string
+): void {
+  emitCliExecutionFailure(
+    command,
+    options,
+    data,
+    error,
+    humanTitle,
+    cliOutcomeForApplyExecutionError(error),
+    ["zts apply recover --json", "zts status --json", "zts apply list --json"]
+  );
+}
+
+function emitRecoveryExecutionFailure<T>(
+  command: string,
+  options: JsonOption,
+  data: T,
+  error: unknown,
+  selector: string
+): void {
+  emitCliExecutionFailure(
+    command,
+    options,
+    data,
+    error,
+    "Apply recovery",
+    cliOutcomeForRecoveryError(error),
+    [`zts apply recover ${shellQuote(selector)} --json`, "zts apply recover --json", "zts status --json"]
+  );
+}
+
+function emitCliExecutionFailure<T>(
+  command: string,
+  options: JsonOption,
+  data: T,
+  error: unknown,
+  humanTitle: string,
+  disposition: CliOutcome,
+  failureNextCommands: readonly string[]
+): void {
+  const message = error instanceof Error ? error.message : String(error);
+  const suggestedNextCommands = [...failureNextCommands];
+  if (options.json) {
+    printJson(envelope(command, {
+      ...data,
+      outcome: disposition,
+      error: message
+    }, {
+      ok: false,
+      blockers: [message],
+      suggestedNextCommands
+    }));
+  } else {
+    const state = disposition.status === "blocked"
+      ? "blocked before mutation"
+      : disposition.status === "failed"
+        ? "interrupted with uncertain transaction state"
+        : "failed unexpectedly";
+    process.stderr.write(`${humanTitle} ${state}\n- ${terminalData(message)}\n\nNext:\n${suggestedNextCommands.map((next) => `  ${terminalData(next)}`).join("\n")}\n`);
+  }
+  process.exitCode = disposition.exitCode;
+}
+
+function emitApplyTransactionOutcome<T>(
+  command: string,
+  options: JsonOption,
+  humanTitle: string,
+  data: T,
+  result: ApplyTransactionOutcome
+): void {
+  const disposition = cliOutcomeForApplyTransaction(result);
+  const blocker = result.applied ? null : result.blocker;
+  const verifyCommand = `zts apply verify ${shellQuote(result.receipt.id)} --json`;
+  const undoCommand = result.applied && result.plan.source.kind !== "inverse"
+    ? `zts undo ${shellQuote(result.receipt.id)} --preview`
+    : null;
+  const suggestedNextCommands = disposition.status === "succeeded"
+    ? [
+        ...(result.terminalCleanupRequired ? ["zts apply recover --json"] : []),
+        ...(undoCommand ? [undoCommand] : []),
+        verifyCommand,
+        "zts apply list --json"
+      ]
+    : disposition.status === "blocked"
+      ? [verifyCommand, "zts apply list --json", "zts status --json"]
+      : [
+          ...(result.terminalCleanupRequired ? ["zts apply recover --json"] : []),
+          verifyCommand,
+          "zts status --json",
+          "zts apply list --json"
+        ];
+  const warnings = result.terminalCleanupRequired
+    ? ["The terminal unfinished marker still requires idempotent recovery cleanup"]
+    : [];
+  if (options.json) {
+    printJson(envelope(command, {
+      ...data,
+      outcome: disposition
+    }, {
+      ok: disposition.ok,
+      warnings,
+      blockers: blocker ? [blocker] : [],
+      suggestedNextCommands
+    }));
+  } else if (result.applied) {
+    process.stdout.write(formatSavedPlanApply(result, humanTitle, warnings, suggestedNextCommands));
+  } else {
+    const state = disposition.status === "blocked"
+      ? "blocked before mutation"
+      : `did not complete as applied (${terminalData(result.receipt.outcome)})`;
+    process.stderr.write(`${humanTitle} ${state}\n- ${terminalData(result.blocker)}\nReceipt: ${terminalData(result.receipt.id)}\n\nNext:\n${suggestedNextCommands.map((next) => `  ${terminalData(next)}`).join("\n")}\n`);
+  }
+  process.exitCode = disposition.exitCode;
+}
+
+function jsonDocumentModeRequested(): boolean {
+  return process.argv.slice(2).includes("--json");
+}
+
+function parserCommandName(): string {
+  return process.argv.slice(2).find((part) => !part.startsWith("-")) ?? "zts";
 }
 
 function statusEnvelopeOptions(zenRunning: boolean, bridgeBlockers: string[]) {
   const blockers = zenRunning
     ? ["Offline apply is blocked because Zen is running", ...bridgeBlockers]
-    : bridgeBlockers;
+    : [];
   return {
-    warnings: ["Active session writes are refused; offline session writes require Zen closed and a fresh backup"],
+    warnings: [
+      "Process absence is not mutation authority; closed-session readiness is established only inside Apply Transaction",
+      ...(zenRunning
+        ? ["Session state is a persisted disk observation and may be stale while Zen is running"]
+        : ["Status does not establish Snapshot authority; controlled Snapshot capture and Apply perform that check"]),
+      ...(!zenRunning ? bridgeBlockers.map((blocker) => `Live backend: ${blocker}`) : [])
+    ],
     blockers,
-    suggestedNextCommands: zenRunning ? ["zts workspaces", "zts bridge status", "zts backup", "zts sort --preview"] : ["zts workspaces", "zts bridge status", "zts sort --backend session"]
+    suggestedNextCommands: ["zts workspaces", "zts bridge status", "zts sort --preview"]
   };
+}
+
+function snapshotObservationPresentation(snapshot: Snapshot, zenRunning: boolean) {
+  return {
+    zenRunning,
+    authority: snapshot.authority,
+    freshness: snapshot.freshness
+  } as const;
+}
+
+function snapshotObservationWarnings(
+  observation: ReturnType<typeof snapshotObservationPresentation>
+): string[] {
+  return observation.authority === "persisted_observation" || observation.freshness !== "current"
+    ? [
+        `Snapshot is a persisted observation and may be stale${observation.zenRunning ? " while Zen is running" : ""}; mutation requires a fresh authoritative Snapshot`
+      ]
+    : [];
 }
 
 function resolveSourceWorkspace(summary: Awaited<ReturnType<typeof loadSessionSummary>>, input: string | undefined, defaultInbox: string) {
   const lookup = input ?? defaultInbox;
-  if (!lookup) return summary.workspaces[0] ?? null;
-  const normalized = lookup.toLowerCase();
-  return summary.workspaces.find((workspace) => workspace.id === lookup || workspace.name.toLowerCase() === normalized) ?? null;
+  if (!lookup) {
+    const first = summary.workspaces[0];
+    return first
+      ? { status: "resolved" as const, workspace: first }
+      : { status: "missing" as const };
+  }
+  return resolveWorkspaceSelector(summary.workspaces, lookup);
 }
 
 function splitCsv(value?: string): string[] {
@@ -1151,8 +2031,8 @@ function sortInputs(options: SortOptions, config: ZtsConfig): SortInputs {
     preview: Boolean(options.preview),
     dryRun: Boolean(options.dryRun),
     minConfidence: options.minConfidence === undefined ? config.defaults.minConfidence : Number(options.minConfidence),
-    includePinned: Boolean(options.includePinned) || config.defaults.includePinned,
-    includeEssentials: Boolean(options.includeEssentials) || config.defaults.includeEssentials,
+    includePinned: options.includePinned ?? config.defaults.includePinned,
+    includeEssentials: options.includeEssentials ?? config.defaults.includeEssentials,
     to: csvOption(options.to, config.sort.to),
     notTo: csvOption(options.notTo, config.sort.notTo),
     only: csvOption(options.only, config.sort.only),
@@ -1190,47 +2070,24 @@ function validateSortMode(options: SortOptions, sourceWorkspace?: string): strin
   if (options.yes && !options.apply) {
     return "--yes requires --apply";
   }
+  if (options.expectDigest && !options.apply) {
+    return "--expect-digest requires --apply";
+  }
+  if (options.apply && !options.yes) {
+    return "Sort apply requires explicit consent with --yes";
+  }
+  if (options.apply && !options.expectDigest) {
+    return "Sort apply requires --expect-digest from the reviewed preview";
+  }
   return null;
 }
 
 function normalizeEngine(engine?: string): "rules" | "lexical" | "bge_small" | "hybrid" | "invalid" {
   if (engine === undefined || engine === "rules") return "rules";
   if (engine === "lexical") return "lexical";
-  if (engine === "bge-small" || engine === "bge_small") return "bge_small";
+  if (engine === "bge-small") return "bge_small";
   if (engine === "hybrid") return "hybrid";
   return "invalid";
-}
-
-async function requestSortApplyConsent(
-  moveCount: number,
-  backend: "session" | "live",
-  options: SortOptions & JsonOption
-): Promise<{ granted: boolean; blocker: string | null }> {
-  if (options.yes) return { granted: true, blocker: null };
-  if (options.json) {
-    return {
-      granted: false,
-      blocker: "JSON apply requires explicit unattended consent with --apply --yes"
-    };
-  }
-  if (!process.stdin.isTTY || !process.stderr.isTTY) {
-    return {
-      granted: false,
-      blocker: "Unattended apply requires explicit consent with --apply --yes"
-    };
-  }
-
-  const prompt = createInterface({ input: process.stdin, output: process.stderr });
-  try {
-    const answer = await prompt.question(`Apply ${moveCount} planned move${moveCount === 1 ? "" : "s"} using ${backend}? [y/N] `);
-    const granted = answer.trim().toLowerCase() === "y" || answer.trim().toLowerCase() === "yes";
-    return {
-      granted,
-      blocker: granted ? null : "Apply cancelled; no changes were made"
-    };
-  } finally {
-    prompt.close();
-  }
 }
 
 function normalizeBackend(backend?: string): SortInputs["backend"] {
@@ -1240,11 +2097,43 @@ function normalizeBackend(backend?: string): SortInputs["backend"] {
   return backend as SortInputs["backend"];
 }
 
+function validatedApplyBackend(value?: string): "auto" | "live" | "session" | undefined {
+  if (value === undefined) return undefined;
+  const backend = normalizeBackend(value);
+  if (!(["auto", "live", "session"] as const).includes(backend)) {
+    throw new CliInvocationError("--backend must be one of: auto, live, session");
+  }
+  return backend;
+}
+
+function validatedUndoSelector(value: string): string {
+  if (value === "latest"
+    || /^receipt:apply:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(value)) {
+    return value;
+  }
+  throw new CliInvocationError("Undo Receipt must be 'latest' or a canonical receipt:apply:<uuid> id");
+}
+
+function validatedApplyReceiptSelector(value: string): string {
+  if (/^receipt:apply:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(value)) {
+    return value;
+  }
+  throw new CliInvocationError("Apply Receipt must be a canonical receipt:apply:<uuid> id");
+}
+
+function validatedCliInput<T>(validate: () => T): T {
+  try {
+    return validate();
+  } catch (error) {
+    if (error instanceof CliInvocationError) throw error;
+    throw new CliInvocationError(error instanceof Error ? error.message : String(error), error);
+  }
+}
+
 function sortFollowUpCommand(options: SortOptions, sourceWorkspace: string | undefined, mode: "--preview" | "--dry-run"): string {
   const parts = ["zts", "sort"];
   if (!options.all && sourceWorkspace) parts.push(shellQuote(sourceWorkspace));
-  if (options.all) parts.push("--all");
-  if (options.engine) parts.push("--engine", shellQuote(options.engine));
+  appendSortIntentFlags(parts, options);
   parts.push(mode);
   return parts.join(" ");
 }
@@ -1262,7 +2151,8 @@ function dailySortNextCommands(
     commands.push(`Quit Zen, then rerun ${sortFollowUpCommand(options, sourceWorkspace, "--preview")}`);
     return commands;
   }
-  commands.push(`zts apply ${shellQuote(plan.id)}`);
+  if (!plan.actions.some((action) => action.disposition === "move")) return commands;
+  commands.push(`zts apply ${shellQuote(plan.id)} --yes --expect-digest ${plan.digest}`);
   return commands;
 }
 
@@ -1278,10 +2168,18 @@ function formatDailySortPlan(
   blockers: readonly string[],
   suggestedNextCommands: readonly string[]
 ): string {
-  const title = mode === "dry-run" ? "Sort dry run" : mode === "apply" ? "Sort apply blocked" : "Sort preview";
+  const title = mode === "dry-run"
+    ? "Sort dry run"
+    : mode === "apply"
+      ? blockers.length > 0
+        ? "Sort apply · attention required"
+        : result.summary.moveCount === 0
+        ? "Sort apply · no changes"
+        : "Sort apply blocked"
+      : "Sort preview";
   const scope = sourceScope.kind === "all_workspaces" ? "all applicable Workspaces" : sourceScope.workspaceName;
   const lines = [
-    `${title} · ${scope}`,
+    `${title} · ${terminalData(scope)}`,
     `Plan ${result.plan.id}`,
     `Digest ${result.plan.digest}`,
     `${result.planResolution === "created" ? "Saved" : "Reused"} exact state-bound Plan`,
@@ -1292,7 +2190,11 @@ function formatDailySortPlan(
     `Blocked    ${result.summary.blockedCount}`,
     `Unchanged  ${result.summary.unchangedCount}`,
     "",
-    "Nothing changed."
+    mode === "apply" && result.summary.moveCount === 0
+      ? blockers.length > 0
+        ? "Nothing changed. No Apply Transaction or Receipt was created."
+        : "No executable moves were applied."
+      : "Nothing changed."
   ];
   if (mode === "dry-run") {
     lines.push("", "Actions:");
@@ -1311,19 +2213,68 @@ function formatDailySortPlan(
       lines.push(`  ${action.actionId}`);
       lines.push(`    ${action.disposition} ${title}`);
       lines.push(`    ${terminalData(sourceName)} -> ${terminalData(destinationName)}${origin ? ` · ${terminalData(origin)}` : ""}`);
-      lines.push(`    ${terminalData(action.decision.explanation.value)}`);
+      lines.push(...formatPlanActionReasons(action));
     }
   }
-  if (warnings.length > 0) lines.push("", "Warnings:", ...warnings.map((warning) => `  - ${warning}`));
-  if (blockers.length > 0) lines.push("", "Blockers:", ...blockers.map((blocker) => `  - ${blocker}`));
-  if (suggestedNextCommands.length > 0) lines.push("", "Next:", ...suggestedNextCommands.map((command) => `  ${command}`));
+  if (warnings.length > 0) lines.push("", "Warnings:", ...warnings.map((warning) => `  - ${terminalData(warning)}`));
+  if (blockers.length > 0) lines.push("", "Blockers:", ...blockers.map((blocker) => `  - ${terminalData(blocker)}`));
+  if (suggestedNextCommands.length > 0) lines.push("", "Next:", ...suggestedNextCommands.map((command) => `  ${terminalData(command)}`));
   return `${lines.join("\n")}\n`;
 }
 
-function formatSavedPlan(plan: Plan, expired: boolean): string {
+function formatCanonicalReview(
+  snapshot: Snapshot,
+  plan: Plan,
+  summary: DailySortPlanResult["summary"],
+  suggestedNextCommands: readonly string[]
+): string {
+  const attentionActions = plan.actions.filter((action) =>
+    action.disposition === "review"
+    || action.disposition === "protected"
+    || action.disposition === "blocked"
+  );
+  const entities = new Map<EntityRef, Entity>(snapshot.entities.map((entity) => [entity.ref, entity]));
+  const lines = [
+    "Saved Plan review",
+    `Plan ${plan.id}`,
+    `Digest ${plan.digest}`,
+    `Snapshot ${plan.snapshotRevision}`,
+    "",
+    `Attention ${attentionActions.length}`,
+    `Move ${summary.moveCount}`,
+    `Protected ${summary.protectedCount}`,
+    `Blocked ${summary.blockedCount}`,
+    ""
+  ];
+  if (attentionActions.length === 0) {
+    lines.push("No attention items found");
+  } else {
+    lines.push("Attention items:");
+    for (const action of attentionActions) {
+      const entityRef = action.disposition === "move" ? action.operation.entityRef : action.entityRef;
+      const entity = entities.get(entityRef);
+      lines.push(
+        `  ${action.actionId}`,
+        `    ${entity?.kind ?? "unknown"}: ${terminalData(entity?.title ?? entityRef)}`,
+        ...formatPlanActionReasons(action)
+      );
+      for (const member of entity?.members ?? []) {
+        lines.push(`    url: ${terminalData(member.url)}`);
+      }
+    }
+  }
+  if (suggestedNextCommands.length > 0) {
+    lines.push("", "Next:", ...suggestedNextCommands.map((command) => `  ${terminalData(command)}`));
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function formatSavedPlan(snapshot: Snapshot, plan: Plan, expired: boolean): string {
   const counts = new Map<string, number>();
   for (const action of plan.actions) counts.set(action.disposition, (counts.get(action.disposition) ?? 0) + 1);
-  return `${[
+  const entities = new Map<EntityRef, Entity>(snapshot.entities.map((entity) => [entity.ref, entity]));
+  const workspaces = new Map(snapshot.workspaces.map((workspace) => [workspace.id, workspace]));
+  const lines = [
     "Saved Plan",
     `Plan: ${plan.id}`,
     `Digest: ${plan.digest}`,
@@ -1334,14 +2285,33 @@ function formatSavedPlan(plan: Plan, expired: boolean): string {
     `Review: ${counts.get("review") ?? 0}`,
     `Protected: ${counts.get("protected") ?? 0}`,
     `Blocked: ${counts.get("blocked") ?? 0}`,
-    `Unchanged: ${counts.get("unchanged") ?? 0}`
-  ].join("\n")}\n`;
+    `Unchanged: ${counts.get("unchanged") ?? 0}`,
+    "",
+    "Actions:"
+  ];
+  for (const action of plan.actions) {
+    const entityRef = action.disposition === "move" ? action.operation.entityRef : action.entityRef;
+    const entity = entities.get(entityRef);
+    const destinationId = action.disposition === "move"
+      ? action.operation.expectedPostState.workspaceId
+      : action.candidateDestinationWorkspaceId;
+    const sourceName = entity ? workspaces.get(entity.workspaceId)?.name ?? entity.workspaceId : "(unknown source)";
+    const destinationName = destinationId ? workspaces.get(destinationId)?.name ?? destinationId : "(none)";
+    lines.push(
+      `  ${action.actionId}`,
+      `    ${action.disposition} ${terminalData(entity?.title ?? entityRef)}`,
+      `    ${terminalData(sourceName)} -> ${terminalData(destinationName)}`,
+      ...formatPlanActionReasons(action)
+    );
+    for (const member of entity?.members ?? []) lines.push(`    url: ${terminalData(member.url)}`);
+  }
+  return `${lines.join("\n")}\n`;
 }
 
 function formatSnapshotSummary(snapshot: Snapshot, warnings: string[], suggestedNextCommands: string[]): string {
   const lines = [
     "Domain Snapshot",
-    `Profile: ${snapshot.profile.name} (${snapshot.profile.id})`,
+    `Profile: ${terminalData(snapshot.profile.name)} (${terminalData(snapshot.profile.id)})`,
     `Revision: ${snapshot.revision}`,
     `Authority: ${snapshot.authority}`,
     `Freshness: ${snapshot.freshness}`,
@@ -1350,15 +2320,15 @@ function formatSnapshotSummary(snapshot: Snapshot, warnings: string[], suggested
     `Entities: ${snapshot.entities.length}`,
     "",
     "First entities:",
-    ...snapshot.entities.slice(0, 8).map((entity) => `  - ${entity.ref} -> ${entity.workspaceId} (${entity.kind}) ${terminalData(entity.title)}`)
+    ...snapshot.entities.slice(0, 8).map((entity) => `  - ${terminalData(entity.ref)} -> ${terminalData(entity.workspaceId)} (${entity.kind}) ${terminalData(entity.title)}`)
   ];
   if (snapshot.entities.length > 8) lines.push(`  ... ${snapshot.entities.length - 8} more`);
-  if (warnings.length > 0) lines.push("", "Warnings:", ...warnings.map((warning) => `  - ${warning}`));
-  if (suggestedNextCommands.length > 0) lines.push("", "Next:", ...suggestedNextCommands.map((command) => `  ${command}`));
+  if (warnings.length > 0) lines.push("", "Warnings:", ...warnings.map((warning) => `  - ${terminalData(warning)}`));
+  if (suggestedNextCommands.length > 0) lines.push("", "Next:", ...suggestedNextCommands.map((command) => `  ${terminalData(command)}`));
   return `${lines.join("\n")}\n`;
 }
 
-function formatManualPlanSummary(result: ManualPlanResult, blockers: string[], suggestedNextCommands: string[]): string {
+function formatManualPlanSummary(result: ManualPlanResult, warnings: string[], suggestedNextCommands: string[]): string {
   const lines = [
     "Manual Patch Plan",
     `Plan: ${result.plan.id}`,
@@ -1373,53 +2343,214 @@ function formatManualPlanSummary(result: ManualPlanResult, blockers: string[], s
   ];
   for (const action of result.plan.actions.slice(0, 12)) {
     if (action.disposition === "move") {
-      lines.push(`  - move ${action.operation.entityRef} -> ${action.operation.expectedPostState.workspaceId}`);
+      lines.push(`  - move ${terminalData(action.operation.entityRef)} -> ${terminalData(action.operation.expectedPostState.workspaceId)}`);
     } else {
-      lines.push(`  - ${action.disposition} ${action.entityRef} -> ${action.candidateDestinationWorkspaceId ?? "(none)"}`);
+      lines.push(`  - ${action.disposition} ${terminalData(action.entityRef)} -> ${terminalData(action.candidateDestinationWorkspaceId ?? "(none)")}`);
+      lines.push(...formatPlanActionReasons(action));
     }
   }
-  if (result.plan.actions.length > 12) lines.push(`  ... ${result.plan.actions.length - 12} more`);
-  if (blockers.length > 0) lines.push("", "Blockers:", ...blockers.map((blocker) => `  - ${blocker}`));
-  if (suggestedNextCommands.length > 0) lines.push("", "Next:", ...suggestedNextCommands.map((command) => `  ${command}`));
+  if (result.plan.actions.length > 12) {
+    lines.push(
+      `  ... ${result.plan.actions.length - 12} more`,
+      `  Review every action with: zts plan show ${shellQuote(result.plan.id)}`
+    );
+  }
+  if (warnings.length > 0) lines.push("", "Warnings:", ...warnings.map((warning) => `  - ${terminalData(warning)}`));
+  if (suggestedNextCommands.length > 0) lines.push("", "Next:", ...suggestedNextCommands.map((command) => `  ${terminalData(command)}`));
   return `${lines.join("\n")}\n`;
 }
 
-function formatManualApplySummary(result: ManualApplyResult, suggestedNextCommands: string[]): string {
-  const lines = [
-    "Manual Patch Apply",
-    `Receipt: ${result.receipt.id}`,
-    `Plan: ${result.plan.id}`,
-    `Moves: ${result.summary.moveCount}`,
-    `Before Snapshot: ${result.receipt.beforeSnapshotRevision}`,
-    `After Snapshot: ${result.receipt.afterSnapshotRevision ?? "(none)"}`,
-    `Backup: ${result.receipt.backupArtifact?.id ?? "(none)"}`,
-    `Receipt file: ${result.receiptPath}`,
-    "",
-    "Applied:",
-    ...result.receipt.operations.map((operation) => `  - ${operation.entityRef} -> ${operation.observedWorkspaceId}`)
+function formatPlanActionReasons(action: Plan["actions"][number]): string[] {
+  const lines = [`    decision: ${terminalData(action.decision.explanation.value)}`];
+  if (action.disposition !== "move") {
+    lines.push(`    policy: ${terminalData(action.dispositionReason.value)}`);
+  }
+  return lines;
+}
+
+function undoApplyCommand(inspection: UndoInspection, options: UndoOptions): string {
+  if (!inspection.undoPlan) throw new Error("Undo confirmation command requires an eligible reviewed Plan");
+  const parts = [
+    "zts",
+    "undo",
+    shellQuote(inspection.sourceReceipt.id),
+    "--yes",
+    "--expect-digest",
+    inspection.undoPlan.digest
   ];
-  if (suggestedNextCommands.length > 0) lines.push("", "Next:", ...suggestedNextCommands.map((command) => `  ${command}`));
-  return `${lines.join("\n")}\n`;
+  if (options.backend) parts.push("--backend", options.backend);
+  if (options.acceptUnrelatedDrift) parts.push("--accept-unrelated-drift");
+  return parts.join(" ");
 }
 
-function formatSavedPlanApply(result: ApplyTransactionResult): string {
+function formatUndoInspection(inspection: UndoInspection, exactCommand: string | null): string {
+  const plan = inspection.undoPlan ?? inspection.inversePlan;
+  const visibleActions = plan?.actions.slice(0, 12) ?? [];
+  const lines = [
+    inspection.eligible ? "Undo preview" : "Undo blocked",
+    `Source Receipt: ${terminalData(inspection.sourceReceipt.id)}`,
+    `Source outcome: ${terminalData(inspection.sourceReceipt.outcome)}`,
+    `Source completed: ${terminalData(inspection.sourceReceipt.completedAt)}`,
+    `Undo window ends: ${terminalData(inspection.undoWindowExpiresAt)}`,
+    `Current Snapshot: ${inspection.currentSnapshotRevision}`,
+    `Authority: ${inspection.currentSnapshotAuthority}`,
+    `Freshness: ${inspection.currentSnapshotFreshness}`,
+    `Restores: ${plan?.actions.length ?? 0} move(s)`,
+    ...(plan ? [`Plan: ${terminalData(plan.id)}`, `Digest: ${plan.digest}`] : []),
+    "",
+    ...visibleActions.map((action) => action.disposition === "move"
+      ? `  - ${terminalData(action.operation.entityRef)}: ${terminalData(action.operation.precondition.sourceWorkspace.workspaceId)} -> ${terminalData(action.operation.expectedPostState.workspaceId)}`
+      : `  - ${terminalData(action.entityRef)}: ${terminalData(action.disposition)}`),
+    ...(plan && plan.actions.length > visibleActions.length
+      ? [`  ... ${plan.actions.length - visibleActions.length} more; use --json for full detail`]
+      : []),
+    "",
+    ...(inspection.blockers.length > 0
+      ? ["Blockers:", ...inspection.blockers.map((blocker) => `  - ${terminalData(blocker)}`)]
+      : ["Read-only preview. Nothing changed."]),
+    ...(exactCommand ? ["", "Apply this exact Undo Plan:", `  ${terminalData(exactCommand)}`] : []),
+    ""
+  ];
+  return lines.join("\n");
+}
+
+function emitNoMutationApply<T extends { readonly plan: Plan; readonly summary: { readonly moveCount: number } }>(
+  command: string,
+  options: JsonOption,
+  title: string,
+  data: T,
+  outcome: NoMutationApplyOutcome
+): void {
+  const attentionRequired = outcome.applyOutcome === "attention_required";
+  const disposition = cliOutcomeForNoMutation(attentionRequired);
+  const blocker = attentionRequired
+    ? `Plan contains ${outcome.attentionActionIds.length} review, protected, or blocked action(s) requiring attention`
+    : null;
+  if (options.json) {
+    printJson(envelope(command, { ...data, ...outcome, outcome: disposition }, {
+      ok: disposition.ok,
+      blockers: blocker ? [blocker] : [],
+      suggestedNextCommands: attentionRequired
+        ? [`zts review ${shellQuote(data.plan.id)}`, `zts plan show ${shellQuote(data.plan.id)}`]
+        : [`zts plan show ${shellQuote(data.plan.id)}`]
+    }));
+  } else {
+    const rendered = formatNoMutationApply(title, data.plan, data.summary, outcome, blocker);
+    (attentionRequired ? process.stderr : process.stdout).write(rendered);
+  }
+  process.exitCode = disposition.exitCode;
+}
+
+function formatNoMutationApply(
+  title: string,
+  plan: Plan,
+  summary: { readonly moveCount: number },
+  outcome: NoMutationApplyOutcome,
+  blocker: string | null
+): string {
+  const attentionRequired = outcome.applyOutcome === "attention_required";
+  return [
+    title + (attentionRequired ? " · attention required" : " · no changes"),
+    "Plan: " + plan.id,
+    "Digest: " + plan.digest,
+    "Executable moves: " + String(summary.moveCount),
+    ...(attentionRequired ? ["Attention actions: " + String(outcome.attentionActionIds.length)] : []),
+    "",
+    blocker ?? "Nothing changed.",
+    "No Apply Transaction or Receipt was created.",
+    ""
+  ].join("\n");
+}
+
+function formatSavedPlanApply(
+  result: ApplyTransactionResult,
+  title = "Saved Plan Apply",
+  warnings: readonly string[] = [],
+  suggestedNextCommands: readonly string[] = []
+): string {
+  const visibleOperations = result.receipt.operations.slice(0, 12);
   return `${[
-    "Saved Plan Apply",
+    title,
     `Receipt: ${result.receipt.id}`,
+    ...(result.plan.source.kind === "inverse"
+      ? [`Undoes: ${terminalData(result.plan.source.sourceReceiptId)}`]
+      : []),
     `Plan: ${result.plan.id}`,
     `Digest: ${result.plan.digest}`,
     `Moves: ${result.summary.moveCount}`,
     `Before Snapshot: ${result.receipt.beforeSnapshotRevision}`,
     `After Snapshot: ${result.receipt.afterSnapshotRevision ?? "(none)"}`,
     `Backup: ${result.receipt.backupArtifact?.id ?? "(none)"}`,
-    `Receipt file: ${result.receiptPath}`,
+    `Terminal cleanup: ${result.terminalCleanupRequired ? "required" : "complete"}`,
+    `Receipt file: ${terminalData(result.receiptPath)}`,
     "",
     "Applied:",
-    ...result.receipt.operations.map((operation) => `  - ${operation.entityRef} -> ${operation.observedWorkspaceId}`)
+    ...visibleOperations.map((operation) => `  - ${terminalData(operation.entityRef)} -> ${terminalData(operation.observedWorkspaceId ?? "(none)")}`),
+    ...(result.receipt.operations.length > visibleOperations.length
+      ? [`  ... ${result.receipt.operations.length - visibleOperations.length} more; use --json for full detail`]
+      : []),
+    ...(warnings.length > 0
+      ? ["", "Warnings:", ...warnings.map((warning) => `  - ${terminalData(warning)}`)]
+      : []),
+    ...(suggestedNextCommands.length > 0
+      ? ["", "Next:", ...suggestedNextCommands.map((command) => `  ${terminalData(command)}`)]
+      : [])
   ].join("\n")}\n`;
 }
 
-function formatDomainApplyVerification(report: DomainApplyVerificationReport): string {
+function formatApplyRecoveryList(recoveries: readonly ApplyRecoveryInspection[]): string {
+  if (recoveries.length === 0) return "No Apply Transactions need recovery.\n";
+  return `${[
+    "Apply Transactions needing recovery",
+    ...recoveries.flatMap((recovery) => [
+      `  - ${terminalData(recovery.transactionId)} · ${recovery.journalStage} · ${recovery.classification}`,
+      `    Plan: ${recovery.planDigest}`,
+      `    Lock: ${recovery.lock.status}`,
+      `    Next: zts apply recover ${shellQuote(recovery.transactionId)}`
+    ])
+  ].join("\n")}\n`;
+}
+
+function formatApplyRecoveryInspection(
+  inspection: ApplyRecoveryInspection,
+  exactCommand: string
+): string {
+  return `${[
+    "Apply Transaction recovery inspection",
+    `Transaction: ${terminalData(inspection.transactionId)}`,
+    `Plan: ${inspection.planDigest}`,
+    `Journal stage: ${inspection.journalStage}`,
+    `Current state: ${inspection.classification}`,
+    `Profile lock: ${inspection.lock.status}`,
+    `Recovery claim: ${inspection.recoveryClaim.status}`,
+    `Recovery digest: ${inspection.recoveryRevision}`,
+    `Recoverable: ${inspection.recoverable ? "yes" : "no"}`,
+    "",
+    ...(inspection.blockers.length > 0
+      ? ["Blockers:", ...inspection.blockers.map((blocker) => `  - ${terminalData(blocker)}`), ""]
+      : []),
+    ...(inspection.recoverable ? ["Next:", `  ${terminalData(exactCommand)}`] : [])
+  ].join("\n")}\n`;
+}
+
+function formatApplyRecoveryResult(result: ApplyRecoveryResult): string {
+  return `${[
+    "Apply Transaction recovery recorded",
+    `Transaction: ${terminalData(result.inspection.transactionId)}`,
+    `Classification: ${result.inspection.classification}`,
+    `Receipt: ${result.receipt.id}`,
+    `Outcome: ${result.receipt.outcome}`,
+    `Mutation attempted: ${result.receipt.mutationAttempted ? "yes" : "no"}`,
+    `Net changed: ${String(result.receipt.netChanged)}`,
+    `Recovery changed session bytes: ${result.sessionMutated ? "yes" : "no"}`,
+    `Recovery mutation: ${result.recoveryMutation.kind}`,
+    `Stale lock released: ${result.staleLockReleased ? "yes" : "no"}`,
+    `Recovery lock released: ${result.recoveryLockReleased ? "yes" : "no"}`,
+    `Receipt file: ${terminalData(result.receiptPath)}`
+  ].join("\n")}\n`;
+}
+
+function formatDomainApplyVerification(report: TransactionReceiptVerificationReport): string {
   const lines = [
     "Domain apply receipt verification",
     `Receipt: ${report.receiptId}`,
@@ -1431,21 +2562,23 @@ function formatDomainApplyVerification(report: DomainApplyVerificationReport): s
     `Status: ${report.verification.ok ? "verified" : "blocked"}`
   ];
   if (report.verification.blockers.length > 0) {
-    lines.push("", "Blockers:", ...report.verification.blockers.map((blocker) => `  - ${blocker}`));
+    lines.push("", "Blockers:", ...report.verification.blockers.map((blocker) => `  - ${terminalData(blocker)}`));
   }
   if (report.verification.mismatches.length > 0) {
     lines.push("", "Mismatches:", ...report.verification.mismatches.map((mismatch) =>
-      `  - ${mismatch.actionId} ${mismatch.reason}: expected ${mismatch.expectedWorkspaceId ?? "(none)"}, actual ${mismatch.actualWorkspaceId ?? "(none)"}`
+      `  - ${terminalData(mismatch.actionId)} ${mismatch.reason}: expected ${terminalData(mismatch.expectedWorkspaceId ?? "(none)")}, actual ${terminalData(mismatch.actualWorkspaceId ?? "(none)")}`
     ));
   }
   return `${lines.join("\n")}\n`;
 }
 
-function formatManualReceiptList(receipts: ManualApplyReceiptSummary[]): string {
-  return formatDomainApplyReceiptList(receipts);
-}
-
-function formatDomainApplyReceiptList(receipts: ManualApplyReceiptSummary[]): string {
+function formatDomainApplyReceiptList(receipts: readonly {
+  readonly id: string;
+  readonly kind: string;
+  readonly outcome: string;
+  readonly operationCount: number;
+  readonly completedAt: string;
+}[]): string {
   if (receipts.length === 0) return "No domain apply receipts found\n";
   return `${[
     "Domain apply receipts",
@@ -1455,17 +2588,85 @@ function formatDomainApplyReceiptList(receipts: ManualApplyReceiptSummary[]): st
   ].join("\n")}\n`;
 }
 
+function formatHistoryList(page: TransactionReceiptPage): string {
+  if (page.receipts.length === 0) return "No Apply Receipt history found.\n";
+  const lines = [
+    "Apply Receipt history",
+    ...page.receipts.flatMap((receipt) => [
+      `  - ${terminalData(receipt.id)} · ${receipt.outcome} · ${receipt.operationCount} operations`,
+      `    ${receipt.completedAt} · Plan ${terminalData(receipt.planId)}`,
+      ...(receipt.causalSourceReceiptId
+        ? [`    Undoes: ${terminalData(receipt.causalSourceReceiptId)}`]
+        : []),
+      receipt.fullReceiptAvailability === "available"
+        ? `    Full Receipt: ${terminalData(receipt.receiptPath ?? "available")}`
+        : "    Full Receipt: archived after undo window; summary only"
+    ])
+  ];
+  if (page.nextCursor) {
+    lines.push("", "More:", `  zts history list --cursor ${shellQuote(page.nextCursor)}`);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function formatHistoryRetentionInspection(
+  inspection: ApplyRetentionInspection,
+  nextCommand: string | null
+): string {
+  const lines = [
+    "Apply history retention preview",
+    `Inspection: ${inspection.inspectionRevision}`,
+    `Undo window: ${inspection.policy.undoWindowDays} days`,
+    `Store: ${formatByteCount(inspection.accountingBytes)}`,
+    `Exact target/GC plan: ${inspection.targetPlanRevision}`,
+    `Full Receipts: ${inspection.fullReceiptCountBefore} -> ${inspection.fullReceiptCountAfter}`,
+    `Durable summaries: ${inspection.summaryCountBefore} -> ${inspection.summaryCountAfter}`,
+    `Archive full Receipts: ${inspection.archiveReceiptCount}`,
+    `Evict oldest summaries: ${inspection.evictSummaryCount}`,
+    `Bounded manifest: up to ${formatByteCount(inspection.manifestBytesUpperBound)}`,
+    `Reclaimable now: at least ${formatByteCount(inspection.reclaimableBytesLowerBound)}`,
+    "",
+    "Nothing changed."
+  ];
+  if (inspection.blockers.length > 0) {
+    lines.push("", "Blockers:", ...inspection.blockers.map((blocker) => `  - ${terminalData(blocker)}`));
+  }
+  if (nextCommand && (inspection.blockers.length === 0
+    || inspection.action === "reconcile_publication_residue")) {
+    lines.push("", "Apply this exact inspection:", `  ${terminalData(nextCommand)}`);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function formatHistoryRetentionResult(result: ApplyRetentionResult): string {
+  return `${[
+    "Apply history retention complete",
+    `Maintenance: ${result.maintenanceId}`,
+    `Outcome: ${result.outcome}`,
+    `Durable summaries: ${result.summaryCount}`,
+    `Full Receipts archived: ${result.archivedReceiptCount}`,
+    `Oldest summaries evicted: ${result.evictedSummaryCount}`,
+    `Removed: ${formatByteCount(result.removedBytes)} in ${result.removedFiles} files`,
+    `Transaction directories removed: ${result.removedTransactionDirectories}`,
+    `Completed: ${result.completedAt}`
+  ].join("\n")}\n`;
+}
+
+function formatByteCount(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GiB`;
+}
+
 function terminalData(value: string): string {
-  return value.replace(/[\u001B\u009B][[()\]#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, "")
-    .replace(/[\u0000-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  return terminalText(value);
 }
 
 function formatDomainRules(domainRules: Record<string, string>): string {
   const entries = Object.entries(domainRules).sort(([a], [b]) => a.localeCompare(b));
   if (entries.length === 0) return "No configured domain rules\n";
-  return `${entries.map(([pattern, workspace]) => `${pattern} -> ${workspace}`).join("\n")}\n`;
+  return `${entries.map(([pattern, workspace]) => `${terminalData(pattern)} -> ${terminalData(workspace)}`).join("\n")}\n`;
 }
 
 function domainFromInput(input: string): string {

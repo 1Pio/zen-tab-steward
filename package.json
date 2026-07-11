@@ -3,18 +3,29 @@
   "version": "0.1.0",
   "description": "Safe CLI stewardship for Zen Browser tabs and workspaces.",
   "type": "module",
+  "packageManager": "npm@11.11.0",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "os": [
+    "darwin"
+  ],
   "bin": {
     "zts": "./dist/cli.js"
   },
   "files": [
     "dist",
+    "docs/compatibility.md",
+    "docs/live-backend-investigation.md",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "build": "node scripts/clean-dist.mjs && tsc",
+    "build": "node scripts/clean-dist.mjs && tsc && node scripts/finalize-build.mjs",
+    "prepack": "npm run build",
     "typecheck:contracts": "tsc --project tsconfig.contract.json",
     "test": "npm run build && npm run typecheck:contracts && node --test test/*.test.mjs",
+    "test:memory": "npm run build && ZTS_MEMORY_ACCEPTANCE=1 node --test test/memory-acceptance.test.mjs",
     "smoke": "npm run build && node --test test/cli.test.mjs"
   },
   "repository": {
@@ -33,11 +44,11 @@
   },
   "homepage": "https://github.com/1Pio/zen-tab-steward#readme",
   "dependencies": {
-    "commander": "^15.0.0",
-    "lz4js": "^0.2.0"
+    "commander": "15.0.0",
+    "lz4js": "0.2.0"
   },
   "devDependencies": {
-    "@types/node": "^26.1.0",
-    "typescript": "^6.0.3"
+    "@types/node": "22.12.0",
+    "typescript": "6.0.3"
   }
 }

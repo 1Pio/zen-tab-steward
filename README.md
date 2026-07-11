@@ -2,14 +2,17 @@
 
 Zen Tab Steward is a user-owned CLI for inspecting, backing up, planning, and carefully sorting Zen Browser tab and workspace state. The command is `zts`.
 
-The implementation is deliberately conservative. It can discover the local Zen profile, parse `zen-sessions.jsonlz4`, report workspace/tab protection state, create backups, show deterministic sort previews, and apply eligible tab moves through the offline session backend when Zen is closed. It also has a gated live backend that drives exact one-tab live move proofs from the sort plan when Zen is running and attachable. It does not write active Zen session files, install a service, start a daemon, create a browser extension, or set up autostart.
+The implementation is deliberately conservative. It can discover the local Zen Profile, inspect workspace/tab Protection state, create backups, turn deterministic rules or an exact caller Patch into one state-bound Plan, and exercise that Plan through a crash-recoverable closed-Zen transaction with Receipt-bound Undo. Closed-session authority comes from Zen/Gecko's native `.parentlock`, not from process absence. The exact macOS arm64 compatibility row has passed one bounded owner-Profile standalone-tab apply, real Zen reopen, Undo, verification, causal-history, and second-reopen acceptance. The same source candidate passes a clean package/consumer install and packaged real-Profile read-only smoke. This remains active production-readiness work, not a GA claim: broader compatibility, managed lifecycle, semantic Engines, privileged live mutation, release automation, and complete setup/doctor UX still need their release evidence. Live-profile mutation remains disabled until it can use the same state-bound Plan, Authorization, whole-Plan preflight, recovery, and Receipt architecture. zts does not install a service, daemon, browser extension, or autostart entry.
 
 ## Install
 
+Current runtime contract: macOS, Node.js 22.12.0 or newer, and a local Zen Browser Profile. Node 22 and 24 are exercised in the release CI matrix. For a source checkout:
+
 ```bash
-npm install
+npm ci
 npm run build
 npm link
+npm run test:memory
 ```
 
 After linking, run:
@@ -24,7 +27,6 @@ zts backup
 zts bridge status
 zts bridge live-check
 zts bridge live-read
-zts bridge live-move-proof
 zts review
 zts config path
 zts rules
@@ -47,9 +49,15 @@ node dist/cli.js status
 - backup/config paths
 - current safety posture
 
+Profile selection never falls back to arbitrary `profiles.ini` order. An exact
+running Profile, one install default, one Firefox/Zen default, or a sole Profile
+is selected automatically. If those signals are ambiguous, set
+`ZTS_PROFILE=<exact-profile-id-or-unique-name>`; mutation remains blocked until
+selection is explicit.
+
 `zts workspaces` lists workspace names, ids, tab counts, pinned counts, essential counts, folder/group counts, protected status, default inbox status, sortable-from status, and sortable-to status.
 
-`zts tabs [workspace]` lists tabs with title, URL, domain, workspace, pinned, essential, grouped/foldered, hidden, and protection metadata.
+`zts tabs [workspace]` projects the canonical Snapshot into full-detail tab rows with Entity revision/root identity, Workspace identity, title, URL, pinned, essential, hidden, active, Protection, and explicit `browser_untrusted` provenance.
 
 `zts backup` copies readable session-state files into:
 
@@ -59,21 +67,19 @@ node dist/cli.js status
 
 Each backup includes timestamped `.bak` files and a timestamped `manifest.json` with file sizes, SHA-256 hashes, profile path, Zen running state, command, and `zts` version.
 
-`zts backup restore <backup-id>` restores a saved backup only when Zen is closed. Restore preflights every backup target and hash before any profile write, creates a fresh safety backup of the current profile first, writes each restored file through a temp file and rename, verifies restored hashes, and writes a restore receipt.
+`zts backup restore <backup-id>` currently performs a complete read-only restore preview: it validates every target, containment rule, file size, and hash, then exits with a production-disabled blocker without changing Profile bytes. Multi-file restore remains disabled until a narrow single-file durable restore transaction can provide the same crash and recovery guarantees as Plan apply.
 
 `zts backup prune --before <iso-date>` and `zts backup prune --older-than <duration>` remove old zts-owned backup manifests and `.bak` files from the backup state directory. Use `--dry-run` to preview the exact backups and files that would be removed.
 
 `zts bridge status` and `zts bridge doctor` inspect the live-backend boundary without changing Zen state. They report whether the current Zen browser process has any candidate privileged remote-control launch flags, list the current blockers, and show that live apply remains gated until the stricter attachment check passes.
 
-`zts bridge live-check` is a stricter read-only attachment gate for the discovered live profile. It refuses unless Zen is running for the profile, a browser process explicitly matches the profile path, that browser process has candidate privileged remote-control launch flags, the profile has a local `WebDriverBiDiServer.json`, and that file points to a local-only WebDriver BiDi endpoint. It reports attachable only when `--connect` is used and WebDriver BiDi `session.status` succeeds. This command does not move tabs.
+`zts bridge live-check` is a stricter read-only attachment diagnostic for the discovered live profile. It validates matching process flags and a bounded, no-follow, local-only `WebDriverBiDiServer.json`, but currently refuses connection because zts does not yet have a launch receipt binding the endpoint to the exact Zen binary, PID/start identity, Profile, and confined listener. `--connect` therefore remains fail-closed rather than trusting a local port. This command does not move tabs.
 
-`zts bridge live-read` requires the same live attachment gate, then creates a WebDriver BiDi session and runs a read-only browser-chrome script against the live profile to verify the Zen chrome context, `gZenWorkspaces`, active workspace id, and workspace count. It does not move tabs or write Zen state.
-
-`zts bridge live-move-proof` is the first gated live movement proof. It refuses unless you pass `--confirm-live-move`, `--url <exact-tab-url>`, `--from-workspace <workspace-id>`, and `--to-workspace <workspace-id>`, and the live attachment gate passes. It moves at most one exact URL match from the exact source workspace to the exact destination workspace, and refuses pinned, essential, grouped, foldered, ambiguous, unmatched, or same-workspace moves. `zts sort --apply --backend live` uses the same proof machinery for each planned move after creating a backup and writing a live apply receipt.
+`zts bridge live-read` remains disabled at that ownership gate and creates no privileged session. Its browser-chrome read implementation and disposable fixtures remain available for the future zts-owned managed launch, but an externally discovered endpoint is not trusted.
 
 `zts bridge probe` launches a disposable headless Zen instance with a temporary profile, checks local WebDriver BiDi, creates a session, executes harmless script in a content context, executes harmless script in Zen browser chrome, verifies `gZenWorkspaces` is reachable, performs one disposable temp-profile workspace tab move through Zen internals, then terminates the process and removes the temporary profile. It is still a proof only: it does not attach to the live profile and does not move live tabs.
 
-`zts sort [workspace] --preview` produces a safe read-only preview. It uses deterministic domain rules where a matching destination workspace exists, skips pinned tabs and essentials by default, and represents grouped/foldered structures as single review entities so they are not split. Every sortable entity from the source workspace is classified as move, skip, review, or blocked.
+`zts sort [workspace] --preview` produces a safe read-only preview. It uses deterministic domain rules where a matching destination Workspace exists and protects pinned, essential, grouped, and foldered tabs by default. Every captured Movement Root from the source Workspace is classified as move, protected, review, blocked, or unchanged.
 
 The production Plan path is available for exact-rule planning across every applicable Workspace:
 
@@ -83,7 +89,7 @@ zts sort --all --engine rules --dry-run
 zts plan show latest
 ```
 
-Preview saves one owner-private, content-addressed domain Plan. Dry-run reuses that exact Plan and digest. If the Snapshot changes between the two commands, dry-run reports Snapshot Drift and preserves the reviewed Plan instead of silently regenerating it. Workspace Protection is directional, so a Workspace can remain usable as a source while protected as a destination. `--include-pinned` and `--include-essentials` may place those entities into the Plan, but their Operations retain Protection preconditions for explicit authorization.
+Preview saves one owner-private, content-addressed domain Plan. Dry-run reuses that exact Plan and digest. If the Snapshot changes between the two commands, dry-run reports Snapshot Drift and preserves the reviewed Plan instead of silently regenerating it. Workspace Protection is directional, so a Workspace can remain usable as a source while protected as a destination. `--include-pinned` and `--include-essentials` may place those entities into the Plan, but their Operations retain Protection preconditions for explicit authorization. The paired `--no-include-pinned` and `--no-include-essentials` flags explicitly keep them protected when config defaults opt in.
 
 Apply always targets one saved Plan. Calling `apply` without consent displays the exact digest and confirmation command. Selecting Operations first creates a new derived Plan with its own digest, which must be reviewed separately:
 
@@ -93,19 +99,75 @@ zts apply <plan-id> --actions <action-id>,<action-id>
 zts apply <derived-plan-id> --yes --expect-digest sha256:<exact-digest>
 ```
 
-The production apply path currently uses the authoritative closed-Zen route for tab Operations. It acquires a per-Profile transaction lock, reacquires and preflights the whole Snapshot, publishes an owner-private backup and recovery descriptor, checks the source fingerprint immediately before an fsynced atomic write, rereads independently, and publishes a typed Receipt. Snapshot Drift, a running Zen process, or any unavailable capability blocks the whole Plan before mutation. A failure after the file commit produces an `interrupted` Receipt with recovery evidence rather than claiming success.
+The current closed-session Apply path uses the authoritative closed-Zen route for tab Operations. Under persistent Apply-store control it reserves the complete bounded transaction footprint, then publishes a self-contained unfinished marker as the first transaction artifact. It acquires the zts transaction lock and holds Zen/Gecko's native `.parentlock` across the authoritative source read, whole-Plan preflight, backup/recovery publication, final fingerprint and expiry check, one exact macOS atomic file swap, and independent verification. Snapshot Drift, native-control contention, a running Zen owner, incomplete maintenance, capacity pressure, an unknown Zen version/schema, or any other unavailable capability blocks the whole Plan before mutation. A committed result is recorded as `applied` only when zts independently recaptures and verifies the exact planned after-state plus a replayable inverse; an indeterminate atomic outcome or unverified committed state retains its unfinished marker and publishes no terminal Receipt until residue-bound recovery classifies it. The exact provisional capability gate and its remaining real-acceptance work are documented in [docs/compatibility.md](docs/compatibility.md).
 
-Plain `zts sort [workspace]`, `--preview`, and `--dry-run` are read-only. Preview is glance-oriented; dry-run prints the full action list with reasons and explanations. Use `--limit <count>` to cap planned move actions for a controlled proof; eligible overflow actions are kept in review with reason `over_move_limit`. Mutation requires explicit `--apply`. Interactive terminal use asks for confirmation; JSON and other unattended use also requires `--yes`. The session backend applies only when Zen is closed and `zen-sessions.jsonlz4` is the selected session source. The live backend applies only when Zen is running, the live attachment gate passes, and every planned tab move passes exact URL/workspace protection checks.
+If the process is killed or the machine loses power between journal stages, recovery is inspect-first. Inspection is write-free. Explicit digest-bound finalization normally records evidence only, but may perform one atomic restorative swap to put back the exact external writer displaced by an interrupted zts swap; JSON and human output report that separately as a recovery mutation:
 
-`zts review [workspace]` lists only the sort-plan items that need attention, including low-confidence items, move-limit overflow, and grouped/foldered aggregate entities. It is read-only and supports the same policy/filter flags as `zts sort`.
+```bash
+zts apply recover --json
+zts apply recover <transaction-id> --json
+zts apply recover <transaction-id> --yes --expect-recovery-digest sha256:<exact-inspection-digest> --json
+```
+
+The first command lists incomplete transactions from an owner-private unfinished index, independent of completed history size. The marker includes strictly validated, Plan-bound invocation consent and bootstrap state, so even a crash before the mutable journal exists remains recoverable without process-absence or timestamp guesses. Selecting one without `--yes` succeeds as a read-only inspection and shows its journal stage, Profile-lock state, exact recovery digest, canonical target fingerprint, and exact journal-owned atomic residue fingerprint. Finalization requires both `--yes` and that exact `--expect-recovery-digest`; any changed residue requires a new inspection. It preserves the relevant planned image, fragment, or displaced writer before closing the exact temp lifecycle. When the canonical session is the exact planned after-state, recovery verifies every Operation and publishes an `applied` Receipt with its inverse Plan; uncertain or externally drifted state remains truthfully non-applied. Terminal lifecycle proof and the canonical Receipt are published only after native and zts control release is verified. Reservation settlement is idempotent, and unfinished-marker removal is last. Recovery does not restore a user backup, close Zen, or take over active, invalid, or foreign control.
+
+Completed saved-Plan history is one immutable, content-addressed ledger with a tiny atomic head. An immutable generation-bound node is durable before one atomic head swap; the head binds the latest transaction and Receipt digest. The exact unfinished marker plus its reservation authorize a new append, while a markerless retry may only validate an identical already-reachable Receipt. History pages follow only the requested number of size-bounded nodes. Opaque HMAC cursors bind the Profile, ledger generation, sequence, and exact node digest, so an old generation or orphan fork cannot be selected:
+
+```bash
+zts apply list --limit 50
+zts apply list --limit 50 --cursor <opaque-cursor>
+```
+
+Normal commands never reconstruct a missing Receipt head or unfinished index from transaction files. Only a genuinely empty fresh store may bootstrap accounting, the unfinished index, and an empty ready head under the same kernel control. Any transaction-bearing pre-index or missing-head store fails closed and requires an explicit future maintenance or migration operation; corruption is never reinterpreted as absence.
+
+Apply-store retention is inspect-first and uses the same lean human/JSON split:
+
+```bash
+zts history retain
+zts history retain --json
+zts history retain --apply --yes --expect-inspection-revision sha256:<exact-preview-revision>
+```
+
+Preview is write-free. It validates every available full Receipt against its Plan, Authorization, journal, referenced artifacts, and causal Undo closure, then binds deterministic archive decisions and an exact deletion graph. A forward Receipt and its successful Undo are retained or evicted as one causal unit at the summary-count boundary; retention never leaves an unmatched Undo consumer. The mutating pass reserves its bounded maintenance footprint, builds a complete immutable ledger generation off-head, publishes one fixed source/target/deletion manifest, performs one head swap, and reconciles deletions idempotently. Receipts outside the default 30-day undo window become truthful `archived_summary_only` entries; full private payloads are deleted while bounded summaries remain. A crash with the source head discards only the prepared generation. A crash with the target head resumes the same manifest and fixed totals. Incomplete transactions, unsafe hardlink residue, manifest corruption, low capacity, or head Drift block rather than guessing.
+
+An explicit, reserved, crash-resumable legacy or missing-head migration command is not implemented. This remains a release boundary for provisional stores created by older builds. Retention requires an existing valid ready head and unfinished index; malformed or missing canonical state fails closed.
+
+Every successfully verified forward Apply stores a Receipt-bound inverse template. Undo is preview-first and reuses the canonical Apply Transaction rather than bypassing it:
+
+```bash
+zts undo latest --preview
+zts undo <source-receipt-id> --preview --json
+zts undo <source-receipt-id> --yes --expect-digest sha256:<exact-undo-plan-digest>
+zts undo <source-receipt-id> --preview --accept-unrelated-drift
+```
+
+The executable Undo Plan is deterministically materialized from the exact source Receipt, forward Plan, inverse-template digest, current configuration, and current authoritative Snapshot. The mutation seam recomputes that binding at admission and again under exclusive control at the final commit boundary. Whole-Snapshot Drift fails by default. When a normal Zen reopen changes unrelated normalized state, `--accept-unrelated-drift` explicitly rematerializes the same exact inverse against the fresh Snapshot only if every affected Entity, revision, source, destination, Protection precondition, and causal binding still validates; the resulting new digest must be reviewed and supplied again at apply. An expired default 30-day window, archived full Receipt, affected-Operation drift, missing artifact, uncertain later mutation, or changed causal lineage still blocks before mutation. Successful tail Undo cancels its forward Receipt in the causal stack, so `undo latest` can continue to the previous still-active forward change; blocked and fully compensated attempts do not consume a source, while uncertain outcomes stop the stack. Direct Apply of inverse Plans and Undo-of-Undo are rejected. JSON retains full action detail; human output is bounded and points to JSON when more detail exists.
+
+Plain `zts sort [workspace]`, `--preview`, and `--dry-run` are read-only Plan workflows. Preview is glance-oriented; dry-run reuses the reviewed Plan and prints the full action list with reasons and explanations. Use `--limit <count>` to cap move actions; eligible overflow remains visible as review. Mutation requires an already reviewed Plan plus `--apply --yes --expect-digest sha256:<exact-digest>`, and delegates to the same canonical Apply Transaction. The current fixture-tested adapter applies only while Zen is closed and the primary `zen-sessions.jsonlz4` source is under native Profile control. Selecting or configuring `live` never falls back to this route; an explicit `--backend session` can override a live-only preference after review.
+
+`zts review [plan-selector]` defaults to `latest` and shows every review, protected, or blocked attention item from that exact saved Plan without capturing current browser state or regenerating planning intent. Its bound Snapshot is included in JSON so Entity refs retain full title/URL context. Exact rules have no synthetic confidence score; confidence thresholds become relevant only for confidence-producing Engines.
 
 `zts snapshot --json` prints the normalized domain Snapshot with stable `entity:root:*` references for exact manual Patch planning. If Zen is running, the Snapshot is marked as a persisted observation and is not executable for apply.
 
-`zts patch plan <patch-file|-> --json` validates a caller-authored Patch against the current Snapshot and returns a digest-bound manual Plan. A Patch can be a draft with only `operations`, or a full Patch with `schemaVersion` and `snapshotRevision`; stale full Patches are refused. Patch reasons remain `caller_untrusted` data and referenced Entity refs must exist in the Snapshot.
+`zts patch plan <patch-file|-> --json` validates a caller-authored Patch against the current Snapshot and returns a digest-bound manual Plan. Public drafts stay lean: callers provide a reason string, while zts derives `caller_untrusted`/`data_only` provenance and binds the reason to that Operation's Entity ref. A parsed canonical Patch has both `schemaVersion` and `snapshotRevision`; stale, malformed, or unsupported canonical artifacts are refused rather than reinterpreted as drafts.
 
-`zts patch apply <patch-file|-> --yes --json` applies executable manual Patch moves through the closed-session route only. It requires Zen to be closed, creates a backup and pre-mutation journal, verifies the moved tab state, and writes a typed domain Receipt. `zts patch receipts --json` lists those manual Patch apply receipts.
+```json
+{
+  "operations": [
+    {
+      "op": "move",
+      "entityRef": "entity:root:tab-...",
+      "expectedSourceWorkspaceId": "workspace-inbox",
+      "destinationWorkspaceId": "workspace-research",
+      "reason": "Project-specific research"
+    }
+  ]
+}
+```
 
-`zts apply list` lists sort-apply receipts for the discovered profile. Session receipts are reverified against the current selected session file with `zts apply verify <receipt-id>`, which exits with status `2` if recorded moves no longer match. Live receipts are reverified through a read-only live bridge check when the live attachment gate passes; if the current Zen process is not attachable, verification refuses with the live-check blockers instead of reading stale session files.
+`zts patch plan <patch-file|->` also stores the resulting Plan. `zts patch apply <patch-file|-> --yes --expect-digest sha256:<reviewed-digest>` is a thin composition alias: it requires the exact unexpired reviewed Patch Plan and delegates to the canonical Apply Transaction. Patch and rules workflows therefore share locks, backup/recovery, verification, inverse Plan, Receipt, and history behavior.
+
+`zts apply list` is the one canonical Receipt history for both rules and manual Patch Plans. `--limit` defaults to 50 and is capped at 500; JSON returns the next opaque cursor under `data.history.nextCursor`. `zts apply verify <receipt-id>` accepts canonical transaction Receipts and exits with status `3` when it cannot reacquire native Profile control or prove every recorded post-state from a current authoritative Snapshot.
 
 `zts config` inspects and updates the user config at:
 
@@ -114,6 +176,8 @@ Plain `zts sort [workspace]`, `--preview`, and `--dry-run` are read-only. Previe
 ```
 
 Supported keys include `defaults.inbox`, `defaults.min_confidence`, `defaults.include_pinned`, `defaults.include_essentials`, `defaults.apply_backend`, `sort.from`, `sort.to`, `sort.not_to`, `sort.only`, `sort.except`, `semantic.enabled`, `semantic.engine`, `semantic.suggestion_threshold`, `semantic.auto_apply`, `semantic.auto_apply_threshold`, `semantic.minimum_margin`, `semantic.max_moves`, `protect.workspaces.from`, `protect.workspaces.to`, and `protect.domains.never_move`.
+
+The config uses a deliberately small, single-line TOML-like grammar: known sections and keys, double-quoted strings, booleans, non-negative decimal numbers, and arrays of double-quoted strings. Partial configs inherit defaults. Unknown or duplicate schema, malformed literals, and contradictory semantic policy fail closed; `suggestion_threshold` must be less than or equal to `auto_apply_threshold`. `semantic.engine` accepts `lexical`, `bge-small`, or `hybrid`. Files are capped at 1 MiB, strings at 4096 UTF-8 bytes, arrays at 256 entries, domain rules at 1024, and `semantic.max_moves` at 1000. Config edit commands validate both the existing and resulting document before preserving its comments and formatting. The config directory must be owner-only mode `0700` and an existing config file must be mode `0600`; reads never silently repair unsafe permissions. The error reports the exact `chmod 700` or `chmod 600` remediation for the user to review and run.
 
 `zts rules` manages deterministic domain routing rules:
 
@@ -141,9 +205,9 @@ zts bridge doctor --json
 zts bridge live-check --json
 zts bridge live-check --connect --json
 zts bridge live-read --json
-zts bridge live-move-proof --json
 zts bridge probe --json
 zts apply list --json
+zts apply list --limit 50 --cursor <opaque-cursor> --json
 zts apply verify <receipt-id> --json
 zts sort Space --preview --json
 zts sort Space --dry-run --json
@@ -151,36 +215,40 @@ zts sort --all --engine rules --preview --json
 zts sort --all --engine rules --dry-run --json
 zts plan show latest --json
 zts sort Space --dry-run --limit 3 --json
-zts review Space --json
-zts sort Space --apply --yes --backend session --json
+zts review latest --json
+zts sort Space --apply --yes --expect-digest sha256:<reviewed-digest> --json
+zts patch plan patch.json --json
+zts patch apply patch.json --yes --expect-digest sha256:<reviewed-digest> --json
 zts config show --json
 zts rules test https://github.com/1Pio/zen-tab-steward --json
 ```
 
 JSON output is structured for future Raycast and agent use. It includes version, command, success state, warnings, blockers, suggested next commands, and command-specific data.
 
+Exit codes are stable across human and JSON modes: `0` means completed or valid read-only output, `1` means invocation/config/input validation failed, `2` means safely blocked before mutation or explicit review is required, `3` means mutation or verification failed or is uncertain, and `4` means unexpected internal, I/O, corruption, or compatibility failure.
+
+`npm run test:memory` first builds fresh output, then runs the opt-in memory acceptance probes. The current probes separately cover representative capture/Plan encoding, a 10,000-tab low-compression image, the 500-Operation transaction cap, crash recovery at that Operation limit, an approximately 18 MiB real-shape backup source, and a 63.5 MiB raw source near the 64 MiB backup ceiling. Reported `maxRSS` is the Node worker and does not include the short-lived macOS atomic-rename helper.
+
 ## Safety Boundary
 
-The current implementation has read, backup, preview, offline session apply, and gated live apply support.
+The current implementation has canonical full-detail reads, durable backup, unified Plan preview/apply, crash recovery, canonical Receipt history, read-only live attachment evidence, and a disposable-profile bridge probe. User-Profile live mutation is not exposed outside Apply Transaction.
 
 - It reads Zen profile metadata and session files.
 - It parses `mozLz40\0` JSONLZ4 session files.
 - It copies files for backups.
-- It restores backups only when Zen is closed.
-- It refuses offline session apply while Zen is running.
-- It runs live apply only after the explicit live attachment gate and exact tab-safety checks pass.
+- It validates restore backups without mutating; production restore is intentionally disabled pending a durable restore transaction.
+- It refuses closed-session apply unless the same live native `.parentlock` lease brackets authoritative read, commit, and verification.
 - It can inspect live-backend launch evidence with `zts bridge status` and `zts bridge doctor`, but those commands are read-only.
 - It can run `zts bridge live-check` as a read-only live-profile attachment gate; refusal is expected unless Zen was launched with the required remote-control flags and a local WebDriver BiDi server file exists.
 - It can run `zts bridge live-read` as a read-only live-profile browser-chrome proof after the attachment gate passes; it does not move tabs.
-- It can run `zts bridge live-move-proof` only with explicit confirmation and exact tab/workspace selectors; `zts sort --apply --backend live` reuses that gated proof machinery.
 - It can run a disposable `zts bridge probe` against a temporary headless profile to verify WebDriver BiDi transport, script execution, Zen chrome object reachability, and one temp-profile workspace tab move without touching live tabs.
-- It creates a fresh backup before offline session mutation.
+- It publishes a content-addressed backup and recovery descriptor before closed-session mutation.
 - It stores production Plan artifacts under an owner-only state root using `0700` directories, `0600` files, bounded handle-based reads, content binding, fsync, and atomic publication.
-- It writes an apply receipt under the state directory after offline or live apply.
-- It can list and re-verify apply receipts without writing Zen state.
-- It creates a fresh safety backup and restore receipt before/after offline restore.
+- It publishes canonical transaction Receipts into one generation-bound linked ledger.
+- It can list Receipts in bounded pages and re-verify them without writing Zen state.
+- It previews and applies bounded Receipt retention through one exact crash-resumable manifest.
 - It preserves unknown Zen session fields by mutating only planned tab workspace ids.
-- It surfaces grouped/foldered tabs as aggregate review entities but does not apply grouped/foldered moves yet.
+- It protects grouped/foldered tabs from closed-session mutation until native structured-Entity capture and verification are implemented.
 - It does not mutate files inside the active Zen profile while Zen is running.
 
 Pinned tabs and essentials are counted explicitly using Zen's observed `pinned` and `zenEssential` fields. Folder and group records are counted and represented conservatively so later sorting can protect them as unsplittable entities.

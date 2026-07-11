@@ -1,17 +1,13 @@
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { createBackup } from "./backup.js";
-import { createApplyAuthorization, createPatch, createPlan, definePatch, defineReceipt } from "./domain/change.js";
+import { open } from "node:fs/promises";
+import { createPatch, createPlan, definePatch } from "./domain/change.js";
 import { sha256Canonical } from "./domain/digest.js";
-import { writeJsonLz4 } from "./mozlz4.js";
-import { stateDir } from "./paths.js";
-import { ProfileContext } from "./profile.js";
-import { listTabs, RawZenSession, SessionSummary } from "./session.js";
-import { snapshotFromSession } from "./session-snapshot.js";
+import { movementEligibility } from "./domain/snapshot.js";
+import { resolveOrCreatePlan } from "./plans.js";
+import { effectiveConfigRevision } from "./config.js";
+import { destinationAllowedByPolicy, workspaceAllowedByPolicy } from "./workspace-policy.js";
 
 import type {
   AutoApplyEvidence,
-  ApplyAuthorization,
   CallerText,
   ManualDecisionEvidence,
   MoveProtectionPrecondition,
@@ -19,12 +15,11 @@ import type {
   PatchDraft,
   Plan,
   PlanAction,
-  Receipt,
   ZtsMessage
 } from "./domain/change.js";
-import type { Protection, Snapshot } from "./domain/snapshot.js";
-
-export { snapshotFromSession } from "./session-snapshot.js";
+import type { ArtifactReference, Protection, Snapshot } from "./domain/snapshot.js";
+import type { Sha256Digest } from "./domain/digest.js";
+import type { ZtsConfig } from "./config.js";
 
 export interface ManualPlanResult {
   snapshot: Snapshot;
@@ -38,166 +33,63 @@ export interface ManualPlanResult {
   };
 }
 
-export interface ManualApplyResult extends ManualPlanResult {
-  authorization: ApplyAuthorization;
-  receipt: Receipt;
-  receiptPath: string;
+export interface StoredManualPlanResult extends ManualPlanResult {
+  readonly planResolution: "created" | "reused_latest";
+  readonly requestRevision: Sha256Digest;
+  readonly artifact: ArtifactReference;
 }
 
-export interface ManualApplyReceiptSummary {
-  id: string;
-  kind: "manual_patch" | "saved_plan" | "unknown";
-  outcome: Receipt["outcome"];
-  planId: string;
-  planDigest: string;
-  completedAt: string;
-  operationCount: number;
-  receiptPath: string;
-}
+export const PATCH_INPUT_MAX_BYTES = 1024 * 1024;
 
-export interface DomainApplyVerificationReport {
-  receiptId: string;
-  profileId: string;
-  receiptPath: string;
-  receipt: Receipt;
-  verification: {
-    ok: boolean;
-    checkedOperations: number;
-    mismatchCount: number;
-    blockers: string[];
-    mismatches: {
-      actionId: string;
-      entityRef: string;
-      expectedWorkspaceId: string | null;
-      actualWorkspaceId: string | null;
-      reason: "missing_entity" | "workspace_mismatch" | "unsupported_operation";
-    }[];
-  };
+const PATCH_INPUT_READ_CHUNK_BYTES = 64 * 1024;
+
+export class PatchInputValidationError extends Error {
+  constructor(message: string, cause?: unknown) {
+    super(message, cause === undefined ? undefined : { cause });
+    this.name = "PatchInputValidationError";
+  }
 }
 
 export async function readPatchInput(path: string): Promise<unknown> {
-  const contents = path === "-" ? await readStdin() : await readFile(path, "utf8");
-  return JSON.parse(contents) as unknown;
-}
-
-export async function listManualApplyReceipts(profileId: string): Promise<ManualApplyReceiptSummary[]> {
-  const root = join(stateDir(), "applies", safeSegment(profileId));
+  let bytes: Buffer;
   try {
-    const entries = await readdir(root);
-    const receiptFiles = entries.filter((entry) => entry.endsWith("--domain-apply.json")).sort().reverse();
-    const receipts: ManualApplyReceiptSummary[] = [];
-    for (const receiptFile of receiptFiles) {
-      const receiptPath = join(root, receiptFile);
-      const receipt = JSON.parse(await readFile(receiptPath, "utf8")) as Receipt;
-      receipts.push({
-        id: receipt.id,
-        kind: receipt.id.startsWith("receipt:manual:")
-          ? "manual_patch"
-          : receipt.id.startsWith("receipt:plan:") || receipt.id.startsWith("receipt:apply:")
-            ? "saved_plan"
-            : "unknown",
-        outcome: receipt.outcome,
-        planId: receipt.planId,
-        planDigest: receipt.planDigest,
-        completedAt: receipt.completedAt,
-        operationCount: receipt.operations.length,
-        receiptPath
-      });
-    }
-    return receipts;
+    bytes = path === "-" ? await readStdin() : await readPatchFile(path);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    const code = (error as NodeJS.ErrnoException).code;
+    if (error instanceof PatchInputValidationError) throw error;
+    if (code === "ENOENT" || code === "EISDIR" || code === "ENAMETOOLONG") {
+      throw new PatchInputValidationError(error instanceof Error ? error.message : String(error), error);
+    }
     throw error;
   }
-}
-
-export async function verifyDomainApplyReceipt(
-  context: ProfileContext,
-  session: RawZenSession,
-  summary: SessionSummary,
-  receiptId: string
-): Promise<DomainApplyVerificationReport> {
-  const found = await findDomainApplyReceipt(context.profile.id, receiptId);
-  if (!found) throw new Error(`Domain apply receipt not found: ${receiptId}`);
-  const { receipt, receiptPath } = found;
-  const blockers: string[] = [];
-  if (context.running) blockers.push("Domain apply receipt verification requires Zen to be closed for an authoritative Snapshot");
-  if (receipt.profileId !== context.profile.id) blockers.push("Domain apply receipt belongs to a different Profile");
-  const snapshot = snapshotFromSession(context, session, summary);
-  const entities = new Map(snapshot.entities.map((entity) => [entity.ref, entity]));
-  const mismatches: DomainApplyVerificationReport["verification"]["mismatches"] = [];
-
-  for (const operation of receipt.operations) {
-    if (operation.status === "not_attempted") continue;
-    if (!operation.observedWorkspaceId) {
-      mismatches.push({
-        actionId: operation.actionId,
-        entityRef: operation.entityRef,
-        expectedWorkspaceId: null,
-        actualWorkspaceId: null,
-        reason: "unsupported_operation"
-      });
-      continue;
-    }
-    const entity = entities.get(operation.entityRef);
-    if (!entity) {
-      mismatches.push({
-        actionId: operation.actionId,
-        entityRef: operation.entityRef,
-        expectedWorkspaceId: operation.observedWorkspaceId,
-        actualWorkspaceId: null,
-        reason: "missing_entity"
-      });
-      continue;
-    }
-    if (entity.workspaceId !== operation.observedWorkspaceId) {
-      mismatches.push({
-        actionId: operation.actionId,
-        entityRef: operation.entityRef,
-        expectedWorkspaceId: operation.observedWorkspaceId,
-        actualWorkspaceId: entity.workspaceId,
-        reason: "workspace_mismatch"
-      });
-    }
-  }
-
-  return {
-    receiptId: receipt.id,
-    profileId: receipt.profileId,
-    receiptPath,
-    receipt,
-    verification: {
-      ok: blockers.length === 0 && mismatches.length === 0,
-      checkedOperations: receipt.operations.length,
-      mismatchCount: mismatches.length,
-      blockers,
-      mismatches
-    }
-  };
-}
-
-async function findDomainApplyReceipt(profileId: string, receiptId: string): Promise<{ receipt: Receipt; receiptPath: string } | null> {
-  const root = join(stateDir(), "applies", safeSegment(profileId));
+  let text: string;
   try {
-    const entries = await readdir(root);
-    const receiptFiles = entries.filter((entry) => entry.endsWith("--domain-apply.json"));
-    for (const receiptFile of receiptFiles) {
-      const receiptPath = join(root, receiptFile);
-      const receipt = JSON.parse(await readFile(receiptPath, "utf8")) as Receipt;
-      if (receipt.id === receiptId) return { receipt, receiptPath };
-    }
-    return null;
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new PatchInputValidationError("Patch input is not valid UTF-8");
+  }
+  try {
+    return JSON.parse(text) as unknown;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw error;
+    throw new PatchInputValidationError("Patch input is not valid JSON", error);
   }
 }
 
-export function createManualPlanFromInput(snapshot: Snapshot, patchInput: unknown): ManualPlanResult {
-  const patch = isFullPatch(patchInput)
-    ? definePatch(snapshot, patchInput)
-    : createPatch(snapshot, patchInput as PatchDraft);
-  const plan = createManualPlan(snapshot, patch);
+export function createManualPlanFromInput(
+  snapshot: Snapshot,
+  patchInput: unknown,
+  config: ZtsConfig,
+  now = new Date()
+): ManualPlanResult {
+  let patch: Patch;
+  try {
+    patch = hasCanonicalPatchEnvelope(patchInput)
+      ? definePatch(snapshot, patchInput)
+      : createPatch(snapshot, patchInput as PatchDraft);
+  } catch (error) {
+    throw new PatchInputValidationError(error instanceof Error ? error.message : String(error), error);
+  }
+  const plan = createManualPlan(snapshot, patch, config, now);
   const moveCount = plan.actions.filter((action) => action.disposition === "move").length;
   const protectedCount = plan.actions.filter((action) => action.disposition === "protected").length;
   const blockedCount = plan.actions.filter((action) => action.disposition === "blocked").length;
@@ -210,147 +102,40 @@ export function createManualPlanFromInput(snapshot: Snapshot, patchInput: unknow
   };
 }
 
-export async function applyManualPatchOffline(
-  context: ProfileContext,
-  session: RawZenSession,
-  summary: SessionSummary,
+export async function resolveManualPlanFromInput(
+  snapshot: Snapshot,
   patchInput: unknown,
-  command: string
-): Promise<ManualApplyResult> {
-  if (context.running) throw new Error("Manual Patch apply requires Zen to be closed; current Snapshot would be a persisted observation");
-  if (context.sessionFile.kind !== "zen-sessions") throw new Error("Manual Patch apply requires zen-sessions.jsonlz4 as the selected session source");
-
-  const snapshot = snapshotFromSession(context, session, summary);
-  const result = createManualPlanFromInput(snapshot, patchInput);
-  const moveActions = result.plan.actions.filter((action): action is Extract<PlanAction, { readonly disposition: "move" }> =>
-    action.disposition === "move"
-  );
-  if (moveActions.length === 0) throw new Error("Manual Patch apply has no executable move actions");
-
-  const authorizedAt = new Date().toISOString();
-  const authorization = createApplyAuthorization(snapshot, result.plan, {
-    schemaVersion: "zts.authorization.provisional-1",
-    id: `authorization:manual:${shortDigest(result.plan.digest)}`,
-    planId: result.plan.id,
-    planDigest: result.plan.digest,
-    profileId: result.plan.profileId,
-    authorizedAt,
-    expiresAt: result.plan.expiresAt,
-    source: {
-      kind: "unattended_invocation",
-      consentArtifact: {
-        id: `consent:manual:${shortDigest(result.plan.digest)}`,
-        digest: result.plan.digest
-      }
-    },
-    authorizedActionIds: moveActions.map((action) => action.actionId) as [string, ...string[]],
-    allowedTrustClasses: ["manual_exact"],
-    protectionGrants: [],
-    lifecycle: { kind: "none" },
-    wholePlanPreflight: true
+  config: ZtsConfig,
+  now = new Date(),
+  policy: "create_or_reuse" | "require_existing" = "create_or_reuse"
+): Promise<StoredManualPlanResult> {
+  const created = createManualPlanFromInput(snapshot, patchInput, config, now);
+  const requestRevision = sha256Canonical({
+    kind: "manual_patch",
+    patch: created.patch,
+    configRevision: created.plan.configRevision
   });
-  const receiptRoot = join(stateDir(), "applies", safeSegment(context.profile.id));
-  await mkdir(receiptRoot, { recursive: true, mode: 0o700 });
-  const journalArtifact = {
-    id: `journal:manual:${shortDigest(result.plan.digest)}`,
-    digest: sha256Canonical({ plan: result.plan.digest, authorization: authorization.revision, patch: result.patch.snapshotRevision })
+  const resolved = await resolveOrCreatePlan(
+    snapshot,
+    requestRevision,
+    () => created.plan,
+    now,
+    policy
+  );
+  return {
+    ...created,
+    plan: resolved.plan,
+    planResolution: resolved.resolution,
+    requestRevision,
+    artifact: resolved.artifact
   };
-  await writeFile(
-    join(receiptRoot, `${safeSegment(journalArtifact.id)}--journal.json`),
-    `${JSON.stringify({
-      schemaVersion: "zts.manual-apply-journal.provisional-1",
-      stage: "authorized",
-      planDigest: result.plan.digest,
-      authorizationRevision: authorization.revision,
-      patch: result.patch
-    }, null, 2)}\n`,
-    { encoding: "utf8", mode: 0o600 }
-  );
-
-  const nextSession = structuredClone(session);
-  const tabs = Array.isArray(nextSession.tabs) ? nextSession.tabs : [];
-  const tabSummaries = listTabs(nextSession, summary);
-  const entities = new Map(snapshot.entities.map((entity) => [entity.ref, entity]));
-  for (const action of moveActions) {
-    const entity = entities.get(action.operation.entityRef);
-    const tabSummary = tabSummaries.find((tab) => tab.id === entity?.nativeId);
-    if (!entity || !tabSummary) throw new Error(`Manual Patch apply cannot find ${action.operation.entityRef} in the current session`);
-    const tab = tabs[tabSummary.index];
-    if (!tab) throw new Error(`Manual Patch apply cannot find raw tab for ${action.operation.entityRef}`);
-    if (tab.zenWorkspace !== action.operation.precondition.sourceWorkspace.workspaceId) {
-      throw new Error(`Manual Patch apply found Drift for ${action.operation.entityRef}`);
-    }
-    tab.zenWorkspace = action.operation.expectedPostState.workspaceId;
-  }
-
-  const backup = await createBackup(context, command);
-  await writeJsonLz4(context.sessionFile.path, nextSession);
-  const afterSnapshot = snapshotFromSession(context, nextSession, summary);
-  const afterEntitiesByNativeId = new Map(afterSnapshot.entities.map((entity) => [entity.nativeId, entity]));
-  const operations = moveActions.map((action) => {
-    const beforeEntity = entities.get(action.operation.entityRef);
-    const afterEntity = beforeEntity ? afterEntitiesByNativeId.get(beforeEntity.nativeId) : undefined;
-    if (!afterEntity || afterEntity.workspaceId !== action.operation.expectedPostState.workspaceId) {
-      throw new Error(`Manual Patch apply verification failed for ${action.operation.entityRef}`);
-    }
-    return {
-      actionId: action.actionId,
-      entityRef: action.operation.entityRef,
-      observedWorkspaceId: action.operation.expectedPostState.workspaceId,
-      status: "verified" as const,
-      mutationAttempted: true as const,
-      netChanged: true as const,
-      issueCodes: []
-    };
-  });
-  const receiptOperations = operations as unknown as Extract<Receipt, { readonly outcome: "applied" }>["operations"];
-
-  const completedAt = new Date().toISOString();
-  const receipt = defineReceipt(snapshot, result.plan, authorization, {
-    schemaVersion: "zts.receipt.provisional-1",
-    id: `receipt:manual:${shortDigest(sha256Canonical({ plan: result.plan.digest, completedAt }))}`,
-    planId: result.plan.id,
-    planDigest: result.plan.digest,
-    authorization: {
-      id: authorization.id,
-      revision: authorization.revision,
-      artifact: { id: `authorization:${authorization.id}`, digest: authorization.revision }
-    },
-    profileId: result.plan.profileId,
-    beforeSnapshotRevision: snapshot.revision,
-    startedAt: authorizedAt,
-    completedAt,
-    journalArtifact,
-    issues: [],
-    outcome: "applied",
-    mutationAttempted: true,
-    netChanged: true,
-    afterSnapshotRevision: afterSnapshot.revision,
-    control: {
-      route: "closed_session",
-      proof: { id: "control:closed-session:manual-apply", digest: snapshot.provenance.sourceRevision },
-      exclusiveControlReleased: "verified"
-    },
-    backupArtifact: { id: `backup:${backup.id}`, digest: sha256Canonical({ backupId: backup.id }) },
-    inversePlanArtifact: {
-      id: `inverse:${result.plan.id}`,
-      digest: sha256Canonical(moveActions.map((action) => ({
-        entityRef: action.operation.entityRef,
-        destinationWorkspaceId: action.operation.inverse.destinationWorkspaceId
-      })))
-    },
-    recoveryArtifact: null,
-    operations: receiptOperations
-  });
-
-  const receiptPath = join(receiptRoot, `${safeSegment(receipt.id)}--domain-apply.json`);
-  await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-  return { ...result, authorization, receipt, receiptPath };
 }
 
-function createManualPlan(snapshot: Snapshot, patch: Patch): Plan {
-  const createdAt = new Date().toISOString();
+function createManualPlan(snapshot: Snapshot, patch: Patch, config: ZtsConfig, now: Date): Plan {
+  const createdAt = now.toISOString();
   const expiresAt = new Date(Date.parse(createdAt) + 5 * 60 * 1000).toISOString();
+  const configRevision = effectiveConfigRevision(config);
+  const intentRevision = sha256Canonical(patch);
   const entities = new Map(snapshot.entities.map((entity) => [entity.ref, entity]));
   const workspaces = new Map(snapshot.workspaces.map((workspace) => [workspace.id, workspace]));
   const actions = patch.operations.map((operation, index): PlanAction => {
@@ -365,7 +150,8 @@ function createManualPlan(snapshot: Snapshot, patch: Patch): Plan {
         disposition: "blocked",
         entityRef: operation.entityRef,
         candidateDestinationWorkspaceId: operation.destinationWorkspaceId,
-        decision
+        decision,
+        dispositionReason: ztsMessage("Patch Operation no longer resolves inside its bound Snapshot")
       };
     }
     if (entity.workspaceId === operation.destinationWorkspaceId) {
@@ -374,7 +160,19 @@ function createManualPlan(snapshot: Snapshot, patch: Patch): Plan {
         disposition: "unchanged",
         entityRef: operation.entityRef,
         candidateDestinationWorkspaceId: operation.destinationWorkspaceId,
-        decision
+        decision,
+        dispositionReason: ztsMessage("Entity already belongs to the requested destination Workspace")
+      };
+    }
+    const movement = movementEligibility(snapshot, entity);
+    if (!movement.eligible) {
+      return {
+        actionId,
+        disposition: "blocked",
+        entityRef: operation.entityRef,
+        candidateDestinationWorkspaceId: operation.destinationWorkspaceId,
+        decision,
+        dispositionReason: ztsMessage(`Entity cannot move through the current Snapshot: ${movement.reason}`)
       };
     }
     const entityProtection = moveProtection(entity.protection, `grant:${actionId}:entity`);
@@ -386,7 +184,32 @@ function createManualPlan(snapshot: Snapshot, patch: Patch): Plan {
         disposition: "protected",
         entityRef: operation.entityRef,
         candidateDestinationWorkspaceId: operation.destinationWorkspaceId,
-        decision
+        decision,
+        dispositionReason: ztsMessage(protectionDispositionReason(
+          entityProtection,
+          sourceProtection,
+          destinationProtection
+        ))
+      };
+    }
+    if (!workspaceAllowedByPolicy(source, config.sort.from)) {
+      return {
+        actionId,
+        disposition: "blocked",
+        entityRef: operation.entityRef,
+        candidateDestinationWorkspaceId: operation.destinationWorkspaceId,
+        decision,
+        dispositionReason: ztsMessage(`Source Workspace ${source.name} is outside the configured source policy`)
+      };
+    }
+    if (!destinationAllowedByPolicy(destination, config.sort.to, config.sort.notTo)) {
+      return {
+        actionId,
+        disposition: "blocked",
+        entityRef: operation.entityRef,
+        candidateDestinationWorkspaceId: operation.destinationWorkspaceId,
+        decision,
+        dispositionReason: ztsMessage(`Destination Workspace ${destination.name} is outside the configured destination policy`)
       };
     }
     return {
@@ -421,15 +244,15 @@ function createManualPlan(snapshot: Snapshot, patch: Patch): Plan {
   });
   return createPlan(snapshot, {
     schemaVersion: "zts.plan.provisional-1",
-    id: `plan:manual:${sha256Canonical({ createdAt, patchRevision: patch.snapshotRevision }).slice("sha256:".length, "sha256:".length + 16)}`,
-    configRevision: sha256Canonical({ source: "manual-patch-defaults" }),
+    id: `plan:manual:${sha256Canonical({ createdAt, intentRevision }).slice("sha256:".length, "sha256:".length + 16)}`,
+    configRevision,
     engineManifestRevision: sha256Canonical({ manual: "zts.manual.provisional-1" }),
     createdAt,
     expiresAt,
     derivation: { kind: "original" },
     source: {
       kind: "manual_patch",
-      intentRevision: sha256Canonical(patch)
+      intentRevision
     },
     actions
   });
@@ -460,25 +283,76 @@ function moveProtection(protection: Protection, grantId: string): MoveProtection
   };
 }
 
-function shortDigest(digest: string): string {
-  return digest.startsWith("sha256:") ? digest.slice("sha256:".length, "sha256:".length + 16) : safeSegment(digest).slice(0, 16);
-}
-
-function safeSegment(value: string): string {
-  const cleaned = value.trim().replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
-  return cleaned || "unknown";
+function protectionDispositionReason(
+  entity: MoveProtectionPrecondition,
+  source: MoveProtectionPrecondition,
+  destination: MoveProtectionPrecondition
+): string {
+  const subjects: string[] = [];
+  if (entity.protected) subjects.push(`Entity (${entity.reasons.join(", ")})`);
+  if (source.protected) subjects.push(`source Workspace (${source.reasons.join(", ")})`);
+  if (destination.protected) subjects.push(`destination Workspace (${destination.reasons.join(", ")})`);
+  return `Explicit Protection grant required for ${subjects.join("; ")}`;
 }
 
 function ztsMessage(value: string): ZtsMessage {
   return { value, provenance: "zts_generated", interpretation: "data_only" };
 }
 
-function isFullPatch(value: unknown): value is Patch {
-  return Boolean(value && typeof value === "object" && (value as { schemaVersion?: unknown }).schemaVersion === "zts.patch.provisional-1");
+function hasCanonicalPatchEnvelope(value: unknown): value is Patch {
+  return Boolean(
+    value
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && (
+      Object.prototype.hasOwnProperty.call(value, "schemaVersion")
+      || Object.prototype.hasOwnProperty.call(value, "snapshotRevision")
+    )
+  );
 }
 
-async function readStdin(): Promise<string> {
+async function readPatchFile(path: string): Promise<Buffer> {
+  const handle = await open(path, "r");
+  try {
+    const metadata = await handle.stat();
+    if (!metadata.isFile()) throw new PatchInputValidationError("Patch input path must be a regular file; use - for stdin");
+    assertPatchInputSize(metadata.size);
+
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    while (true) {
+      const readBytes = Math.min(
+        PATCH_INPUT_READ_CHUNK_BYTES,
+        PATCH_INPUT_MAX_BYTES - totalBytes + 1
+      );
+      const chunk = Buffer.allocUnsafe(readBytes);
+      const result = await handle.read(chunk, 0, readBytes, null);
+      if (result.bytesRead === 0) break;
+      totalBytes += result.bytesRead;
+      assertPatchInputSize(totalBytes);
+      chunks.push(chunk.subarray(0, result.bytesRead));
+    }
+    return Buffer.concat(chunks, totalBytes);
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readStdin(): Promise<Buffer> {
   const chunks: Buffer[] = [];
-  for await (const chunk of process.stdin) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  return Buffer.concat(chunks).toString("utf8");
+  let totalBytes = 0;
+  for await (const chunk of process.stdin) {
+    const byteLength = typeof chunk === "string" ? Buffer.byteLength(chunk) : chunk.byteLength;
+    assertPatchInputSize(totalBytes + byteLength);
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    chunks.push(bytes);
+    totalBytes += bytes.byteLength;
+  }
+  return Buffer.concat(chunks, totalBytes);
+}
+
+function assertPatchInputSize(byteLength: number): void {
+  if (!Number.isSafeInteger(byteLength) || byteLength < 0 || byteLength > PATCH_INPUT_MAX_BYTES) {
+    throw new PatchInputValidationError(`Patch input exceeds the ${PATCH_INPUT_MAX_BYTES}-byte limit`);
+  }
 }

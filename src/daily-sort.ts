@@ -1,14 +1,12 @@
-import { sha256Canonical } from "./domain/digest.js";
+import { effectiveConfigRevision } from "./config.js";
 import { createRulesPlan, rulesPlanRequestRevision } from "./engines/rules.js";
-import { snapshotFromSession } from "./session-snapshot.js";
 import { resolveOrCreatePlan } from "./plans.js";
 
 import type { ZtsConfig } from "./config.js";
 import type { Plan } from "./domain/change.js";
 import type { ArtifactReference, Snapshot } from "./domain/snapshot.js";
+import type { Sha256Digest } from "./domain/digest.js";
 import type { RulesPlanOptions, SortScope } from "./engines/rules.js";
-import type { ProfileContext } from "./profile.js";
-import type { RawZenSession, SessionSummary } from "./session.js";
 
 export interface DailySortRequest {
   readonly scope: SortScope;
@@ -28,7 +26,7 @@ export interface DailySortPlanResult {
   readonly snapshot: Snapshot;
   readonly plan: Plan;
   readonly planResolution: "created" | "reused_latest";
-  readonly requestRevision: string;
+  readonly requestRevision: Sha256Digest;
   readonly artifact: ArtifactReference;
   readonly summary: {
     readonly moveCount: number;
@@ -40,32 +38,12 @@ export interface DailySortPlanResult {
 }
 
 export async function planDailySort(
-  context: ProfileContext,
-  session: RawZenSession,
-  summary: SessionSummary,
+  snapshot: Snapshot,
   config: ZtsConfig,
   request: DailySortRequest,
   now = new Date()
 ): Promise<DailySortPlanResult> {
-  const snapshot = snapshotFromSession(context, session, summary);
-  const configRevision = sha256Canonical({
-    schemaVersion: "zts.sort-config.provisional-1",
-    engine: request.engine,
-    rules: orderedRecord(config.rules.domains),
-    sourceAllowlist: [...config.sort.from],
-    destinationAllowlist: [...request.destinationAllowlist],
-    destinationDenylist: [...request.destinationDenylist],
-    only: [...request.only],
-    except: [...request.except],
-    protectedDomains: [...config.protect.domains.neverMove],
-    workspaceProtection: {
-      from: [...config.protect.workspaces.from],
-      to: [...config.protect.workspaces.to]
-    },
-    includePinned: request.includePinned,
-    includeEssentials: request.includeEssentials,
-    limit: request.limit
-  });
+  const configRevision = effectiveConfigRevision(config);
   const rulesOptions: Omit<RulesPlanOptions, "now"> = {
     scope: request.scope,
     configRevision,
@@ -75,7 +53,6 @@ export async function planDailySort(
     destinationDenylist: request.destinationDenylist,
     only: request.only,
     except: request.except,
-    protectedDomains: config.protect.domains.neverMove,
     includePinned: request.includePinned,
     includeEssentials: request.includeEssentials,
     limit: request.limit,
@@ -99,7 +76,7 @@ export async function planDailySort(
   };
 }
 
-function summarizePlan(plan: Plan): DailySortPlanResult["summary"] {
+export function summarizePlan(plan: Plan): DailySortPlanResult["summary"] {
   return {
     moveCount: countDisposition(plan, "move"),
     reviewCount: countDisposition(plan, "review"),
@@ -111,8 +88,4 @@ function summarizePlan(plan: Plan): DailySortPlanResult["summary"] {
 
 function countDisposition(plan: Plan, disposition: Plan["actions"][number]["disposition"]): number {
   return plan.actions.filter((action) => action.disposition === disposition).length;
-}
-
-function orderedRecord(value: Readonly<Record<string, string>>): Readonly<Record<string, string>> {
-  return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)));
 }

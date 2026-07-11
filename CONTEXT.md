@@ -14,7 +14,7 @@ Use these terms consistently in code, tests, documentation, and review.
 - **Workspace**: the user-facing Zen destination and source for organization. It corresponds to an upstream Zen Space. Use "Space" only in Adapter-facing code that mirrors Zen.
 - **Entity**: one normalized structural node. Only a top-level **Movement Root** may be moved; its revision and operation include its complete ordered descendant closure. Avoid "item" and "row".
 - **Snapshot**: an immutable normalized view of one Profile at one observed revision. It contains provenance, authority, Workspaces, Entities, and Capabilities. Avoid "session" outside Adapter-facing code.
-- **Persisted Observation**: a non-authoritative Snapshot read from disk while newer in-memory Zen state may exist. It may support display and preview, but it is never executable apply state.
+- **Persisted Observation**: a non-authoritative Snapshot read from disk without holding Zen/Gecko's native Profile control. Newer in-memory state or a concurrent opener may exist. It may support display and preview, but it is never executable apply state.
 - **Protection**: user-owned policy preventing an Entity or Workspace from participating in a change without an explicit typed grant. Avoid treating Protection as a filter or incidental skip.
 - **Patch**: an untrusted human- or agent-authored request for exact changes against one Snapshot revision. A Patch is not a Plan.
 - **Plan**: an immutable, read-only zts audit artifact containing validated decisions and exact preconditions. Its Profile, Snapshot revision, authority, and freshness are derived from the validated Snapshot passed to the Plan factory, then bound with configuration and intent revisions. Avoid using "preview" for the domain artifact.
@@ -52,7 +52,7 @@ The CLI is a composition caller, not the owner of workflow correctness. Presenta
 ## Non-negotiable invariants
 
 1. An Engine proposes intent and never mutates Zen.
-2. A disk read while Zen is running is a Persisted Observation, not authoritative apply state.
+2. Process absence is not authority. A closed-session Snapshot is authoritative only when zts holds the exact Profile's Gecko-compatible native `.parentlock` across the source read; every other disk read is a Persisted Observation.
 3. A Patch derives its revision binding from, and is validated against, the actual Snapshot before it can become a Plan. Caller-authored reasons remain attributed data and every referenced Entity must belong to that Snapshot.
 4. Entity closure, normalized Snapshot state, Plan content, Protection grants, and Apply Authorization are content-addressed with canonical SHA-256 digests. Plan creation, authorization, and Receipt validation all receive and revalidate the actual Snapshot; authority is never caller-declared.
 5. Apply Authorization covers every executable action in one exact Plan. Applying a subset first creates a derived Plan with a new digest.
@@ -64,6 +64,10 @@ The CLI is a composition caller, not the owner of workflow correctness. Presenta
 11. Semantic automatic apply requires explicit user opt-in, separate suggestion and apply thresholds, an engine-specific calibration and model revision, a minimum margin, and the normal safety gates. Eligibility is derived from that evidence.
 12. Unknown Zen schema or unproven Control Route capability fails closed for mutation.
 13. User-owned state and artifacts are private by default: zts directories use `0700` and files use `0600`.
+14. A Profile id is opaque and derived from its canonical filesystem target. Same-named or retargeted Profile directories cannot share Snapshots, Plans, locks, or Apply Transaction stores.
+15. Every non-terminal Apply Transaction has exactly one owner-private unfinished marker. A bounded store reservation may be recorded first, but the marker is the first durable transaction artifact and contains enough validated consent, Authorization, Plan, and journal bootstrap identity to recover a marker-only crash. It remains until the canonical terminal Receipt is reachable, the reservation is settled, and required Profile-control cleanup is durable. Marker removal is last.
+16. Completed saved-Plan history is one content-addressed, generation-bound linked Receipt ledger. An immutable node is durable before one atomic ready-head swap under persistent kernel store control; the head binds the latest transaction and Receipt digest. Exactly one unfinished marker plus its exact reservation authorizes a new append. A markerless repeat may only validate an already-reachable Receipt. Profile- and generation-bound authenticated cursors traverse requested canonical nodes, and corruption is never treated as absence or migration.
+17. Apply-store growth is bounded by a small conservative accounting head. Transaction and maintenance reservations precede artifact growth and dominate every bounded payload plus publication temporary. Read-only retention preview binds an exact deterministic target/GC revision. Mutation builds an immutable generation off-head, publishes one fixed source/target/deletion manifest, performs one head swap, and idempotently reconciles exact deletions. Full Receipts age to `archived_summary_only` inside the same bounded ledger; unfinished work, incomplete maintenance, capacity pressure, or an unsafe manifest blocks Apply.
 
 ## Product scope
 

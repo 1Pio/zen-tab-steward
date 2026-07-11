@@ -2,6 +2,34 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { defineRawSession, listTabs, summarizeSession, withWorkspacePolicy } from "../dist/session.js";
 
+test("summarizes maximum-cardinality workspace tabs with linear array access", () => {
+  const tabs = Array.from({ length: 10_000 }, (_, index) => ({
+    zenSyncId: `tab-${index}`,
+    zenWorkspace: `workspace-${index}`,
+    pinned: index % 2 === 0,
+    zenEssential: index % 5 === 0,
+    entries: [{ url: `https://example.test/${index}`, title: `Tab ${index}` }]
+  }));
+  let numericReads = 0;
+  const observedTabs = new Proxy(tabs, {
+    get(target, property, receiver) {
+      if (typeof property === "string" && /^\d+$/u.test(property)) numericReads += 1;
+      return Reflect.get(target, property, receiver);
+    }
+  });
+  const summary = summarizeSession({ tabs: observedTabs }, {
+    kind: "zen-sessions",
+    path: "/fixture/zen-sessions.jsonlz4",
+    size: 1,
+    modifiedMs: 1
+  });
+  assert.equal(summary.workspaceCount, 10_000);
+  assert.equal(summary.tabCount, 10_000);
+  assert.equal(summary.pinnedCount, 5_000);
+  assert.equal(summary.essentialCount, 2_000);
+  assert.ok(numericReads <= tabs.length * 3, `summarization performed ${numericReads} tab-array reads`);
+});
+
 const source = {
   kind: "zen-sessions",
   path: "/tmp/profile/zen-sessions.jsonlz4",

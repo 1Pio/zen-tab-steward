@@ -304,7 +304,7 @@ const manualPatch = createPatch(closedSnapshot, {
       entityRef: tabEntity.ref,
       expectedSourceWorkspaceId: "workspace-inbox",
       destinationWorkspaceId: "workspace-research",
-      reason: callerText("Agent selected the exact Research Workspace", [tabEntity.ref])
+      reason: "Agent selected the exact Research Workspace"
     }
   ]
 } as const);

@@ -9,10 +9,18 @@ import {
   defineApplyAuthorization,
   definePatch,
   definePlan,
-  defineReceipt
+  defineReceipt,
+  PATCH_DOMAIN_LIMITS,
+  RECEIPT_DOMAIN_LIMITS
 } from "../dist/domain/change.js";
-import { createSnapshot, defineSnapshot } from "../dist/domain/snapshot.js";
+import {
+  createSnapshot,
+  defineSnapshot,
+  SNAPSHOT_IDENTITY_MAX_BYTES
+} from "../dist/domain/snapshot.js";
 import { sha256Canonical } from "../dist/domain/digest.js";
+import { DEFAULT_CONFIG } from "../dist/config.js";
+import { createManualPlanFromInput } from "../dist/manual.js";
 
 const digest = (character) => `sha256:${character.repeat(64)}`;
 const artifact = (id, value = "a") => ({ id, digest: value.startsWith("sha256:") ? value : digest(value) });
@@ -79,6 +87,19 @@ function snapshotFixture() {
             source: "runtime_probe",
             capturedAt: "2026-07-10T08:00:00.000Z",
             scope,
+            controlSessionId: null,
+            processBindingRevision: null
+          }
+        },
+        {
+          id: "move.tab",
+          status: "available",
+          reason: "Synthetic closed-session tab movement fixture",
+          proof: {
+            artifact: artifact("proof:move-tab", "1"),
+            source: "runtime_probe",
+            capturedAt: "2026-07-10T08:00:00.000Z",
+            scope: { ...scope, entityKind: "tab" },
             controlSessionId: null,
             processBindingRevision: null
           }
@@ -364,6 +385,85 @@ test("Snapshot constructor validates proof scope, marks browser content untruste
   assert.throws(() => createSnapshot(blankTabNativeId), /native id/i);
 });
 
+test("Snapshot, Plan, and Receipt repeated identities have exact UTF-8 budgets", () => {
+  const exactWorkspaceId = "w".repeat(SNAPSHOT_IDENTITY_MAX_BYTES);
+  const exactSnapshotDraft = snapshotFixture();
+  exactSnapshotDraft.workspaces[0].id = exactWorkspaceId;
+  exactSnapshotDraft.entities[0].workspaceId = exactWorkspaceId;
+  assert.equal(createSnapshot(exactSnapshotDraft).workspaces[0].id, exactWorkspaceId);
+
+  const oversizedWorkspace = snapshotFixture();
+  oversizedWorkspace.workspaces[0].id = "w".repeat(SNAPSHOT_IDENTITY_MAX_BYTES + 1);
+  oversizedWorkspace.entities[0].workspaceId = oversizedWorkspace.workspaces[0].id;
+  assert.throws(() => createSnapshot(oversizedWorkspace), /Workspace id exceeds.*UTF-8/iu);
+
+  const oversizedNative = snapshotFixture();
+  oversizedNative.entities[0].nativeId = "n".repeat(SNAPSHOT_IDENTITY_MAX_BYTES + 1);
+  oversizedNative.entities[0].members[0].nativeId = oversizedNative.entities[0].nativeId;
+  assert.throws(() => createSnapshot(oversizedNative), /native id exceeds.*UTF-8/iu);
+
+  const snapshot = planSnapshotFixture();
+  const exactPlanDraft = planFixture(snapshot);
+  exactPlanDraft.id = "p".repeat(RECEIPT_DOMAIN_LIMITS.maxIdentityBytes);
+  const exactPlan = createPlan(snapshot, exactPlanDraft);
+  assert.equal(Buffer.byteLength(exactPlan.id), RECEIPT_DOMAIN_LIMITS.maxIdentityBytes);
+
+  const oversizedPlan = planFixture(snapshot);
+  oversizedPlan.actions[0].actionId = "a".repeat(RECEIPT_DOMAIN_LIMITS.maxIdentityBytes + 1);
+  assert.throws(() => createPlan(snapshot, oversizedPlan), /Plan action id exceeds.*UTF-8/iu);
+
+  const plan = createPlan(snapshot, planFixture(snapshot));
+  const authorization = createApplyAuthorization(snapshot, plan, authorizationFixture(plan));
+  const exactMessage = blockedReceiptFixture(plan, authorization);
+  exactMessage.issues[0].message.value = "m".repeat(RECEIPT_DOMAIN_LIMITS.maxMessageBytes);
+  assert.equal(
+    defineReceipt(snapshot, plan, authorization, exactMessage).issues[0].message.value.length,
+    RECEIPT_DOMAIN_LIMITS.maxMessageBytes
+  );
+  const oversizedMessage = blockedReceiptFixture(plan, authorization);
+  oversizedMessage.issues[0].message.value = "m".repeat(RECEIPT_DOMAIN_LIMITS.maxMessageBytes + 1);
+  assert.throws(
+    () => defineReceipt(snapshot, plan, authorization, oversizedMessage),
+    /issue message exceeds.*UTF-8/iu
+  );
+  const tooManyOperationIssues = blockedReceiptFixture(plan, authorization);
+  tooManyOperationIssues.operations[0].issueCodes = ["a", "b", "c", "d", "e"];
+  assert.throws(
+    () => defineReceipt(snapshot, plan, authorization, tooManyOperationIssues),
+    /at most 4 issue codes/iu
+  );
+});
+
+test("manual Plans bind distinct Patch intent and enforce shared Workspace policy", () => {
+  const snapshot = createSnapshot(snapshotFixture());
+  const now = new Date("2026-07-10T08:01:00.000Z");
+  const operation = {
+    op: "move",
+    entityRef: snapshot.entities[0].ref,
+    expectedSourceWorkspaceId: "workspace-inbox",
+    destinationWorkspaceId: "workspace-research",
+    reason: "First exact reason"
+  };
+  const first = createManualPlanFromInput(snapshot, { operations: [operation] }, structuredClone(DEFAULT_CONFIG), now);
+  const second = createManualPlanFromInput(snapshot, {
+    operations: [{ ...operation, reason: "Different exact reason" }]
+  }, structuredClone(DEFAULT_CONFIG), now);
+  assert.notEqual(first.plan.id, second.plan.id);
+  assert.notEqual(first.plan.source.intentRevision, second.plan.source.intentRevision);
+
+  const destinationDenied = structuredClone(DEFAULT_CONFIG);
+  destinationDenied.sort.notTo = ["Research"];
+  const denied = createManualPlanFromInput(snapshot, { operations: [operation] }, destinationDenied, now);
+  assert.equal(denied.plan.actions[0].disposition, "blocked");
+  assert.match(denied.plan.actions[0].dispositionReason.value, /destination policy/iu);
+
+  const sourceExcluded = structuredClone(DEFAULT_CONFIG);
+  sourceExcluded.sort.from = ["Research"];
+  const excluded = createManualPlanFromInput(snapshot, { operations: [operation] }, sourceExcluded, now);
+  assert.equal(excluded.plan.actions[0].disposition, "blocked");
+  assert.match(excluded.plan.actions[0].dispositionReason.value, /source policy/iu);
+});
+
 test("Snapshot constructor validates nested-folder Movement Root closure", () => {
   const snapshot = snapshotFixture();
   const member = structuredClone(snapshot.entities[0].members[0]);
@@ -405,17 +505,19 @@ test("Snapshot constructor validates nested-folder Movement Root closure", () =>
 
 test("Patch constructor derives exact Snapshot binding and validates untrusted intent", () => {
   const snapshot = planSnapshotFixture();
+  const draftOperation = {
+    op: "move",
+    entityRef: "entity:root:tab-1",
+    expectedSourceWorkspaceId: "workspace-inbox",
+    destinationWorkspaceId: "workspace-research",
+    reason: "Move this exact tab"
+  };
   const patch = createPatch(snapshot, {
-    operations: [{
-      op: "move",
-      entityRef: "entity:root:tab-1",
-      expectedSourceWorkspaceId: "workspace-inbox",
-      destinationWorkspaceId: "workspace-research",
-      reason: callerText("Move this exact tab", ["entity:root:tab-1"])
-    }]
+    operations: [draftOperation]
   });
   assert.equal(patch.snapshotRevision, snapshot.revision);
   assert.equal(Object.isFrozen(patch.operations[0].reason), true);
+  assert.deepEqual(patch.operations[0].reason, callerText("Move this exact tab", ["entity:root:tab-1"]));
 
   const stale = structuredClone(patch);
   stale.snapshotRevision = digest("f");
@@ -447,10 +549,92 @@ test("Patch constructor derives exact Snapshot binding and validates untrusted i
 
   assert.throws(
     () => createPatch(snapshot, {
-      operations: patch.operations,
+      operations: [draftOperation],
       backend: "live"
     }),
     /Patch draft contains unknown field backend/
+  );
+
+  assert.throws(
+    () => createPatch(snapshot, {
+      operations: Array.from({ length: 501 }, () => structuredClone(draftOperation))
+    }),
+    /at most 500 Operations/
+  );
+  const excessiveFullPatch = structuredClone(patch);
+  excessiveFullPatch.operations = Array.from(
+    { length: 501 },
+    () => structuredClone(patch.operations[0])
+  );
+  assert.throws(() => definePatch(snapshot, excessiveFullPatch), /at most 500 Operations/);
+
+  const excessiveReason = structuredClone(draftOperation);
+  excessiveReason.reason = "x".repeat(PATCH_DOMAIN_LIMITS.maxReasonLength + 1);
+  assert.throws(
+    () => createPatch(snapshot, { operations: [excessiveReason] }),
+    /may contain at most 16384 characters/
+  );
+
+  assert.throws(
+    () => createPatch(snapshot, {
+      operations: [{ ...draftOperation, reason: callerText("Caller-forged provenance") }]
+    }),
+    /Patch draft reason .* must be a string/
+  );
+
+  const excessiveReasonReferences = structuredClone(patch);
+  excessiveReasonReferences.operations[0].reason.referencedEntityRefs = Array.from(
+    { length: PATCH_DOMAIN_LIMITS.maxReferencesPerReason + 1 },
+    (_, index) => `entity:root:tab-${index + 1}`
+  );
+  assert.throws(
+    () => definePatch(snapshot, excessiveReasonReferences),
+    /may reference at most 64 Entities/
+  );
+
+  const excessiveTotalReferences = Array.from({ length: 32 }, () => {
+    const operation = structuredClone(patch.operations[0]);
+    operation.reason.referencedEntityRefs = Array.from(
+      { length: 63 },
+      (_, index) => `entity:root:tab-${index + 1}`
+    );
+    return operation;
+  });
+  const excessiveFullPatchReferences = structuredClone(patch);
+  excessiveFullPatchReferences.operations = excessiveTotalReferences;
+  assert.throws(
+    () => definePatch(snapshot, excessiveFullPatchReferences),
+    /Patch may reference at most 2000 Entities in total/
+  );
+});
+
+test("Patch budgets preserve full-detail valid inputs at their principal boundaries", () => {
+  const snapshot = planSnapshotFixture(PATCH_DOMAIN_LIMITS.maxOperations);
+  const referenceSet = snapshot.entities
+    .slice(0, PATCH_DOMAIN_LIMITS.maxReferencesPerReason)
+    .map((entity) => entity.ref);
+  const patch = createPatch(snapshot, {
+    operations: snapshot.entities.map((entity, index) => ({
+      op: "move",
+      entityRef: entity.ref,
+      expectedSourceWorkspaceId: "workspace-inbox",
+      destinationWorkspaceId: "workspace-research",
+      reason: index === 0
+        ? "x".repeat(PATCH_DOMAIN_LIMITS.maxReasonLength)
+        : `Complete agent rationale for ${entity.ref}`
+    }))
+  });
+
+  assert.equal(patch.operations.length, PATCH_DOMAIN_LIMITS.maxOperations);
+  assert.equal(patch.operations[0].reason.value.length, PATCH_DOMAIN_LIMITS.maxReasonLength);
+  assert.deepEqual(patch.operations[0].reason.referencedEntityRefs, [snapshot.entities[0].ref]);
+
+  const fullDetailPatch = structuredClone(patch);
+  fullDetailPatch.operations[0].reason.referencedEntityRefs = referenceSet;
+  const defined = definePatch(snapshot, fullDetailPatch);
+  assert.equal(
+    defined.operations[0].reason.referencedEntityRefs.length,
+    PATCH_DOMAIN_LIMITS.maxReferencesPerReason
   );
 });
 
@@ -509,6 +693,43 @@ test("Semantic suggestion and automatic-apply decisions are derived from complet
     }),
     /Semantic decision input contains unknown field command/
   );
+});
+
+test("non-move Plan actions preserve separate zts policy rationale", () => {
+  const snapshot = planSnapshotFixture();
+  const draft = planFixture(snapshot);
+  const move = draft.actions[0];
+  draft.actions = [{
+    actionId: move.actionId,
+    disposition: "review",
+    entityRef: move.operation.entityRef,
+    candidateDestinationWorkspaceId: move.operation.expectedPostState.workspaceId,
+    decision: move.decision,
+    dispositionReason: ztsMessage("Current policy requires review before movement")
+  }];
+
+  const plan = createPlan(snapshot, draft);
+  assert.equal(plan.actions[0].decision.explanation.provenance, "caller_untrusted");
+  assert.deepEqual(
+    plan.actions[0].dispositionReason,
+    ztsMessage("Current policy requires review before movement")
+  );
+
+  const missingReason = structuredClone(draft);
+  delete missingReason.actions[0].dispositionReason;
+  assert.throws(() => createPlan(snapshot, missingReason), /missing field dispositionReason/);
+
+  const forgedProvenance = structuredClone(draft);
+  forgedProvenance.actions[0].dispositionReason.provenance = "caller_untrusted";
+  assert.throws(() => createPlan(snapshot, forgedProvenance), /must be non-empty zts-generated data/);
+
+  const commandLikePolicy = structuredClone(draft);
+  commandLikePolicy.actions[0].dispositionReason.command = "apply-all";
+  assert.throws(() => createPlan(snapshot, commandLikePolicy), /disposition reason contains unknown field command/);
+
+  const leakedMovePolicy = planFixture(snapshot);
+  leakedMovePolicy.actions[0].dispositionReason = ztsMessage("Unexpected move policy");
+  assert.throws(() => createPlan(snapshot, leakedMovePolicy), /Plan action .* unknown field dispositionReason/);
 });
 
 test("Apply Authorization binds the exact Plan, actions, Trust Classes, and lifecycle", () => {
@@ -664,10 +885,9 @@ test("Apply Authorization binds the exact Plan, actions, Trust Classes, and life
   persistedObserve.proof.scope.route = "persisted_session";
   persistedDraft.capabilities.evidence = [persistedObserve];
   const persistedSnapshot = createSnapshot(persistedDraft);
-  const persistedPlan = createPlan(persistedSnapshot, planFixture(persistedSnapshot));
   assert.throws(
-    () => createApplyAuthorization(persistedSnapshot, persistedPlan, authorizationFixture(persistedPlan)),
-    /current authoritative Plan Snapshot/
+    () => createPlan(persistedSnapshot, planFixture(persistedSnapshot)),
+    /not mutation-eligible.*Persisted/iu
   );
 });
 

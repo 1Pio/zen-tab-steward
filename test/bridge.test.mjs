@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { bidiBaseUrlFromLog, inspectBridge, inspectLiveAttachment, runBridgeLiveMoveProof, runBridgeLiveReadProof, runBridgeProbe, summarizeBridgeProcess, validateBidiSessionStatus, validateBridgeLiveMoveProof, validateBridgeLiveReadProof, validateBridgeProbeScriptProof, validateBridgeProbeWorkspaceOperation } from "../dist/bridge.js";
+import { bidiBaseUrlFromLog, bridgeProbeLaunchArgs, inspectBridge, inspectLiveAttachment, runBridgeLiveReadProof, runBridgeProbe, summarizeBridgeProcess, validateBidiSessionStatus, validateBridgeLiveReadProof, validateBridgeProbeScriptProof, validateBridgeProbeWorkspaceOperation } from "../dist/bridge.js";
 import { parseZenProcesses } from "../dist/processes.js";
 
 const profilePath = "/Users/main/Library/Application Support/zen/Profiles/4le6r9n3.Default (release)";
@@ -11,13 +11,15 @@ const profilePath = "/Users/main/Library/Application Support/zen/Profiles/4le6r9
 test("bridge inspection fails closed when Zen is not running", () => {
   const inspection = inspectBridge(context({ running: false, runningProcesses: [] }));
 
-  assert.equal(inspection.liveBackend.status, "gated");
-  assert.equal(inspection.liveBackend.applySupported, true);
+  assert.equal(inspection.liveBackend.status, "unavailable");
+  assert.equal(inspection.liveBackend.applySupported, false);
   assert.equal(inspection.candidateTransportDetected, false);
   assert.equal(inspection.candidatePrivilegedTransportDetected, false);
-  assert.match(inspection.blockers.join("\n"), /requires an attachable Zen bridge/);
+  assert.match(inspection.blockers.join("\n"), /production live tab mutation is unavailable/i);
   assert.match(inspection.blockers.join("\n"), /not running/);
-  assert.equal(inspection.checks.find((check) => check.id === "live_client").status, "warn");
+  assert.equal(inspection.checks.find((check) => check.id === "live_client").status, "fail");
+  assert.equal(inspection.checks.find((check) => check.id === "live_read_tools").status, "pass");
+  assert.match(inspection.liveBackend.reason, /read-only attachment inspection.*production live tab mutation is unavailable/i);
 });
 
 test("bridge inspection detects privileged remote launch evidence without treating it as attachment proof", () => {
@@ -34,10 +36,10 @@ test("bridge inspection detects privileged remote launch evidence without treati
 
   assert.equal(inspection.candidateTransportDetected, true);
   assert.equal(inspection.candidatePrivilegedTransportDetected, true);
-  assert.equal(inspection.liveBackend.status, "gated");
-  assert.equal(inspection.liveBackend.applySupported, true);
-  assert.deepEqual(inspection.blockers, ["Live sort apply requires an attachable Zen bridge; run zts bridge live-check --connect for the current gate receipt"]);
-  assert.match(inspection.warnings.join("\n"), /Remote launch flags are only transport evidence/);
+  assert.equal(inspection.liveBackend.status, "unavailable");
+  assert.equal(inspection.liveBackend.applySupported, false);
+  assert.deepEqual(inspection.blockers, ["Production live tab mutation is unavailable; attachment evidence does not enable apply"]);
+  assert.match(inspection.warnings.join("\n"), /Remote launch flags are transport evidence only/);
 });
 
 test("bridge process summary ignores content process flags for browser readiness", () => {
@@ -70,6 +72,24 @@ test("profile-less browser parent process is treated as applicable to the discov
   assert.equal(process.flags.remoteDebuggingPort, true);
 });
 
+test("bridge process matching uses canonical Profile identity across path aliases", async () => {
+  const temp = await mkdtemp(join(tmpdir(), "zts-bridge-profile-alias-"));
+  const target = join(temp, "target.Default");
+  const alias = join(temp, "alias.Default");
+  try {
+    await mkdir(target);
+    await symlink(target, alias);
+    const process = summarizeBridgeProcess({
+      pid: 10,
+      args: `/Applications/Zen.app/Contents/MacOS/zen --profile ${alias}`,
+      profilePath: alias
+    }, target);
+    assert.equal(process.profileMatched, true);
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
 test("bridge inspection detects candidate flags from parsed ps output with trailing launch flags", () => {
   const output = `101 /Applications/Zen.app/Contents/MacOS/zen -profile ${profilePath} --remote-debugging-port=9222 --remote-allow-system-access --remote-allow-hosts localhost --remote-allow-origins http://127.0.0.1:9222`;
   const runningProcesses = parseZenProcesses(output);
@@ -78,7 +98,7 @@ test("bridge inspection detects candidate flags from parsed ps output with trail
   assert.equal(runningProcesses[0].profilePath, profilePath);
   assert.equal(inspection.candidateTransportDetected, true);
   assert.equal(inspection.candidatePrivilegedTransportDetected, true);
-  assert.deepEqual(inspection.blockers, ["Live sort apply requires an attachable Zen bridge; run zts bridge live-check --connect for the current gate receipt"]);
+  assert.deepEqual(inspection.blockers, ["Production live tab mutation is unavailable; attachment evidence does not enable apply"]);
 });
 
 test("live attachment check refuses when the profile has no BiDi server file", async () => {
@@ -98,7 +118,7 @@ test("live attachment check refuses when the profile has no BiDi server file", a
   }
 });
 
-test("live attachment check refuses local server file until session.status is checked", async () => {
+test("live attachment check refuses a local server file without endpoint ownership", async () => {
   const temp = await mkdtemp(join(tmpdir(), "zts-live-check-pass-"));
   try {
     await writeFile(join(temp, "WebDriverBiDiServer.json"), JSON.stringify({ ws_host: "127.0.0.1", ws_port: 9222 }));
@@ -111,14 +131,14 @@ test("live attachment check refuses local server file until session.status is ch
     assert.equal(inspection.attachable, false);
     assert.equal(inspection.serverFileExists, true);
     assert.equal(inspection.endpoint.websocketUrl, "ws://127.0.0.1:9222/session");
-    assert.match(inspection.blockers.join("\n"), /session\.status was not checked/);
+    assert.match(inspection.blockers.join("\n"), /endpoint ownership.*not established/iu);
     assert.equal(inspection.checks.find((check) => check.id === "local_endpoint").status, "pass");
   } finally {
     await rm(temp, { recursive: true, force: true });
   }
 });
 
-test("live attachment check passes after connected session.status proof", async () => {
+test("live attachment refuses connection until endpoint ownership is proven", async () => {
   const temp = await mkdtemp(join(tmpdir(), "zts-live-check-connect-"));
   const originalWebSocket = globalThis.WebSocket;
   try {
@@ -130,10 +150,10 @@ test("live attachment check passes after connected session.status proof", async 
       runningProcesses: [privilegedBrowserProcess(temp)]
     }), { connect: true, timeoutMs: 1000 });
 
-    assert.equal(inspection.attachable, true);
-    assert.deepEqual(inspection.blockers, []);
-    assert.equal(inspection.checkedEndpoint, true);
-    assert.equal(inspection.checks.find((check) => check.id === "session_status").status, "pass");
+    assert.equal(inspection.attachable, false);
+    assert.equal(inspection.checkedEndpoint, false);
+    assert.match(inspection.blockers.join("\n"), /endpoint ownership.*unproven|ownership is not established/iu);
+    assert.equal(inspection.checks.find((check) => check.id === "endpoint_ownership").status, "fail");
   } finally {
     globalThis.WebSocket = originalWebSocket;
     await rm(temp, { recursive: true, force: true });
@@ -196,6 +216,40 @@ test("live attachment check refuses malformed BiDi server files", async () => {
   }
 });
 
+test("live attachment check bounds and no-follows the untrusted BiDi server file", async () => {
+  const oversizedProfile = await mkdtemp(join(tmpdir(), "zts-live-check-oversized-"));
+  const linkedProfile = await mkdtemp(join(tmpdir(), "zts-live-check-linked-"));
+  try {
+    await writeFile(
+      join(oversizedProfile, "WebDriverBiDiServer.json"),
+      JSON.stringify({ ws_host: "127.0.0.1", ws_port: 9222, padding: "x".repeat(64 * 1024) })
+    );
+    const oversized = await inspectLiveAttachment(context({
+      profilePath: oversizedProfile,
+      running: true,
+      runningProcesses: [privilegedBrowserProcess(oversizedProfile)]
+    }));
+    assert.equal(oversized.attachable, false);
+    assert.equal(oversized.serverFileExists, true);
+    assert.match(oversized.blockers.join("\n"), /65536-byte bound/iu);
+
+    const target = join(linkedProfile, "server-target.json");
+    await writeFile(target, JSON.stringify({ ws_host: "127.0.0.1", ws_port: 9222 }));
+    await symlink(target, join(linkedProfile, "WebDriverBiDiServer.json"));
+    const linked = await inspectLiveAttachment(context({
+      profilePath: linkedProfile,
+      running: true,
+      runningProcesses: [privilegedBrowserProcess(linkedProfile)]
+    }));
+    assert.equal(linked.attachable, false);
+    assert.equal(linked.serverFileExists, true);
+    assert.match(linked.blockers.join("\n"), /safely read|symbolic link|too many levels/iu);
+  } finally {
+    await rm(oversizedProfile, { recursive: true, force: true });
+    await rm(linkedProfile, { recursive: true, force: true });
+  }
+});
+
 test("live read proof refuses before the attachment gate passes", async () => {
   const temp = await mkdtemp(join(tmpdir(), "zts-live-read-refuse-"));
   try {
@@ -213,7 +267,7 @@ test("live read proof refuses before the attachment gate passes", async () => {
   }
 });
 
-test("live read proof validates connected browser-chrome state without mutation", async () => {
+test("live read proof stays disabled without endpoint ownership", async () => {
   const temp = await mkdtemp(join(tmpdir(), "zts-live-read-pass-"));
   const originalWebSocket = globalThis.WebSocket;
   try {
@@ -225,93 +279,11 @@ test("live read proof validates connected browser-chrome state without mutation"
       runningProcesses: [privilegedBrowserProcess(temp)]
     }), { timeoutMs: 1000 });
 
-    assert.equal(receipt.ok, true);
-    assert.deepEqual(receipt.blockers, []);
-    assert.equal(receipt.readProof.chromeUrl, "chrome://browser/content/browser.xhtml");
-    assert.equal(receipt.readProof.zenWorkspacesDetected, true);
-    assert.equal(receipt.readProof.workspaceCount, 3);
-    assert.equal(receipt.readProof.activeWorkspaceId, "workspace-1");
-  } finally {
-    globalThis.WebSocket = originalWebSocket;
-    await rm(temp, { recursive: true, force: true });
-  }
-});
-
-test("live move proof refuses without explicit confirmation and selectors", async () => {
-  const temp = await mkdtemp(join(tmpdir(), "zts-live-move-refuse-"));
-  try {
-    const receipt = await runBridgeLiveMoveProof(context({
-      profilePath: temp,
-      running: true,
-      runningProcesses: [privilegedBrowserProcess(temp)]
-    }), { timeoutMs: 1000 });
-
     assert.equal(receipt.ok, false);
-    assert.equal(receipt.attachment, null);
-    assert.equal(receipt.moveProof, null);
-    assert.match(receipt.blockers.join("\n"), /confirm-live-move/);
-    assert.match(receipt.blockers.join("\n"), /--url/);
-  } finally {
-    await rm(temp, { recursive: true, force: true });
-  }
-});
-
-test("live move proof validates one explicit eligible tab move", async () => {
-  const temp = await mkdtemp(join(tmpdir(), "zts-live-move-pass-"));
-  const originalWebSocket = globalThis.WebSocket;
-  try {
-    await writeFile(join(temp, "WebDriverBiDiServer.json"), JSON.stringify({ ws_host: "127.0.0.1", ws_port: 9222 }));
-    globalThis.WebSocket = FakeWebSocket;
-    const receipt = await runBridgeLiveMoveProof(context({
-      profilePath: temp,
-      running: true,
-      runningProcesses: [privilegedBrowserProcess(temp)]
-    }), {
-      timeoutMs: 1000,
-      confirmLiveMove: true,
-      url: "https://example.test",
-      fromWorkspaceId: "workspace-1",
-      toWorkspaceId: "workspace-2"
-    });
-
-    assert.equal(receipt.ok, true);
-    assert.deepEqual(receipt.blockers, []);
-    assert.equal(receipt.moveProof.requestedUrl, "https://example.test");
-    assert.equal(receipt.moveProof.beforeWorkspaceId, "workspace-1");
-    assert.equal(receipt.moveProof.afterWorkspaceId, "workspace-2");
-    assert.equal(receipt.moveProof.moved, true);
+    assert.equal(receipt.readProof, null);
+    assert.match(receipt.blockers.join("\n"), /endpoint ownership.*unproven|ownership is not established/iu);
   } finally {
     globalThis.WebSocket = originalWebSocket;
-    await rm(temp, { recursive: true, force: true });
-  }
-});
-
-test("live move proof refuses before mutation when mutation session.status is not ready", async () => {
-  const temp = await mkdtemp(join(tmpdir(), "zts-live-move-not-ready-"));
-  const originalWebSocket = globalThis.WebSocket;
-  try {
-    await writeFile(join(temp, "WebDriverBiDiServer.json"), JSON.stringify({ ws_host: "127.0.0.1", ws_port: 9222 }));
-    globalThis.WebSocket = FakeNotReadyOnSecondConnectionWebSocket;
-    const receipt = await runBridgeLiveMoveProof(context({
-      profilePath: temp,
-      running: true,
-      runningProcesses: [privilegedBrowserProcess(temp)]
-    }), {
-      timeoutMs: 1000,
-      confirmLiveMove: true,
-      url: "https://example.test",
-      fromWorkspaceId: "workspace-1",
-      toWorkspaceId: "workspace-2"
-    });
-
-    assert.equal(receipt.ok, false);
-    assert.equal(receipt.moveProof, null);
-    assert.match(receipt.blockers.join("\n"), /reported not ready/);
-    assert.equal(FakeNotReadyOnSecondConnectionWebSocket.scriptEvaluateCount, 0);
-  } finally {
-    globalThis.WebSocket = originalWebSocket;
-    FakeNotReadyOnSecondConnectionWebSocket.connectionCount = 0;
-    FakeNotReadyOnSecondConnectionWebSocket.scriptEvaluateCount = 0;
     await rm(temp, { recursive: true, force: true });
   }
 });
@@ -326,6 +298,14 @@ test("extracts the last WebDriver BiDi listener from probe logs", () => {
 
   assert.equal(bidiBaseUrlFromLog(log), "ws://127.0.0.1:22222");
   assert.equal(bidiBaseUrlFromLog("no listener"), null);
+});
+
+test("bridge probe launch exposes no wildcard origin or host allowlist", () => {
+  const args = bridgeProbeLaunchArgs("/tmp/zts-probe/profile", 9222);
+  assert.equal(args.includes("--remote-allow-system-access"), true);
+  assert.equal(args.some((value) => value.includes("remote-allow-origins")), false);
+  assert.equal(args.some((value) => value.includes("remote-allow-hosts")), false);
+  assert.equal(args.includes("*"), false);
 });
 
 test("validates WebDriver BiDi session.status success shape", () => {
@@ -383,25 +363,6 @@ test("validates live read proof shape and Zen chrome reachability", () => {
   assert.match(validateBridgeLiveReadProof({ ...proof, chromeEvaluation: remoteObject({ href: "chrome://browser/content/browser.xhtml", hasZenWorkspaces: false, zenWorkspacesType: "object", workspaceCount: 3 }) }), /gZenWorkspaces/);
   assert.match(validateBridgeLiveReadProof({ ...proof, chromeEvaluation: remoteObject({ href: "chrome://browser/content/browser.xhtml", hasZenWorkspaces: true, zenWorkspacesType: "object", workspaceCount: 0 }) }), /positive workspace count/);
   assert.match(validateBridgeLiveReadProof({ ...proof, chromeEvaluation: remoteObject({ href: "chrome://browser/content/browser.xhtml", hasZenWorkspaces: true, zenWorkspacesType: "object", workspaceCount: 3, activeWorkspaceId: "" }) }), /active workspace id/);
-});
-
-test("validates live move proof shape and protected-tab refusal", () => {
-  const proof = liveMoveProof();
-
-  assert.equal(validateBridgeLiveMoveProof(proof), null);
-  assert.match(validateBridgeLiveMoveProof({ ...proof, candidateCount: 2 }), /exactly one/);
-  assert.match(validateBridgeLiveMoveProof({ ...proof, requestedToWorkspaceId: "workspace-1" }), /same source and destination/);
-  assert.match(validateBridgeLiveMoveProof({ ...proof, protectedReasons: ["pinned"], tabPinned: true, moved: false }), /protected tab/);
-  assert.match(validateBridgeLiveMoveProof({ ...proof, protectedReasons: ["grouped"], tabGrouped: true, moved: false }), /protected tab/);
-  assert.match(validateBridgeLiveMoveProof({ ...proof, protectedReasons: ["foldered"], tabFoldered: true, moved: false }), /protected tab/);
-  assert.match(validateBridgeLiveMoveProof({ ...proof, afterWorkspaceId: "workspace-1", moved: false, moveResult: false }), /requested destination/);
-});
-
-test("live move proof script checks live grouped and foldered tab property names", async () => {
-  const source = await readFile(new URL("../src/bridge.ts", import.meta.url), "utf8");
-
-  assert.match(source, /tab\?\.groupId/);
-  assert.match(source, /tab\?\.zenLiveFolderItemId/);
 });
 
 test("validates disposable workspace operation proof", () => {
@@ -483,19 +444,6 @@ class FakeWebSocket {
   }
 }
 
-class FakeNotReadyOnSecondConnectionWebSocket extends FakeWebSocket {
-  static connectionCount = 0;
-  static scriptEvaluateCount = 0;
-
-  responseFor(request) {
-    if (request.method === "script.evaluate") FakeNotReadyOnSecondConnectionWebSocket.scriptEvaluateCount += 1;
-    if (request.method === "session.status" && this.connectionNumber === 2) {
-      return { type: "success", id: request.id, result: { ready: false, message: "not ready" } };
-    }
-    return fakeBidiResponse(request);
-  }
-}
-
 function fakeBidiResponse(request) {
   if (request.method === "session.status") {
     return { type: "success", id: request.id, result: { ready: true, message: "" } };
@@ -507,13 +455,6 @@ function fakeBidiResponse(request) {
     return { type: "success", id: request.id, result: { contexts: [{ context: "chrome-1" }] } };
   }
   if (request.method === "script.evaluate") {
-    if (String(request.params?.expression ?? "").includes("moveTabToWorkspace")) {
-      return {
-        type: "success",
-        id: request.id,
-        result: remoteObject(liveMoveProofRemoteEntries())
-      };
-    }
     return {
       type: "success",
       id: request.id,
@@ -531,48 +472,6 @@ function fakeBidiResponse(request) {
     return { type: "success", id: request.id, result: {} };
   }
   return { type: "error", id: request.id, error: "unknown command", message: request.method };
-}
-
-function liveMoveProof() {
-  return {
-    sessionId: "session-1",
-    chromeContextCount: 1,
-    chromeContext: "chrome-1",
-    requestedUrl: "https://example.test",
-    requestedFromWorkspaceId: "workspace-1",
-    requestedToWorkspaceId: "workspace-2",
-    candidateCount: 1,
-    protectedReasons: [],
-    beforeWorkspaceId: "workspace-1",
-    afterWorkspaceId: "workspace-2",
-    moved: true,
-    moveResult: true,
-    tabPinned: false,
-    tabEssential: false,
-    tabGrouped: false,
-    tabFoldered: false,
-    reason: "moved"
-  };
-}
-
-function liveMoveProofRemoteEntries() {
-  const proof = liveMoveProof();
-  return {
-    requestedUrl: proof.requestedUrl,
-    requestedFromWorkspaceId: proof.requestedFromWorkspaceId,
-    requestedToWorkspaceId: proof.requestedToWorkspaceId,
-    candidateCount: proof.candidateCount,
-    protectedReasons: proof.protectedReasons,
-    beforeWorkspaceId: proof.beforeWorkspaceId,
-    afterWorkspaceId: proof.afterWorkspaceId,
-    moved: proof.moved,
-    moveResult: proof.moveResult,
-    tabPinned: proof.tabPinned,
-    tabEssential: proof.tabEssential,
-    tabGrouped: proof.tabGrouped,
-    tabFoldered: proof.tabFoldered,
-    reason: proof.reason
-  };
 }
 
 function processArgs() {

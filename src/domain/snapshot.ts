@@ -14,6 +14,7 @@ export type EntityRef = `entity:${string}`;
 export type MovementRootRef = `entity:root:${string}`;
 export type StructuralChildRef = `entity:child:${string}`;
 export type NonEmptyReadonlyArray<T> = readonly [T, ...T[]];
+export const SNAPSHOT_IDENTITY_MAX_BYTES = 512;
 
 export type AuthoritativeControlRoute =
   | "closed_session"
@@ -79,6 +80,54 @@ export type CapabilityEvidence =
 export interface CapabilityReport {
   readonly observedAt: string;
   readonly evidence: NonEmptyReadonlyArray<CapabilityEvidence>;
+}
+
+export type MovementEligibility =
+  | {
+      readonly eligible: true;
+      readonly capability: Extract<CapabilityEvidence, { readonly status: "available" }>;
+    }
+  | {
+      readonly eligible: false;
+      readonly capability: CapabilityEvidence;
+      readonly code: "route_unavailable" | "unstable_native_identity";
+      readonly reason: string;
+    };
+
+/** Separates route-wide capability proof from one Entity's mutation identity. */
+export function movementEligibility(snapshot: Snapshot, entity: Entity): MovementEligibility {
+  const capabilityId = movementCapabilityId(entity.kind);
+  const capability = snapshot.capabilities.evidence.find((evidence) => evidence.id === capabilityId) ?? {
+    id: capabilityId,
+    status: "unknown" as const,
+    reason: `Snapshot has no ${capabilityId} capability evidence`,
+    proof: null
+  };
+  if (snapshot.authority === "persisted_observation") {
+    return {
+      eligible: false,
+      capability,
+      code: "route_unavailable",
+      reason: "Persisted Observation routes cannot authorize mutation"
+    };
+  }
+  if (capability.status !== "available") {
+    return {
+      eligible: false,
+      capability,
+      code: "route_unavailable",
+      reason: capability.reason
+    };
+  }
+  if (entity.kind === "tab" && entity.nativeId === null) {
+    return {
+      eligible: false,
+      capability,
+      code: "unstable_native_identity",
+      reason: "This tab has no proven unique stable native identity and is observation-only"
+    };
+  }
+  return { eligible: true, capability };
 }
 
 export interface ProfileRef {
@@ -434,6 +483,12 @@ function computeSnapshotRevision(snapshot: Omit<Snapshot, "revision"> | Snapshot
   return sha256Canonical({
     schemaVersion: snapshot.schemaVersion,
     profile: snapshot.profile,
+    // Adapter proof and raw source identity remain available in provenance for
+    // authority, journaling, and the exact CAS boundary. They do not define the
+    // logical browser state that a Plan targets. This lets a normal Zen save or
+    // reopen rewrite unrelated opaque bytes without invalidating an otherwise
+    // identical normalized Plan, while every planned Entity/Workspace change
+    // still revises this digest and whole-Plan preflight still fails on Drift.
     workspaces: snapshot.workspaces,
     entities: snapshot.entities.map((entity) => ({ ref: entity.ref, revision: entity.revision }))
   });
@@ -524,10 +579,12 @@ function validateCapabilities(snapshot: Snapshot): void {
 }
 
 function validateEntityGraph(snapshot: Snapshot): void {
+  assertBoundedSnapshotIdentity(snapshot.profile.id, "Snapshot Profile id");
   const workspaceIds = new Set<string>();
   const workspacePositions = new Set<number>();
   for (const workspace of snapshot.workspaces) {
     if (!workspace.id.trim()) throw new Error("Workspace id must not be empty");
+    assertBoundedSnapshotIdentity(workspace.id, "Workspace id");
     if (workspaceIds.has(workspace.id)) throw new Error(`Duplicate Workspace id: ${workspace.id}`);
     workspaceIds.add(workspace.id);
     if (!Number.isInteger(workspace.position) || workspace.position < 0 || workspacePositions.has(workspace.position)) {
@@ -549,6 +606,15 @@ function validateEntityGraph(snapshot: Snapshot): void {
     throw new Error("Entity array must be in canonical reference order");
   }
   for (const entity of snapshot.entities) {
+    assertBoundedSnapshotIdentity(entity.ref, "Entity reference");
+    assertBoundedSnapshotIdentity(entity.structuralRootRef, `Entity ${entity.ref} structural root`);
+    assertBoundedSnapshotIdentity(entity.workspaceId, `Entity ${entity.ref} Workspace id`);
+    if (entity.parentRef !== null) {
+      assertBoundedSnapshotIdentity(entity.parentRef, `Entity ${entity.ref} parent reference`);
+    }
+    for (const childRef of entity.childRefs) {
+      assertBoundedSnapshotIdentity(childRef, `Entity ${entity.ref} child reference`);
+    }
     if (!["tab", "tab_group", "zen_folder", "split_view"].includes(entity.kind)) {
       throw new Error(`Entity ${entity.ref} has an invalid kind`);
     }
@@ -577,6 +643,9 @@ function validateEntityGraph(snapshot: Snapshot): void {
       throw new Error(`Only a Zen folder may own structural children: ${entity.ref}`);
     }
     if (entity.nativeId !== null && !entity.nativeId.trim()) throw new Error(`Native id for Entity ${entity.ref} must not be empty`);
+    if (entity.nativeId !== null) {
+      assertBoundedSnapshotIdentity(entity.nativeId, `Entity ${entity.ref} native id`);
+    }
     if (entity.kind !== "tab" && entity.nativeId === null) throw new Error(`Structured Entity ${entity.ref} requires a native id`);
     if (entity.nativeId) {
       if (entityNativeIds.has(entity.nativeId)) throw new Error(`Native Entity id ${entity.nativeId} has multiple owners`);
@@ -588,6 +657,9 @@ function validateEntityGraph(snapshot: Snapshot): void {
     for (const member of entity.members) {
       if (member.contentTrust !== "browser_untrusted") throw new Error(`Entity member in ${entity.ref} lacks browser-untrusted labeling`);
       if (member.nativeId !== null && !member.nativeId.trim()) throw new Error(`Entity member in ${entity.ref} has an empty native id`);
+      if (member.nativeId !== null) {
+        assertBoundedSnapshotIdentity(member.nativeId, `Entity member in ${entity.ref} native id`);
+      }
       if (member.nativeId) {
         if (memberNativeIds.has(member.nativeId)) throw new Error(`Entity member ${member.nativeId} has multiple owners`);
         memberNativeIds.add(member.nativeId);
@@ -655,6 +727,13 @@ function entityKindForCapability(id: CapabilityId): EntityKind | null {
   return null;
 }
 
+function movementCapabilityId(kind: EntityKind): CapabilityId {
+  if (kind === "tab") return "move.tab";
+  if (kind === "tab_group") return "move.tab_group";
+  if (kind === "zen_folder") return "move.zen_folder";
+  return "move.split_view";
+}
+
 function isMovementRootRef(ref: string): ref is MovementRootRef {
   return ref.startsWith("entity:root:") && ref.length > "entity:root:".length;
 }
@@ -666,6 +745,7 @@ function isStructuralChildRef(ref: string): ref is StructuralChildRef {
 function assertArtifact(artifact: ArtifactReference, label: string): void {
   assertArtifactShape(artifact, label);
   if (!artifact.id.trim()) throw new Error(`${label} id must not be empty`);
+  assertBoundedSnapshotIdentity(artifact.id, `${label} id`);
   assertDigest(artifact.digest, `${label} digest`);
 }
 
@@ -680,6 +760,13 @@ function assertProtectionShape(protection: Protection, label: string): void {
 
 function assertArray(value: unknown, label: string): asserts value is readonly unknown[] {
   if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
+}
+
+function assertBoundedSnapshotIdentity(value: string, label: string): void {
+  if (typeof value !== "string" || !value.trim()) throw new Error(`${label} must not be empty`);
+  if (Buffer.byteLength(value, "utf8") > SNAPSHOT_IDENTITY_MAX_BYTES) {
+    throw new Error(`${label} exceeds its ${SNAPSHOT_IDENTITY_MAX_BYTES}-byte UTF-8 limit`);
+  }
 }
 
 function assertDigest(value: string, label: string): void {

@@ -1,12 +1,19 @@
-import { BackupManifest, BackupPruneReceipt, RestoreReceipt } from "./backup.js";
+import { BackupManifest, BackupPruneReceipt } from "./backup.js";
 import { ProfileContext } from "./profile.js";
-import { SessionSummary, TabSummary } from "./session.js";
+import { SessionSummary } from "./session.js";
 import { VERSION } from "./version.js";
 import { configPath } from "./paths.js";
 import { backupRootForProfile } from "./backup.js";
-import { EntityPlan, SortPlan } from "./sort.js";
-import { ApplyReceipt, ApplyVerificationReport } from "./apply.js";
-import { BridgeInspection, BridgeLiveAttachmentInspection, BridgeLiveMoveReceipt, BridgeLiveReadReceipt, BridgeProbeReceipt } from "./bridge.js";
+import { BridgeInspection, BridgeLiveAttachmentInspection, BridgeLiveReadReceipt, BridgeProbeReceipt } from "./bridge.js";
+import { terminalText as t } from "./terminal.js";
+import type { TabView, WorkspaceView } from "./views.js";
+import type { Snapshot } from "./domain/snapshot.js";
+
+export interface SnapshotObservationPresentation {
+  readonly zenRunning: boolean;
+  readonly authority: Snapshot["authority"];
+  readonly freshness: Snapshot["freshness"];
+}
 
 export interface CommandEnvelope<T> {
   version: string;
@@ -46,24 +53,25 @@ export function formatStatus(context: ProfileContext, summary: SessionSummary, b
   return [
     "Zen Tab Steward status",
     `Version: ${VERSION}`,
-    `Profile: ${context.profile.name} (${context.profile.id})`,
-    `Profile path: ${context.profile.path}`,
+    `Profile: ${t(context.profile.name)} (${t(context.profile.id)})`,
+    `Profile path: ${t(context.profile.path)}`,
     `Zen: ${context.running ? "running" : "not running"}`,
     `Session read: available (${summary.source.kind})`,
-    `Session file: ${summary.source.path}`,
+    `Session observation: persisted disk observation${context.running ? "; may be stale while Zen is running" : "; Snapshot authority is established only inside a controlled capture"}`,
+    `Session file: ${t(summary.source.path)}`,
     `Workspaces: ${summary.workspaceCount}`,
     `Tabs: ${summary.tabCount}`,
     `Pinned: ${summary.pinnedCount}`,
     `Essentials: ${summary.essentialCount}`,
     `Folders/groups: ${summary.folderGroupCount} (${summary.folderCount} folders, ${summary.groupCount} groups)`,
-    `Config: ${configPath()}`,
-    `Backups: ${backupRootForProfile(context.profile.id)}`,
-    `Safe sort apply: ${context.running ? "live backend is gated by bridge checks; offline session backend is unavailable while Zen is running" : "available through offline session backend"}`,
-    `Live bridge: ${bridge.liveBackend.status} (${bridge.liveBackend.reason})`,
-    "Safety posture: active session-file writes are refused; live moves require the bridge gate; offline writes require Zen closed and a fresh backup",
+    `Config: ${t(configPath())}`,
+    `Backups: ${t(backupRootForProfile(context.profile.id))}`,
+    `Closed-session apply: ${context.running ? "blocked while Zen is running" : "candidate only; native Profile control, primary source, unfinished state, and exact Plan are checked at apply time"}`,
+    `Live bridge: ${bridge.liveBackend.status} (${t(bridge.liveBackend.reason)})`,
+    "Safety posture: process absence never grants mutation authority; every apply is re-authorized at its mutation boundary",
     "",
     "Blockers:",
-    ...blockers.map((blocker) => `  - ${blocker}`),
+    ...(blockers.length > 0 ? blockers.map((blocker) => `  - ${t(blocker)}`) : ["  - none"]),
     "",
     "Next:",
     "  zts workspaces",
@@ -78,31 +86,31 @@ export function formatBridge(bridge: BridgeInspection, mode: "status" | "doctor"
     mode === "doctor" ? "Zen live bridge doctor" : "Zen live bridge status",
     `Live backend: ${bridge.liveBackend.status}`,
     `Apply supported: ${bridge.liveBackend.applySupported ? "yes" : "no"}`,
-    `Reason: ${bridge.liveBackend.reason}`,
-    `Profile path: ${bridge.profilePath}`,
+    `Reason: ${t(bridge.liveBackend.reason)}`,
+    `Profile path: ${t(bridge.profilePath)}`,
     `Zen: ${bridge.zenRunning ? "running" : "not running"}`,
     `Candidate transport: ${bridge.candidateTransportDetected ? "detected" : "not detected"}`,
     `Privileged transport: ${bridge.candidatePrivilegedTransportDetected ? "detected" : "not detected"}`,
     "",
     "Blockers:",
-    ...bridge.blockers.map((blocker) => `  - ${blocker}`)
+    ...bridge.blockers.map((blocker) => `  - ${t(blocker)}`)
   ];
 
   if (bridge.warnings.length > 0) {
-    lines.push("", "Warnings:", ...bridge.warnings.map((warning) => `  - ${warning}`));
+    lines.push("", "Warnings:", ...bridge.warnings.map((warning) => `  - ${t(warning)}`));
   }
 
   if (mode === "doctor") {
     lines.push(
       "",
       "Checks:",
-      ...bridge.checks.map((check) => `  - [${check.status}] ${check.label}: ${check.detail}`),
+      ...bridge.checks.map((check) => `  - [${check.status}] ${t(check.label)}: ${t(check.detail)}`),
       "",
       "Required launch evidence:",
-      ...bridge.requiredLaunchFlags.map((flag) => `  - ${flag}`),
+      ...bridge.requiredLaunchFlags.map((flag) => `  - ${t(flag)}`),
       "",
       "Candidate internal APIs:",
-      ...bridge.candidateInternalApis.map((api) => `  - ${api}`),
+      ...bridge.candidateInternalApis.map((api) => `  - ${t(api)}`),
       "",
       "Processes:"
     );
@@ -117,16 +125,16 @@ export function formatBridge(bridge: BridgeInspection, mode: "status" | "doctor"
           .join(", ") || "no bridge flags";
         lines.push(
           `  - pid ${process.pid} ${process.role}`,
-          `    profile: ${process.profilePath ?? "(none)"}`,
+          `    profile: ${t(process.profilePath ?? "(none)")}`,
           `    profile matched: ${process.profileMatched ? "yes" : "no"}`,
-          `    flags: ${flags}`
+          `    flags: ${t(flags)}`
         );
       }
     }
   }
 
   if (bridge.suggestedNextCommands.length > 0) {
-    lines.push("", "Next:", ...bridge.suggestedNextCommands.map((command) => `  ${command}`));
+    lines.push("", "Next:", ...bridge.suggestedNextCommands.map((command) => `  ${t(command)}`));
   }
 
   return lines.join("\n");
@@ -136,10 +144,10 @@ export function formatBridgeProbe(receipt: BridgeProbeReceipt, suggestedNextComm
   const lines = [
     "Zen live bridge probe",
     `Status: ${receipt.ok ? "verified disposable bridge proof" : "failed"}`,
-    `App: ${receipt.appPath}`,
-    `Disposable profile: ${receipt.profilePath}`,
+    `App: ${t(receipt.appPath)}`,
+    `Disposable profile: ${t(receipt.profilePath)}`,
     `Port: ${receipt.port}`,
-    `WebSocket: ${receipt.websocketUrl ?? "(not discovered)"}`,
+    `WebSocket: ${t(receipt.websocketUrl ?? "(not discovered)")}`,
     `Process pid: ${receipt.processPid ?? "(not started)"}`,
     `Cleaned up: ${receipt.cleanedUp ? "yes" : "no"}`,
     `Duration: ${receipt.durationMs}ms`,
@@ -150,42 +158,42 @@ export function formatBridgeProbe(receipt: BridgeProbeReceipt, suggestedNextComm
   ];
 
   if (receipt.blockers.length > 0) {
-    lines.push("", "Blockers:", ...receipt.blockers.map((blocker) => `  - ${blocker}`));
+    lines.push("", "Blockers:", ...receipt.blockers.map((blocker) => `  - ${t(blocker)}`));
   }
 
   if (receipt.warnings.length > 0) {
-    lines.push("", "Warnings:", ...receipt.warnings.map((warning) => `  - ${warning}`));
+    lines.push("", "Warnings:", ...receipt.warnings.map((warning) => `  - ${t(warning)}`));
   }
 
   if (receipt.sessionStatus !== null) {
-    lines.push("", "Session status:", `  ${JSON.stringify(receipt.sessionStatus)}`);
+    lines.push("", "Session status:", `  ${t(JSON.stringify(receipt.sessionStatus))}`);
   }
 
   if (receipt.scriptProof !== null) {
     lines.push(
       "",
       "Script proof:",
-      `  session: ${receipt.scriptProof.sessionId}`,
+      `  session: ${t(receipt.scriptProof.sessionId)}`,
       `  content contexts: ${receipt.scriptProof.contentContextCount}`,
       `  chrome contexts: ${receipt.scriptProof.chromeContextCount}`,
-      `  chrome URL: ${receipt.scriptProof.chromeUrl ?? "(unknown)"}`,
+      `  chrome URL: ${t(receipt.scriptProof.chromeUrl ?? "(unknown)")}`,
       `  gZenWorkspaces: ${receipt.scriptProof.zenWorkspacesDetected ? "detected" : "not detected"}`
     );
     if (receipt.scriptProof.workspaceOperation) {
       lines.push(
         `  temp-profile workspace operation: moved disposable tab`,
-        `  move: ${receipt.scriptProof.workspaceOperation.beforeWorkspaceId} -> ${receipt.scriptProof.workspaceOperation.afterWorkspaceId}`,
+        `  move: ${t(receipt.scriptProof.workspaceOperation.beforeWorkspaceId)} -> ${t(receipt.scriptProof.workspaceOperation.afterWorkspaceId)}`,
         `  source contains moved tab: ${receipt.scriptProof.workspaceOperation.sourceContainsTab ? "yes" : "no"}`
       );
     }
   }
 
   if (!receipt.ok && receipt.logTail.length > 0) {
-    lines.push("", "Log tail:", ...receipt.logTail.map((line) => `  ${line}`));
+    lines.push("", "Log tail:", ...receipt.logTail.map((line) => `  ${t(line)}`));
   }
 
   if (suggestedNextCommands.length > 0) {
-    lines.push("", "Next:", ...suggestedNextCommands.map((command) => `  ${command}`));
+    lines.push("", "Next:", ...suggestedNextCommands.map((command) => `  ${t(command)}`));
   }
 
   return lines.join("\n");
@@ -195,10 +203,10 @@ export function formatBridgeLiveAttachment(liveCheck: BridgeLiveAttachmentInspec
   const lines = [
     "Zen live attachment check",
     `Status: ${liveCheck.attachable ? "attachable" : "refused"}`,
-    `Profile path: ${liveCheck.profilePath}`,
+    `Profile path: ${t(liveCheck.profilePath)}`,
     `Zen: ${liveCheck.zenRunning ? "running" : "not running"}`,
-    `Server file: ${liveCheck.serverFileExists ? liveCheck.serverFilePath : `${liveCheck.serverFilePath} (missing)`}`,
-    `Endpoint: ${liveCheck.endpoint?.websocketUrl ?? "(not available)"}`,
+    `Server file: ${t(liveCheck.serverFileExists ? liveCheck.serverFilePath : `${liveCheck.serverFilePath} (missing)`)}`,
+    `Endpoint: ${t(liveCheck.endpoint?.websocketUrl ?? "(not available)")}`,
     `Candidate transport: ${liveCheck.candidateTransportDetected ? "detected" : "not detected"}`,
     `Privileged transport: ${liveCheck.candidatePrivilegedTransportDetected ? "detected" : "not detected"}`,
     `Endpoint checked: ${liveCheck.checkedEndpoint ? "yes" : "no"}`,
@@ -207,23 +215,23 @@ export function formatBridgeLiveAttachment(liveCheck: BridgeLiveAttachmentInspec
     "  This is read-only. It does not move tabs, write Zen state, or enable live sort apply.",
     "",
     "Checks:",
-    ...liveCheck.checks.map((check) => `  - [${check.status}] ${check.label}: ${check.detail}`)
+    ...liveCheck.checks.map((check) => `  - [${check.status}] ${t(check.label)}: ${t(check.detail)}`)
   ];
 
   if (liveCheck.blockers.length > 0) {
-    lines.push("", "Blockers:", ...liveCheck.blockers.map((blocker) => `  - ${blocker}`));
+    lines.push("", "Blockers:", ...liveCheck.blockers.map((blocker) => `  - ${t(blocker)}`));
   }
 
   if (liveCheck.warnings.length > 0) {
-    lines.push("", "Warnings:", ...liveCheck.warnings.map((warning) => `  - ${warning}`));
+    lines.push("", "Warnings:", ...liveCheck.warnings.map((warning) => `  - ${t(warning)}`));
   }
 
   if (liveCheck.sessionStatus !== null) {
-    lines.push("", "Session status:", `  ${JSON.stringify(liveCheck.sessionStatus)}`);
+    lines.push("", "Session status:", `  ${t(JSON.stringify(liveCheck.sessionStatus))}`);
   }
 
   if (liveCheck.suggestedNextCommands.length > 0) {
-    lines.push("", "Next:", ...liveCheck.suggestedNextCommands.map((command) => `  ${command}`));
+    lines.push("", "Next:", ...liveCheck.suggestedNextCommands.map((command) => `  ${t(command)}`));
   }
 
   return lines.join("\n");
@@ -233,8 +241,8 @@ export function formatBridgeLiveRead(receipt: BridgeLiveReadReceipt, suggestedNe
   const lines = [
     "Zen live read proof",
     `Status: ${receipt.ok ? "verified read-only live chrome proof" : "refused"}`,
-    `Profile path: ${receipt.profilePath}`,
-    `WebSocket: ${receipt.websocketUrl ?? "(not available)"}`,
+    `Profile path: ${t(receipt.profilePath)}`,
+    `WebSocket: ${t(receipt.websocketUrl ?? "(not available)")}`,
     `Duration: ${receipt.durationMs}ms`,
     "",
     "Boundary:",
@@ -243,351 +251,134 @@ export function formatBridgeLiveRead(receipt: BridgeLiveReadReceipt, suggestedNe
   ];
 
   if (receipt.blockers.length > 0) {
-    lines.push("", "Blockers:", ...receipt.blockers.map((blocker) => `  - ${blocker}`));
+    lines.push("", "Blockers:", ...receipt.blockers.map((blocker) => `  - ${t(blocker)}`));
   }
 
   if (receipt.warnings.length > 0) {
-    lines.push("", "Warnings:", ...receipt.warnings.map((warning) => `  - ${warning}`));
+    lines.push("", "Warnings:", ...receipt.warnings.map((warning) => `  - ${t(warning)}`));
   }
 
   if (receipt.sessionStatus !== null) {
-    lines.push("", "Session status:", `  ${JSON.stringify(receipt.sessionStatus)}`);
+    lines.push("", "Session status:", `  ${t(JSON.stringify(receipt.sessionStatus))}`);
   }
 
   if (receipt.readProof !== null) {
     lines.push(
       "",
       "Read proof:",
-      `  session: ${receipt.readProof.sessionId}`,
+      `  session: ${t(receipt.readProof.sessionId)}`,
       `  chrome contexts: ${receipt.readProof.chromeContextCount}`,
-      `  chrome URL: ${receipt.readProof.chromeUrl ?? "(unknown)"}`,
+      `  chrome URL: ${t(receipt.readProof.chromeUrl ?? "(unknown)")}`,
       `  gZenWorkspaces: ${receipt.readProof.zenWorkspacesDetected ? "detected" : "not detected"}`,
       `  workspace count: ${receipt.readProof.workspaceCount}`,
-      `  active workspace: ${receipt.readProof.activeWorkspaceId ?? "(unknown)"}`
+      `  active workspace: ${t(receipt.readProof.activeWorkspaceId ?? "(unknown)")}`
     );
   }
 
   if (suggestedNextCommands.length > 0) {
-    lines.push("", "Next:", ...suggestedNextCommands.map((command) => `  ${command}`));
+    lines.push("", "Next:", ...suggestedNextCommands.map((command) => `  ${t(command)}`));
   }
 
   return lines.join("\n");
 }
 
-export function formatBridgeLiveMove(receipt: BridgeLiveMoveReceipt, suggestedNextCommands: string[]): string {
-  const lines = [
-    "Zen live move proof",
-    `Status: ${receipt.ok ? "verified one-tab live move" : "refused"}`,
-    `Profile path: ${receipt.profilePath}`,
-    `WebSocket: ${receipt.websocketUrl ?? "(not available)"}`,
-    `Duration: ${receipt.durationMs}ms`,
-    "",
-    "Boundary:",
-    "  This can move one live tab only with explicit confirmation, exact URL, source workspace, and destination workspace.",
-    "  It refuses pinned, essential, grouped, foldered, ambiguous, and unmatched tabs."
-  ];
-
-  if (receipt.blockers.length > 0) {
-    lines.push("", "Blockers:", ...receipt.blockers.map((blocker) => `  - ${blocker}`));
-  }
-
-  if (receipt.warnings.length > 0) {
-    lines.push("", "Warnings:", ...receipt.warnings.map((warning) => `  - ${warning}`));
-  }
-
-  if (receipt.moveProof !== null) {
+export function formatWorkspaces(
+  views: readonly WorkspaceView[],
+  observation: SnapshotObservationPresentation
+): string {
+  const lines = ["Zen workspaces", ...formatObservation(observation), ""];
+  for (const view of views) {
+    const workspace = view.workspace;
     lines.push(
-      "",
-      "Move proof:",
-      `  session: ${receipt.moveProof.sessionId}`,
-      `  url: ${receipt.moveProof.requestedUrl}`,
-      `  move: ${receipt.moveProof.beforeWorkspaceId} -> ${receipt.moveProof.afterWorkspaceId}`,
-      `  requested: ${receipt.moveProof.requestedFromWorkspaceId} -> ${receipt.moveProof.requestedToWorkspaceId}`,
-      `  candidates: ${receipt.moveProof.candidateCount}`,
-      `  moved: ${receipt.moveProof.moved ? "yes" : "no"}`,
-      `  protected: ${receipt.moveProof.protectedReasons.length > 0 ? receipt.moveProof.protectedReasons.join(", ") : "no"}`
-    );
-  }
-
-  if (suggestedNextCommands.length > 0) {
-    lines.push("", "Next:", ...suggestedNextCommands.map((command) => `  ${command}`));
-  }
-
-  return lines.join("\n");
-}
-
-export function formatWorkspaces(summary: SessionSummary): string {
-  const lines = ["Zen workspaces", ""];
-  for (const workspace of summary.workspaces) {
-    lines.push(
-      `${workspace.name}`,
-      `  id: ${workspace.id}`,
-      `  tabs: ${workspace.tabCount}`,
-      `  pinned: ${workspace.pinnedCount}`,
-      `  essentials: ${workspace.essentialCount}`,
-      `  folders/groups: ${workspace.folderGroupCount} (${workspace.folderCount} folders, ${workspace.groupCount} groups)`,
-      `  protected: ${workspace.protectedStatus}`,
-      `  default inbox: ${workspace.defaultInbox ? "yes" : "no"}`,
-      `  sortable from: ${workspace.sortableFrom ? "yes" : "no"}`,
-      `  sortable to: ${workspace.sortableTo ? "yes" : "no"}`,
+      `${t(workspace.name)}`,
+      `  id: ${t(workspace.id)}`,
+      `  root entities: ${view.rootEntityCount}`,
+      `  tabs: ${view.tabCount}`,
+      `  pinned: ${view.pinnedCount}`,
+      `  essentials: ${view.essentialCount}`,
+      `  folders/groups/splits: ${view.folderCount}/${view.groupCount}/${view.splitViewCount}`,
+      `  default inbox: ${view.defaultInbox ? "yes" : "no"}`,
+      `  sortable from: ${view.sortableFrom
+        ? "yes"
+        : workspace.protection.source.protected
+          ? `no (${t(workspace.protection.source.reasons.join(", "))})`
+          : "no (outside configured source policy)"}`,
+      `  sortable to: ${view.sortableTo
+        ? "yes"
+        : workspace.protection.destination.protected
+          ? `no (${t(workspace.protection.destination.reasons.join(", "))})`
+          : "no (outside configured destination policy)"}`,
       ""
     );
   }
   return lines.join("\n").trimEnd();
 }
 
-export function formatTabs(tabs: TabSummary[]): string {
-  if (tabs.length === 0) return "No tabs found";
-  const lines = ["Zen tabs", ""];
+export function formatTabs(
+  tabs: readonly TabView[],
+  observation: SnapshotObservationPresentation
+): string {
+  const lines = ["Zen tabs", ...formatObservation(observation), ""];
+  if (tabs.length === 0) return [...lines, "No tabs found"].join("\n");
   for (const tab of tabs) {
     lines.push(
-      `${tab.title}`,
-      `  id: ${tab.id}`,
-      `  workspace: ${tab.workspaceName ?? "(unknown)"} (${tab.workspaceId ?? "unknown"})`,
-      `  url: ${tab.url}`,
-      `  domain: ${tab.domain || "(none)"}`,
-      `  pinned: ${tab.pinned ? "yes" : "no"}`,
-      `  essential: ${tab.essential ? "yes" : "no"}`,
-      `  grouped/foldered: ${tab.grouped || tab.foldered ? "yes" : "no"}`,
-      `  protected: ${tab.protected ? tab.protectionReasons.join(", ") : "no"}`,
+      `${t(tab.member.title)}`,
+      `  native id: ${t(tab.member.nativeId ?? "(none)")}`,
+      `  entity: ${t(tab.entityRef)} (${tab.entityKind})`,
+      `  movement root: ${t(tab.structuralRootRef)}`,
+      `  workspace: ${t(tab.workspace.name)} (${t(tab.workspace.id)})`,
+      `  url: ${t(tab.member.url)}`,
+      `  pinned: ${tab.member.pinned ? "yes" : "no"}`,
+      `  essential: ${tab.member.essential ? "yes" : "no"}`,
+      `  hidden: ${tab.member.hidden ? "yes" : "no"}`,
+      `  active: ${tab.member.active ? "yes" : "no"}`,
+      `  protected: ${tab.protection.protected ? t(tab.protection.reasons.join(", ")) : "no"}`,
       ""
     );
   }
   return lines.join("\n").trimEnd();
+}
+
+function formatObservation(observation: SnapshotObservationPresentation): string[] {
+  const authority = observation.authority === "persisted_observation"
+    ? "persisted observation"
+    : observation.authority;
+  const freshness = observation.freshness.replaceAll("_", " ");
+  return [
+    `Snapshot: ${authority} · ${freshness}`,
+    ...(observation.authority === "persisted_observation" || observation.freshness !== "current"
+      ? [`Warning: persisted observation may be stale${observation.zenRunning ? " while Zen is running" : ""}; mutation requires a fresh authoritative Snapshot.`]
+      : [])
+  ];
 }
 
 export function formatBackup(manifest: BackupManifest): string {
   return [
     "Backup created",
-    `id: ${manifest.id}`,
-    `profile: ${manifest.profilePath}`,
+    `id: ${t(manifest.id)}`,
+    `profile: ${t(manifest.profilePath)}`,
     `zen running: ${manifest.zenRunning ? "yes" : "no"}`,
     `files: ${manifest.files.length}`,
-    ...manifest.files.map((file) => `  - ${file.backup} (${file.size} bytes)`)
+    ...manifest.files.map((file) => `  - ${t(file.backup)} (${file.size} bytes)`)
   ].join("\n");
 }
 
 export function formatBackupList(manifests: BackupManifest[]): string {
   if (manifests.length === 0) return "No backups found";
-  return ["Backups", ...manifests.map((manifest) => `${manifest.id}  ${manifest.files.length} files  ${manifest.profileId}`)].join("\n");
-}
-
-export function formatRestore(receipt: RestoreReceipt): string {
-  return [
-    "Backup restored",
-    `id: ${receipt.id}`,
-    `restored backup: ${receipt.restoredBackupId}`,
-    `safety backup: ${receipt.safetyBackupId}`,
-    `profile: ${receipt.profilePath}`,
-    `files: ${receipt.files.length}`,
-    `receipt: ${receipt.receiptPath}`,
-    ...receipt.files.map((file) => `  - ${file.source} (${file.size} bytes, verified)`)
-  ].join("\n");
+  return ["Backups", ...manifests.map((manifest) => `${t(manifest.id)}  ${manifest.files.length} files  ${t(manifest.profileId)}`)].join("\n");
 }
 
 export function formatBackupPrune(receipt: BackupPruneReceipt): string {
   const lines = [
     receipt.dryRun ? "Backup prune dry run" : "Backups pruned",
-    `before: ${receipt.before}`,
+    `before: ${t(receipt.before)}`,
     `matched backups: ${receipt.prunedCount}`,
     `retained backups: ${receipt.retainedCount}`,
     `files: ${receipt.candidates.reduce((count, candidate) => count + candidate.files.length, 0)}`,
-    `receipt: ${receipt.receiptPath ?? "not written for dry run"}`
+    `receipt: ${t(receipt.receiptPath ?? "not written for dry run")}`
   ];
   for (const candidate of receipt.candidates) {
-    lines.push(`  - ${candidate.backupId} (${candidate.files.length} files)`);
+    lines.push(`  - ${t(candidate.backupId)} (${candidate.files.length} files)`);
   }
   return lines.join("\n");
-}
-
-export function formatApplyReceiptList(receipts: ApplyReceipt[]): string {
-  if (receipts.length === 0) return "No apply receipts found";
-  return [
-    "Apply receipts",
-    ...receipts.map((receipt) => {
-      const planned = receipt.plannedMoveCount ?? receipt.moves.length;
-      const succeeded = receipt.succeededMoveCount ?? receipt.moveCount;
-      return `${receipt.id}  ${receipt.backend}  ${succeeded}/${planned} moves  ${receipt.profileId}`;
-    })
-  ].join("\n");
-}
-
-export function formatApplyVerification(report: ApplyVerificationReport): string {
-  const lines = [
-    "Apply verification",
-    `receipt: ${report.receiptId}`,
-    `backend: ${report.receipt.backend}`,
-    `profile: ${report.profilePath}`,
-    `session file: ${report.sessionFile}`,
-    `status: ${report.verification.ok ? "verified" : "mismatch"}`,
-    `checked moves: ${report.verification.checkedMoves}`,
-    `mismatches: ${report.verification.mismatchCount}`
-  ];
-
-  if (report.verification.blockers.length > 0) {
-    lines.push("Blockers:", ...report.verification.blockers.map((blocker) => `  - ${blocker}`));
-  }
-
-  if (report.verification.mismatches.length > 0) {
-    lines.push("Mismatches:");
-    for (const mismatch of report.verification.mismatches) {
-      lines.push(
-        `  - ${mismatch.title}`,
-        `    tab index: ${mismatch.tabIndex}`,
-        `    expected workspace: ${mismatch.expectedWorkspaceId}`,
-        `    actual workspace: ${mismatch.actualWorkspaceId ?? "(missing)"}`,
-        `    reason: ${mismatch.reason}`,
-        `    url: ${mismatch.url}`
-      );
-    }
-  }
-
-  return lines.join("\n");
-}
-
-export function formatSortPreview(
-  plan: SortPlan,
-  applyBlockers: string[],
-  suggestedNextCommands: string[],
-  applyReceipt?: ApplyReceipt,
-  applyRequested = false
-): string {
-  const lines = [
-    `${applyRequested ? "Sort apply" : "Sort preview"}: ${plan.sourceWorkspace.name}`,
-    "",
-    `Move ${plan.moveCount} entities`,
-    `Skip ${plan.skipCount} protected or filtered`,
-    `Review ${plan.reviewCount} needs attention`,
-    `Blocked ${plan.blockedCount} unsafe`,
-    ""
-  ];
-
-  for (const destination of plan.destinationSummaries) {
-    lines.push(
-      destination.workspaceName,
-      `  ${destination.tabCount} tabs`,
-      `  ${destination.domains.slice(0, 8).join(", ") || "no domains"}`,
-      ""
-    );
-  }
-
-  if (applyRequested && plan.moveCount === 0) {
-    lines.push("No eligible moves; no changes or receipt were written");
-  } else if (applyReceipt) {
-    const planned = applyReceipt.plannedMoveCount ?? applyReceipt.moves.length;
-    const attempted = applyReceipt.attemptedMoveCount ?? applyReceipt.moveCount;
-    const succeeded = applyReceipt.succeededMoveCount ?? applyReceipt.moveCount;
-    const failed = applyReceipt.failedMoveCount ?? 0;
-    lines.push(
-      applyReceipt.verification.ok ? "Applied:" : "Apply incomplete:",
-      `  backend: ${applyReceipt.backend}`,
-      `  moves: ${succeeded}/${planned} succeeded`,
-      `  attempted: ${attempted}`,
-      `  failed: ${failed}`,
-      `  backup: ${applyReceipt.backupId ?? "not needed"}`,
-      `  receipt: ${applyReceipt.receiptPath}`
-    );
-    if (!applyReceipt.verification.ok && applyBlockers.length > 0) {
-      lines.push("Blockers:", ...applyBlockers.map((blocker) => `  - ${blocker}`));
-    }
-  } else if (applyBlockers.length > 0) {
-    lines.push(
-      "Apply refused:",
-      ...applyBlockers.map((blocker) => `  - ${blocker}`)
-    );
-  } else {
-    lines.push("Apply available with selected backend");
-  }
-
-  if (suggestedNextCommands.length > 0) {
-    lines.push(
-      "",
-      "Next:",
-      ...suggestedNextCommands.map((command) => `  ${command}`)
-    );
-  }
-
-  return lines.join("\n");
-}
-
-export function formatSortDryRun(plan: SortPlan, applyBlockers: string[], suggestedNextCommands: string[]): string {
-  const lines = [
-    `Sort dry run: ${plan.sourceWorkspace.name}`,
-    "",
-    `Move ${plan.moveCount} entities`,
-    `Skip ${plan.skipCount} protected or filtered`,
-    `Review ${plan.reviewCount} needs attention`,
-    `Blocked ${plan.blockedCount} unsafe`,
-    ""
-  ];
-
-  appendActionSection(lines, "Moves", plan.plannedActions);
-  appendActionSection(lines, "Skipped", plan.skippedActions);
-  appendActionSection(lines, "Review", plan.reviewActions);
-  appendActionSection(lines, "Blocked", plan.blockedActions);
-
-  if (applyBlockers.length > 0) {
-    lines.push(
-      "Apply refused:",
-      ...applyBlockers.map((blocker) => `  - ${blocker}`)
-    );
-  } else {
-    lines.push("Apply available with selected backend");
-  }
-
-  if (suggestedNextCommands.length > 0) {
-    lines.push(
-      "",
-      "Next:",
-      ...suggestedNextCommands.map((command) => `  ${command}`)
-    );
-  }
-
-  return lines.join("\n");
-}
-
-export function formatReview(plan: SortPlan, suggestedNextCommands: string[]): string {
-  const lines = [
-    `Sort review: ${plan.sourceWorkspace.name}`,
-    "",
-    `Review ${plan.reviewCount} needs attention`,
-    `Move ${plan.moveCount} ready`,
-    `Skip ${plan.skipCount} protected or filtered`,
-    `Blocked ${plan.blockedCount} unsafe`,
-    ""
-  ];
-
-  if (plan.reviewActions.length === 0) {
-    lines.push("No review items found");
-  } else {
-    appendActionSection(lines, "Review", plan.reviewActions);
-  }
-
-  if (suggestedNextCommands.length > 0) {
-    lines.push(
-      "",
-      "Next:",
-      ...suggestedNextCommands.map((command) => `  ${command}`)
-    );
-  }
-
-  return lines.join("\n").trimEnd();
-}
-
-function appendActionSection(lines: string[], heading: string, actions: EntityPlan[]): void {
-  if (actions.length === 0) return;
-  lines.push(`${heading}:`);
-  for (const action of actions) {
-    const destination = action.destinationWorkspaceName ? ` -> ${action.destinationWorkspaceName}` : "";
-    lines.push(
-      `  - [${action.action}] ${action.title}${destination}`,
-      `    entity: ${action.entityType}${action.childTabCount > 1 ? ` (${action.childTabCount} tabs)` : ""}`,
-      `    url: ${action.url}`,
-      ...(action.domains.length > 1 ? [`    domains: ${action.domains.join(", ")}`] : []),
-      `    reason: ${action.reason}`,
-      `    confidence: ${action.confidence}`,
-      `    explanation: ${action.explanation}`
-    );
-  }
-  lines.push("");
 }

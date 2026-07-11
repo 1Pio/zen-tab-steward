@@ -2,11 +2,11 @@
 
 Date: 2026-07-07
 
-`zts` now has two apply backends. The offline session backend mutates `zen-sessions.jsonlz4` only when Zen is closed. The live backend is implemented behind explicit attachment and tab-safety gates; it is expected to refuse on a normal running Zen process that was not launched with the required local WebDriver BiDi access.
+`zts` currently has one production Apply Transaction route: authoritative closed-session mutation while Zen is closed and the native Profile lock is held. Live attachment/read probes exist, but live mutation is intentionally not shipped until it can enter through the same Plan, Authorization, whole-Plan preflight, recovery, inverse Plan, and Receipt boundary.
 
 `zts bridge status` and `zts bridge doctor` make this boundary explicit in the CLI. They are read-only inspection commands; they do not start Zen, attach to a debugger, open sockets, write profile files, install a service, install a mod, or move tabs.
 
-`zts bridge live-check` is the stricter live-profile attachment gate. It is also read-only. It refuses unless all of the following are true:
+`zts bridge live-check` is the stricter live-profile attachment diagnostic. It is also read-only. It validates all of the following:
 
 - Zen is running for the discovered profile.
 - A browser process explicitly matches the discovered profile path.
@@ -15,9 +15,9 @@ Date: 2026-07-07
 - The profile contains `WebDriverBiDiServer.json`.
 - The server file contains a usable local-only `ws_host` and `ws_port`.
 
-Without `--connect`, a clean preflight is still not enough to report attachable, because the server file can be stale. With `--connect`, it also opens the local WebSocket and runs only WebDriver BiDi `session.status`; only that connected check can produce an attachable receipt. It does not create a BiDi session, execute chrome script, move tabs, or write profile files.
+These signals are not endpoint ownership. zts currently has no launch receipt binding the exact Zen binary, PID/start identity, Profile, endpoint, and listener confinement, so `--connect` refuses before opening the WebSocket. A local server file and matching-looking process flags cannot produce an attachable receipt.
 
-`zts bridge live-read` goes one read-only step further after the attachment gate passes. It creates a WebDriver BiDi session, queries the browser chrome context, and evaluates a read-only expression that reports:
+`zts bridge live-read` is currently disabled by that ownership gate and creates no privileged session. The implemented future managed-launch proof would query:
 
 - `location.href` for the chrome context,
 - whether `gZenWorkspaces` exists,
@@ -27,17 +27,7 @@ Without `--connect`, a clean preflight is still not enough to report attachable,
 
 It does not call any workspace mutation method, open tabs, move tabs, write profile files, or install extensions/mods/services.
 
-`zts bridge live-move-proof` is the first gated live movement proof. It requires:
-
-- `--confirm-live-move`,
-- `--url <exact-tab-url>`,
-- `--from-workspace <workspace-id>`,
-- `--to-workspace <workspace-id>`,
-- the same live attachment gate as `live-read`.
-
-The proof searches live `gBrowser.tabs` for exactly one tab whose current URI exactly matches the requested URL and whose `zen-workspace-id` exactly matches the requested source workspace. It refuses pinned, essential, grouped, foldered, ambiguous, unmatched, missing-workspace, and same-workspace moves before calling `gZenWorkspaces.moveTabToWorkspace(...)`. After the move call, it verifies the tab's `zen-workspace-id` equals the requested destination. `zts sort --apply --backend live` now reuses this proof for each planned move after the live attachment gate passes.
-
-`zts bridge probe` is a separate disposable bridge proof. It starts a headless Zen process with a temporary profile, local remote debugging flags, and `--remote-allow-system-access`, verifies WebDriver BiDi `session.status`, creates a session, executes harmless script in a content context, executes harmless script in Zen browser chrome, verifies `gZenWorkspaces` is reachable, performs one temp-profile workspace tab move through Zen internals, then terminates the process and removes the temporary profile. It does not attach to the live profile or move live tabs.
+`zts bridge probe` is a separate disposable bridge proof. It starts a headless Zen process with a temporary profile, a random loopback remote-debugging port, and `--remote-allow-system-access`, without wildcard origin or host allowlists. It verifies WebDriver BiDi `session.status`, creates a session, executes harmless script in a content context, executes harmless script in Zen browser chrome, verifies `gZenWorkspaces` is reachable, performs one temp-profile workspace tab move through Zen internals, then terminates the process and removes the temporary profile. It does not attach to the live profile or move live tabs.
 
 ## Local Evidence
 
@@ -119,9 +109,9 @@ The probe validates that the disposable tab started in the target workspace, end
 
 ## Current Blocker
 
-The live movement backend is implemented behind attachment and tab-safety gates, but it has not yet been proven against the user's current real Zen process because the running process is not attachable.
+The live movement Control Route is not implemented in production. The disposable evidence below proves useful transport and Zen-internal primitives, but it is not sufficient authority for a user-Profile mutation.
 
-Until the intended live Zen profile/window is attachable, `zts sort --apply --backend live` must continue to refuse before mutation. The project must still avoid UI automation, extension setup, Zen mod installation, daemon/autostart setup, and active session-file writes.
+`zts sort --apply --backend live` always refuses because that production Control Route is not enabled. Attachment is necessary evidence, but it is no longer treated as sufficient mutation authority. The project must still avoid UI automation, extension setup, Zen mod installation, daemon/autostart setup, and active session-file writes.
 
 `zts bridge doctor` records the current blockers:
 
@@ -131,10 +121,10 @@ Current Zen browser process has no remote debugging, debugger server, or Marione
 Current Zen browser process has no privileged remote system-access launch flag
 ```
 
-`zts bridge live-check` adds the live attachment blockers. On the current live profile that includes the missing local BiDi server file:
+`zts bridge live-check` adds the live attachment blockers. On a typical live profile that includes the missing local BiDi server file:
 
 ```text
-/Users/main/Library/Application Support/zen/Profiles/4le6r9n3.Default (release)/WebDriverBiDiServer.json does not exist.
+~/Library/Application Support/zen/Profiles/<profile-id>/WebDriverBiDiServer.json does not exist.
 ```
 
 ## Current Safe Behavior
@@ -145,7 +135,7 @@ When Zen is running:
 zts sort Space --json
 ```
 
-uses the auto-selected live backend. On the current live profile it still returns a plan and refuses apply, because the running Zen process is not attachable:
+returns a persisted-observation preview with full detail and warns that it cannot be authorized for mutation. An apply request refuses because Zen owns or may own the Profile; it never switches to an alternate live mutator:
 
 ```text
 No browser process explicitly matched the discovered profile path.
@@ -154,15 +144,13 @@ No matching candidate browser process has --remote-allow-system-access.
 WebDriverBiDiServer.json does not exist.
 ```
 
-Live apply receipts can be reverified only through the same live attachment boundary. `zts apply verify <live-receipt-id>` is read-only, inspects current live tab URL/workspace state through WebDriver BiDi, and refuses with the live-check blockers when the running Zen process is not attachable.
-
 When Zen is closed:
 
 ```bash
 zts sort Space --apply --yes --backend session --json
 ```
 
-uses the offline session backend, creates a fresh backup, mutates only planned tab workspace ids in `zen-sessions.jsonlz4`, writes an apply receipt, and verifies the recorded moves.
+enters the canonical closed-session Apply Transaction, acquires native Profile control, publishes recovery evidence, mutates only exact planned Entity roots in `zen-sessions.jsonlz4`, writes a canonical Receipt, and independently verifies the result.
 
 ## Next Safe Live-Backend Spike
 
@@ -170,6 +158,6 @@ The next live-backend spike should stay narrow until it can prove on the real pr
 
 - how to address the intended Zen window/profile,
 - how to launch or attach to the live profile with local WebDriver BiDi without services, extensions, mods, or autostart items,
-- how to move one intentionally selected low-risk live tab through `zts sort --apply --backend live --limit 1`,
-- how to verify the move from Zen state after the call and preserve the receipt,
+- how to bind the same-session authoritative Snapshot and whole-Plan preflight to the live control session,
+- how to execute, independently verify, recover, and receipt one exact Plan without a per-tab bypass,
 - how to fail closed without installing services, extensions, mods, or autostart items.
