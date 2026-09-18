@@ -1,5 +1,11 @@
 # Zen Tab Steward
 
+> [!WARNING]
+> This project is an experimental proof of concept and is not ready for use. Do not run it on your everyday Zen Browser profile.
+
+---
+
+
 Zen Tab Steward is a user-owned CLI for inspecting, backing up, planning, and carefully sorting Zen Browser tab and workspace state. The command is `zts`.
 
 The implementation is deliberately conservative. It can discover the local Zen Profile, inspect workspace/tab Protection state, create backups, turn deterministic rules or an exact caller Diff/Patch into one state-bound Plan, and exercise that Plan through a crash-recoverable closed-Zen transaction with Receipt-bound Undo. Closed-session authority comes from Zen/Gecko's native `.parentlock`, not from process absence. The macOS arm64 path now has fixture coverage for managed authoritative Diff capture, managed close/apply/reopen persistence verification, lifecycle recovery, and exact window restoration. A bounded owner-Profile managed Plan, one-tab managed Apply, persisted reopen verification, exact reverse Diff, and restored reopen have also passed. This remains active production-readiness work, not a GA claim: managed Undo CLI parity, broader compatibility, local-model Engines, privileged live mutation, release automation, and complete setup/doctor UX still need release evidence. zts does not install a service, daemon, browser extension, or autostart entry.
